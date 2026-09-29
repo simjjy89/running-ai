@@ -6,6 +6,7 @@
 | 작업 | `server/` Spring Boot backend foundation 신규 구축 |
 | 상태 | 완료 |
 | 커밋 | `feat: bootstrap RunningAI Spring Boot server` |
+| 지시서 원문 | [2026-09-29-running-ai-spring-server-bootstrap-instruction.md](2026-09-29-running-ai-spring-server-bootstrap-instruction.md) |
 
 ---
 
