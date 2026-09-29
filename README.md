@@ -250,12 +250,27 @@ GARMIN_USERNAME, GARMIN_PASSWORD        (예약, 미사용)
 INTERVALS_API_KEY                       (예약, 미사용)
 ```
 
+## Claude Code
+
+프로젝트 규칙은 root `CLAUDE.md`에, 세부 작업 규칙은 `.claude/skills/`의 project skill 3개에 있다.
+
+- `running-ai-dev` — 일반 개발 workflow (조사 → 최소 구현 → 테스트 → 회귀 → diff/secrets 검토 → 문서 → commit)
+- `running-ai-database` — Flyway / JPA / PostgreSQL / JSONB / activity·activity_raw 규칙
+- `running-ai-integration` — Garmin / Intervals.icu 등 외부 연동 규칙과 현재 구현 상태
+
+`.claude/settings.json`의 `Stop` hook이 `scripts/dev/validate-server.ps1`을 실행해 `server/`에
+commit되지 않은 변경이 있을 때 Gradle 테스트를 자동으로 돌린다 (commit / push는 하지 않는다).
+같은 스크립트를 직접 실행할 수도 있다: `powershell -File scripts/dev/validate-server.ps1 -Force`.
+
 ## Repository 구조
 
 ```text
 running-ai/
 ├─ server/              Spring Boot 백엔드
 ├─ docs/work-orders/    작업지시서 및 구현 기록
+├─ scripts/dev/         개발용 스크립트 (validate-server.ps1)
+├─ .claude/             Claude Code project skills / hooks
+├─ CLAUDE.md            Claude Code 프로젝트 규칙
 ├─ docker-compose.yml   로컬 PostgreSQL
 ├─ .env.example
 └─ README.md

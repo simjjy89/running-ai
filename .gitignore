@@ -54,3 +54,7 @@ desktop.ini
 *.db
 *.mv.db
 *.trace.db
+
+# --- Claude Code (user-local settings only; shared config is tracked) ---
+.claude/settings.local.json
+.claude/.validate-*
