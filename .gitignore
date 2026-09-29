@@ -58,3 +58,9 @@ desktop.ini
 # --- Claude Code (user-local settings only; shared config is tracked) ---
 .claude/settings.local.json
 .claude/.validate-*
+
+# --- Python (tools/garmin-connector) ---
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/

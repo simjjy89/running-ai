@@ -25,17 +25,33 @@ Follow `running-ai-dev` for the workflow and `running-ai-database` for persisten
 - Retries, locks or batch frameworks are added only when a concrete need exists; the DB
   unique constraints are the last line of defence against concurrent ingestion.
 
-## Garmin — current state (Phase 3A, offline)
+## Garmin — current state (Phase 3B-2)
 
 Implemented in `com.runningai.integration.garmin`:
 `GarminActivityMapper` (pure: `extractActivityId`, `parse`, `map`),
 `GarminActivityPayload`, `GarminActivityMappingException` (+ `Reason`/code),
 `GarminActivityIngestionService` (`ingest(JsonNode[, fetchedAt])`, `reprocess(id)`),
-`GarminIngestionResult`. Fixtures: `server/src/test/resources/fixtures/garmin/`.
+`GarminIngestionResult`; transport boundary `GarminActivitySource` (interface) →
+`HttpGarminActivitySource` (`RestClient`, `GET {base-url}/activities?limit=N`, one
+request, no retry, errors → `GarminConnectorException` + `Reason`), config
+`GarminConnectorProperties` (`running-ai.garmin.connector.base-url`, timeouts; **no
+credentials**); `GarminSyncService.syncRecent(limit)` → `GarminSyncResult(fetched,
+created, updated, skipped, failed)`. Fixtures: `server/src/test/resources/fixtures/garmin/`.
 
-**Not implemented — do not assume it exists:** Garmin authentication, session/token
-handling, any network client, real payload fetch, scheduler, incremental sync cursor,
-FIT/TCX parsing. "Garmin ingestion works" currently means fixture ingestion only.
+Python connector `tools/garmin-connector/` (`python -m garmin_connector
+login|status|serve|activities`): owns Garmin auth/MFA/token store (`~/.garminconnect`),
+binds 127.0.0.1 only, returns raw items as a JSON array, error contract
+`{code,message}` with `GARMIN_AUTH_REQUIRED|FORBIDDEN|RATE_LIMITED|UPSTREAM_ERROR|CONNECTOR_ERROR`.
+It never touches the database and never normalises. No HTTP login endpoint.
+
+**Not implemented — do not assume it exists:** incremental sync cursor, scheduler /
+`@Scheduled`, sync HTTP API (`POST /api/v1/garmin/sync`), connector process
+supervision, FIT/TCX/details/splits collection, Intervals.icu. A live Garmin probe has
+not been run yet (contract is CONFIRMED_SOURCE only).
+
+Invariants: **Python knows no DB. Spring knows no Garmin password/token. Mapper knows
+no network.** Connector-level failures (401/403/429/502/unreachable) abort a sync;
+per-activity failures (unsupported type → skipped, malformed → failed) do not.
 
 ### Pipeline (must stay this shape)
 

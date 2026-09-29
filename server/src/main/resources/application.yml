@@ -25,6 +25,12 @@ running-ai:
   default-athlete:
     name: ${RUNNING_AI_ATHLETE_NAME:default}
     timezone: ${RUNNING_AI_ATHLETE_TIMEZONE:Asia/Seoul}
+  garmin:
+    connector:
+      # Localhost Python connector (tools/garmin-connector). Holds no Garmin credentials.
+      base-url: ${GARMIN_CONNECTOR_URL:http://127.0.0.1:8765}
+      connect-timeout: 2s
+      read-timeout: 30s
 
 management:
   endpoints:

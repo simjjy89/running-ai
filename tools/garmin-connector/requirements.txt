@@ -1,0 +1,5 @@
+# Runtime dependencies for the RunningAI Garmin connector (Python >= 3.12).
+# garminconnect < 0.3.5 is forbidden (CVE-2026-54447, world-readable token file).
+garminconnect==0.3.16
+fastapi==0.141.1
+uvicorn==0.54.0

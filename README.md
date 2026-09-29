@@ -49,12 +49,14 @@ RunningAI는 Windows PC에서 PowerShell / Node.js / 파일 기반으로 동작�
   `DUPLICATE_ACTIVITY`, `DATA_CONFLICT`, `INTERNAL_SERVER_ERROR`)
 - `externalSource + externalId` 중복 방지 (service 검사 + DB unique constraint)
 - Health endpoint `GET /api/v1/health`, Spring Actuator `/actuator/health`
-- Garmin ingestion core (offline, fixture 기반): raw 저장 → mapping → Activity upsert → reprocess
-- 통합 테스트 (H2 + Flyway, 외부 서비스 불필요)
+- Garmin ingestion core: raw 저장 → mapping → Activity upsert → reprocess
+- Garmin connector(`tools/garmin-connector`, Python): 대화형 login / status / localhost HTTP `GET /activities`
+- Spring `GarminActivitySource`(HTTP) + `GarminSyncService`: 최근 N개 fetch → ingestion, 결과 집계
+- 통합 테스트 (H2 + Flyway, 외부 서비스 불필요; connector는 mock)
 
 ### 미구현 (예정)
 
-Garmin 로그인 / 인증 / 네트워크 client / 실제 데이터 fetch, Intervals.icu API 호출, 훈련 자동 생성, Garmin structured
+Garmin 자동 sync(scheduler / cursor / sync API), Intervals.icu API 호출, 훈련 자동 생성, Garmin structured
 workout 전송, 주간 / 월간 리포트, scheduler, AI / LLM 분석, 알림.
 이 중 일부는 기존 PowerShell / Node.js 구현이 메인 RunningAI PC에 존재하지만,
 아직 이 repository에는 **포함되어 있지 않다**.
@@ -119,8 +121,28 @@ metric이 필요할 때 재수집 없이 재처리할 수 있다. 외부 activit
 
 ## Garmin ingestion
 
-Garmin activity ingestion은 현재 **offline, fixture 기반 pipeline**으로만 구현되어 있다.
-실제 Garmin 인증 / 네트워크 연동은 아직 구현되지 않았다.
+Garmin 데이터는 별도 Python connector(`tools/garmin-connector/`)가 읽고, Spring 서버는 localhost HTTP로
+raw JSON만 받아 기존 ingestion core로 처리한다. Spring은 Garmin credential / token을 알지 못한다.
+
+```text
+Garmin Connect
+      │  python-garminconnect==0.3.16 (인증 · MFA · token은 connector 호스트의 ~/.garminconnect)
+      ▼
+Python Garmin Connector        GET /health, GET /activities?limit=N  (127.0.0.1:8765, raw 그대로)
+      │  localhost HTTP
+      ▼
+Spring Boot  GarminActivitySource → GarminSyncService → GarminActivityIngestionService
+      │
+      ├──► activity_raw (JSONB, 원본)
+      └──► activity     (정규화)
+```
+
+`GarminSyncService.syncRecent(limit)`는 최근 N개를 받아 활동별로 ingest하고
+`fetched / created / updated / skipped(미지원 type, raw는 보존) / failed(malformed)`를 집계한다.
+connector 오류(401 / 403 / 429 / 502 / 연결 불가)는 sync를 즉시 중단시키며 자동 재시도하지 않는다.
+**아직 없는 것**: incremental sync cursor, scheduler(`@Scheduled`), sync HTTP API, connector 프로세스 감독 — Phase 3C.
+
+Ingestion core 자체(활동 1건 기준):
 
 ```text
 Garmin raw JSON (JsonNode)
@@ -150,9 +172,8 @@ ActivityRawService.linkToActivity    → activity_raw.activity_id ─ transactio
   Phase 3B-2): `duration` **seconds** → `durationSeconds`(반올림), `distance` metres, `startTimeGMT`
   `"yyyy-MM-dd HH:mm:ss"`(UTC, zone 표기 없음) → UTC `Instant`, `activityType.typeKey`
   (`running`, `treadmill_running`, `indoor_cycling`, `virtual_ride` …).
-- Garmin 접근 전략(ADR): Spring은 Garmin credential을 모르고, 별도 Python connector
-  (`python-garminconnect`)가 인증·token·읽기 transport를 담당한다.
-  `docs/work-orders/2026-09-29-garmin-live-contract-investigation.md` 참고.
+- Garmin 접근 전략(ADR)과 contract 근거: `docs/work-orders/2026-09-29-garmin-live-contract-investigation.md`.
+  connector 사용법: `tools/garmin-connector/README.md`.
 - HTTP API로 노출하지 않는다. 서비스 + 테스트로만 검증한다.
 - 사용자용 `POST /api/v1/activities`는 그대로 create 의미(중복 시 409)를 유지한다.
 
@@ -272,6 +293,7 @@ commit되지 않은 변경이 있을 때 Gradle 테스트를 자동으로 돌린
 ```text
 running-ai/
 ├─ server/              Spring Boot 백엔드
+├─ tools/garmin-connector/  Python Garmin connector (auth · token · read transport)
 ├─ docs/work-orders/    작업지시서 및 구현 기록
 ├─ scripts/dev/         개발용 스크립트 (validate-server.ps1)
 ├─ .claude/             Claude Code project skills / hooks

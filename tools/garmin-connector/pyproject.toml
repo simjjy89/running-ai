@@ -1,0 +1,10 @@
+[project]
+name = "garmin-connector"
+version = "0.1.0"
+description = "RunningAI Garmin connector: Garmin auth, token store and read-only transport for the Spring server"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
