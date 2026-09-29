@@ -13,10 +13,11 @@ import org.junit.jupiter.params.provider.CsvSource;
 import java.time.Instant;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Pure unit tests: no Spring context, no database, no network.
+ * Fixtures follow the Garmin Connect activity-list contract (seconds, metres,
+ * startTimeGMT without zone designator) documented in the Phase 3B-1 work order.
  */
 class GarminActivityMapperTest {
 
@@ -29,6 +30,11 @@ class GarminActivityMapperTest {
             return e;
         }
         throw new AssertionError("expected GarminActivityMappingException");
+    }
+
+    private static String garminItem(String extraFields) {
+        return "{\"activityId\": 1, \"activityType\": {\"typeKey\": \"running\"}, "
+                + "\"startTimeGMT\": \"2026-09-28 21:30:00\", \"duration\": 1000.0" + extraFields + "}";
     }
 
     @Test
@@ -52,7 +58,7 @@ class GarminActivityMapperTest {
         assertThat(activity.externalId()).isEqualTo("188090001");
         assertThat(activity.activityType()).isEqualTo(ActivityType.TREADMILL_RUN);
         assertThat(activity.startedAt()).isEqualTo(Instant.parse("2026-09-27T10:05:30Z"));
-        assertThat(activity.durationSeconds()).isEqualTo(2401);   // 2400500 ms rounds to 2401 s
+        assertThat(activity.durationSeconds()).isEqualTo(2401);   // 2400.5 s rounds to 2401 s
         assertThat(activity.distanceMeters()).isEqualTo(8000.0);
         assertThat(activity.averageHeartRate()).isEqualTo(162);
         assertThat(activity.maxHeartRate()).isEqualTo(178);
@@ -137,6 +143,17 @@ class GarminActivityMapperTest {
     }
 
     @Test
+    void startTimeLocalAloneIsNotEnough() {
+        // Garmin's startTimeLocal carries no zone; without startTimeGMT the instant is unknown.
+        GarminActivityMappingException e = mappingFailure(() -> mapper.map(GarminFixtures.json("""
+                {"activityId": 1, "activityType": {"typeKey": "running"}, "startTimeLocal": "2026-09-29 06:30:00",
+                 "duration": 1000.0}
+                """)));
+
+        assertThat(e.getReason()).isEqualTo(Reason.START_TIME_MISSING);
+    }
+
+    @Test
     void missingActivityTypeFails() {
         ObjectNode payload = (ObjectNode) GarminFixtures.load(GarminFixtures.RUNNING);
         payload.remove("activityType");
@@ -155,64 +172,73 @@ class GarminActivityMapperTest {
     @Test
     void invalidStartTimeFails() {
         ObjectNode payload = (ObjectNode) GarminFixtures.load(GarminFixtures.RUNNING);
-        payload.put("startTime", "yesterday morning");
+        payload.put("startTimeGMT", "yesterday morning");
 
         assertThat(mappingFailure(() -> mapper.map(payload)).getReason()).isEqualTo(Reason.START_TIME_INVALID);
     }
 
     @Test
-    void startTimeWithOffsetIsConvertedToUtcInstant() {
+    void garminStartTimeGmtWithoutZoneDesignatorIsUtc() {
+        assertThat(mapper.map(GarminFixtures.json(garminItem(""))).startedAt())
+                .isEqualTo(Instant.parse("2026-09-28T21:30:00Z"));
+    }
+
+    @Test
+    void startTimeGmtWinsOverLocalTimeAndOtherForms() {
+        NormalizedActivity activity = mapper.map(GarminFixtures.json("""
+                {"activityId": 1, "activityType": {"typeKey": "running"},
+                 "startTimeGMT": "2026-09-28 21:30:00", "startTimeLocal": "2026-09-29 06:30:00",
+                 "startTime": "2000-01-01T00:00:00Z", "timeZoneId": "UTC", "duration": 1000.0}
+                """));
+
+        assertThat(activity.startedAt()).isEqualTo(Instant.parse("2026-09-28T21:30:00Z"));
+    }
+
+    @Test
+    void isoOffsetStartTimeIsAcceptedAsFallback() {
         assertThat(mapper.map(GarminFixtures.json("""
                 {"activityId": 1, "activityType": "running", "startTime": "2026-09-29T06:30:00+09:00", "duration": 1000}
                 """)).startedAt()).isEqualTo(Instant.parse("2026-09-28T21:30:00Z"));
     }
 
     @Test
-    void startTimeGmtWithoutOffsetIsInterpretedAsUtc() {
-        assertThat(mapper.map(GarminFixtures.json("""
-                {"activityId": 1, "activityType": "running", "startTimeGMT": "2026-09-28 21:30:00", "duration": 1000}
-                """)).startedAt()).isEqualTo(Instant.parse("2026-09-28T21:30:00Z"));
-    }
-
-    @Test
-    void localStartTimeWithTimeZoneIdIsConvertedToUtc() {
+    void localStartTimeWithTimeZoneIdIsAcceptedAsFallback() {
         assertThat(mapper.map(GarminFixtures.json("""
                 {"activityId": 1, "activityType": "running", "startTimeLocal": "2026-09-29 06:30:00",
                  "timeZoneId": "Asia/Seoul", "duration": 1000}
                 """)).startedAt()).isEqualTo(Instant.parse("2026-09-28T21:30:00Z"));
     }
 
-    @Test
-    void offsetStartTimeWinsOverLocalFallbacks() {
-        assertThat(mapper.map(GarminFixtures.json("""
-                {"activityId": 1, "activityType": "running", "startTime": "2026-09-29T06:30:00+09:00",
-                 "startTimeGMT": "2000-01-01 00:00:00", "startTimeLocal": "2000-01-01 00:00:00",
-                 "timeZoneId": "UTC", "duration": 1000}
-                """)).startedAt()).isEqualTo(Instant.parse("2026-09-28T21:30:00Z"));
-    }
-
     @ParameterizedTest
     @CsvSource({
-            "3600000, 3600",
-            "3612000, 3612",
-            "2400500, 2401",
-            "2400499, 2400",
+            "3600.0, 3600",
+            "3612.0, 3612",
+            "2400.5, 2401",
+            "2400.4, 2400",
+            "3600, 3600",
             "0, 0"
     })
-    void durationMillisecondsAreConvertedToWholeSeconds(long millis, int expectedSeconds) {
+    void durationIsGarminSecondsRoundedToWholeSeconds(String duration, int expectedSeconds) {
         NormalizedActivity activity = mapper.map(GarminFixtures.json(
-                "{\"activityId\": 1, \"activityType\": \"running\", \"startTime\": \"2026-09-29T06:30:00+09:00\", \"duration\": "
-                        + millis + "}"));
+                "{\"activityId\": 1, \"activityType\": {\"typeKey\": \"running\"}, "
+                        + "\"startTimeGMT\": \"2026-09-28 21:30:00\", \"duration\": " + duration + "}"));
 
         assertThat(activity.durationSeconds()).isEqualTo(expectedSeconds);
     }
 
     @Test
+    void distanceIsMetresAndHeartRatesAreRoundedBpm() {
+        NormalizedActivity activity = mapper.map(GarminFixtures.json(garminItem(
+                ", \"distance\": 10023.45, \"averageHR\": 154.6, \"maxHR\": 172.0")));
+
+        assertThat(activity.distanceMeters()).isEqualTo(10023.45);
+        assertThat(activity.averageHeartRate()).isEqualTo(155);
+        assertThat(activity.maxHeartRate()).isEqualTo(172);
+    }
+
+    @Test
     void absentOptionalMetricsBecomeNullNotZero() {
-        NormalizedActivity activity = mapper.map(GarminFixtures.json("""
-                {"activityId": 1, "activityType": "running", "startTime": "2026-09-29T06:30:00+09:00", "duration": 1000,
-                 "averageHR": null}
-                """));
+        NormalizedActivity activity = mapper.map(GarminFixtures.json(garminItem(", \"averageHR\": null")));
 
         assertThat(activity.distanceMeters()).isNull();
         assertThat(activity.averageHeartRate()).isNull();
@@ -221,9 +247,7 @@ class GarminActivityMapperTest {
 
     @Test
     void negativeMetricFails() {
-        assertThat(mappingFailure(() -> mapper.map(GarminFixtures.json("""
-                {"activityId": 1, "activityType": "running", "startTime": "2026-09-29T06:30:00+09:00", "duration": 1000,
-                 "distance": -5}
-                """))).getReason()).isEqualTo(Reason.INVALID_VALUE);
+        assertThat(mappingFailure(() -> mapper.map(GarminFixtures.json(garminItem(", \"distance\": -5"))))
+                .getReason()).isEqualTo(Reason.INVALID_VALUE);
     }
 }

@@ -60,10 +60,26 @@ boundaries live in the called services (different beans, so proxies apply). Keep
   re-download.
 - **Unsupported activity type** → `UNSUPPORTED_GARMIN_ACTIVITY_TYPE` exception, raw kept.
   Never default to `RUN`. Skip/aggregate policies belong to a future batch/scheduler layer.
-- **Synthetic contract warning**: the fixture shape (`duration` in **milliseconds**,
-  `startTime` ISO-8601 with offset, `activityType.typeKey`, `distance` metres,
-  `averageHR`/`maxHR`) is not confirmed Garmin API. When real payloads arrive, adjust the
-  mapper (single place) and reprocess; update fixtures and this section.
+- **Contract (Phase 3B-1, CONFIRMED_SOURCE, not yet live-verified)**: fixtures and the
+  mapper follow one item of Garmin Connect's activity list
+  (`/activitylist-service/activities/search/activities`, python-garminconnect
+  `get_activities()`): `activityId` int, `activityType{typeId,typeKey,parentTypeId}`,
+  `startTimeGMT` `"yyyy-MM-dd HH:mm:ss"` UTC **without** zone designator (primary),
+  `startTimeLocal` (no zone, never sufficient alone), `duration` **seconds** (float),
+  `distance` metres, `averageHR`/`maxHR` bpm. Real type keys: `running`,
+  `treadmill_running`, `indoor_cycling`, `virtual_ride`, `indoor_running`,
+  `trail_running`, `track_running`. The response may be a bare list or
+  `{"activityList": [...]}`. Full evidence and confidence per field:
+  `docs/work-orders/2026-09-29-garmin-live-contract-investigation.md`. Confirm against
+  a live payload in Phase 3B-2 before treating anything as CONFIRMED_LIVE.
+- **Access strategy (ADR in the same work order)**: Option B — a separate Python
+  connector process using `python-garminconnect` (pinned, ≥ 0.3.5 for
+  CVE-2026-54447; studied 0.3.16) owns Garmin auth, tokens (`~/.garminconnect`, outside
+  the repo) and read transport; Spring never sees Garmin credentials. `garth` is
+  deprecated (2026-03) — do not add it. The official Developer Program is
+  business-only and is the long-term migration path, not an option now. Never write
+  SSO/Cloudflare/TLS-fingerprint bypass code in this repo; on 401/403/429 stop, do not
+  loop.
 
 ## Intervals.icu — current state
 

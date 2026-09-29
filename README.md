@@ -146,8 +146,13 @@ ActivityRawService.linkToActivity    → activity_raw.activity_id ─ transactio
   mapping과 upsert를 다시 수행한다. Garmin에 재접속하지 않는다.
 - 지원 activity type: `running` 계열 → `RUN`, `treadmill_running` 계열 → `TREADMILL_RUN`,
   `indoor_cycling` 계열 → `INDOOR_CYCLING`. 그 외는 실패 (임의로 RUN에 매핑하지 않음).
-- 입력 단위(fixture 기준): `duration` milliseconds → `durationSeconds`, `distance` metres,
-  `startTime` ISO-8601 offset 포함 → UTC `Instant`. 실제 Garmin payload 형태는 Phase 3B에서 확인한다.
+- 입력 contract는 Garmin Connect activity list 항목 형태다 (2026-09-29 현행 client 소스로 확인, live 검증은
+  Phase 3B-2): `duration` **seconds** → `durationSeconds`(반올림), `distance` metres, `startTimeGMT`
+  `"yyyy-MM-dd HH:mm:ss"`(UTC, zone 표기 없음) → UTC `Instant`, `activityType.typeKey`
+  (`running`, `treadmill_running`, `indoor_cycling`, `virtual_ride` …).
+- Garmin 접근 전략(ADR): Spring은 Garmin credential을 모르고, 별도 Python connector
+  (`python-garminconnect`)가 인증·token·읽기 transport를 담당한다.
+  `docs/work-orders/2026-09-29-garmin-live-contract-investigation.md` 참고.
 - HTTP API로 노출하지 않는다. 서비스 + 테스트로만 검증한다.
 - 사용자용 `POST /api/v1/activities`는 그대로 create 의미(중복 시 409)를 유지한다.
 

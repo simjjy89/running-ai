@@ -19,27 +19,37 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * Pure transformation from a Garmin activity JSON payload to RunningAI's
+ * Pure transformation from a Garmin Connect activity-list item to RunningAI's
  * {@link NormalizedActivity}. No database access.
  * <p>
- * Payload contract (fixture-based until Phase 3B confirms the live shape):
+ * Contract of one item returned by Garmin Connect's
+ * {@code /activitylist-service/activities/search/activities} (what
+ * python-garminconnect {@code get_activities()} returns), confirmed from current
+ * library sources on 2026-09-29 (see
+ * {@code docs/work-orders/2026-09-29-garmin-live-contract-investigation.md}):
  * <pre>
- *   activityId      number|string   required, becomes Activity.externalId
- *   activityName    string          optional
- *   activityType    {typeKey} | string   required; see {@link #ACTIVITY_TYPES}
- *   startTime       ISO-8601 with offset (preferred)
- *   startTimeGMT    "yyyy-MM-dd HH:mm:ss" or ISO, interpreted as UTC (fallback)
- *   startTimeLocal  "yyyy-MM-dd HH:mm:ss" + timeZoneId (fallback)
- *   duration        MILLISECONDS, required  -> durationSeconds (rounded)
- *   distance        metres, optional
- *   averageHR       bpm, optional
- *   maxHR           bpm, optional
+ *   activityId      integer                     required -> Activity.externalId
+ *   activityName    string|null                 optional
+ *   activityType    {typeId, typeKey, parentTypeId, ...}   required; see {@link #ACTIVITY_TYPES}
+ *   startTimeGMT    "yyyy-MM-dd HH:mm:ss"       UTC without zone designator (primary)
+ *   startTimeLocal  "yyyy-MM-dd HH:mm:ss"       local wall time, no zone
+ *   duration        number, SECONDS (float)     required -> durationSeconds (rounded)
+ *   distance        number, metres              optional
+ *   averageHR       number, bpm                 optional
+ *   maxHR           number, bpm                 optional
  * </pre>
+ * Additional, non-Garmin fallbacks are accepted for other sources of the same
+ * shape: an ISO-8601 {@code startTime} with offset, and
+ * {@code startTimeLocal} + an IANA {@code timeZoneId}.
  */
 @Component
 public class GarminActivityMapper {
 
-    /** Garmin type keys (lower-cased) that RunningAI understands. */
+    /**
+     * Garmin type keys (lower-cased) that RunningAI understands. {@code running},
+     * {@code treadmill_running}, {@code indoor_cycling} and {@code virtual_ride} are
+     * Garmin Connect keys; the remaining entries are aliases kept for tolerance.
+     */
     static final Map<String, ActivityType> ACTIVITY_TYPES = Map.ofEntries(
             Map.entry("running", ActivityType.RUN),
             Map.entry("run", ActivityType.RUN),
@@ -128,13 +138,17 @@ public class GarminActivityMapper {
         return typeNode.asText();
     }
 
+    /**
+     * Garmin's {@code startTimeGMT} is UTC without a zone designator and is the
+     * primary source. The remaining forms are fallbacks for non-Garmin producers.
+     */
     private Instant readStartTime(JsonNode payload, String activityId) {
         try {
-            if (payload.hasNonNull("startTime")) {
-                return OffsetDateTime.parse(payload.get("startTime").asText()).toInstant();
-            }
             if (payload.hasNonNull("startTimeGMT")) {
                 return parseUtc(payload.get("startTimeGMT").asText());
+            }
+            if (payload.hasNonNull("startTime")) {
+                return OffsetDateTime.parse(payload.get("startTime").asText()).toInstant();
             }
             if (payload.hasNonNull("startTimeLocal") && payload.hasNonNull("timeZoneId")) {
                 LocalDateTime local = parseLocal(payload.get("startTimeLocal").asText());
@@ -145,7 +159,7 @@ public class GarminActivityMapper {
                     "start time could not be parsed: " + e.getMessage());
         }
         throw new GarminActivityMappingException(Reason.START_TIME_MISSING, activityId,
-                "no startTime, startTimeGMT or startTimeLocal+timeZoneId");
+                "no startTimeGMT, startTime or startTimeLocal+timeZoneId");
     }
 
     private static Instant parseUtc(String text) {
@@ -164,17 +178,17 @@ public class GarminActivityMapper {
         }
     }
 
-    /** Garmin fixture duration is in milliseconds; RunningAI keeps whole seconds. */
+    /** Garmin's {@code duration} is in seconds (float); RunningAI keeps whole seconds. */
     private long readDurationSeconds(JsonNode payload, String activityId) {
         JsonNode node = payload.get("duration");
         if (node == null || node.isNull() || !node.isNumber()) {
-            throw new GarminActivityMappingException(Reason.DURATION_MISSING, activityId, "duration (ms) is missing");
+            throw new GarminActivityMappingException(Reason.DURATION_MISSING, activityId, "duration (seconds) is missing");
         }
-        double millis = node.asDouble();
-        if (millis < 0) {
+        double seconds = node.asDouble();
+        if (seconds < 0) {
             throw new GarminActivityMappingException(Reason.INVALID_VALUE, activityId, "duration must be >= 0");
         }
-        return Math.round(millis / 1000.0);
+        return Math.round(seconds);
     }
 
     private Double readDouble(JsonNode payload, String field, String activityId) {

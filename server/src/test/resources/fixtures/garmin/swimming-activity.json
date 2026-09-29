@@ -1,11 +1,15 @@
 {
   "activityId": 188090003,
   "activityName": "Pool Swim",
-  "activityType": { "typeId": 26, "typeKey": "lap_swimming", "parentTypeId": 26 },
-  "startTime": "2026-09-26T07:00:00+09:00",
-  "duration": 1800000,
+  "description": null,
+  "startTimeLocal": "2026-09-26 07:00:00",
+  "startTimeGMT": "2026-09-25 22:00:00",
+  "activityType": { "typeId": 26, "typeKey": "lap_swimming", "parentTypeId": 26, "isHidden": false },
   "distance": 1500.0,
-  "averageHR": 130,
-  "maxHR": 150,
+  "duration": 1800.0,
+  "averageHR": 130.0,
+  "maxHR": 150.0,
+  "hasPolyline": false,
+  "privacy": { "typeId": 2, "typeKey": "private" },
   "_fixture": "unsupported activity type: must be stored as raw but never mapped to an Activity"
 }

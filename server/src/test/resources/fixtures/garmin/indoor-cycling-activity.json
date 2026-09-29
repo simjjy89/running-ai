@@ -1,12 +1,19 @@
 {
   "activityId": 188090002,
   "activityName": "Indoor Ride",
-  "activityType": { "typeId": 25, "typeKey": "indoor_cycling", "parentTypeId": 2 },
-  "startTime": "2026-09-28T21:00:00+09:00",
-  "duration": 3000000,
+  "description": null,
+  "startTimeLocal": "2026-09-28 21:00:00",
+  "startTimeGMT": "2026-09-28 12:00:00",
+  "activityType": { "typeId": 25, "typeKey": "indoor_cycling", "parentTypeId": 2, "isHidden": false },
   "distance": 25000.0,
-  "averageHR": 140,
-  "averagePower": 185,
-  "calories": 610,
-  "_fixture": "synthetic RunningAI test payload; no maxHR on purpose (nullable), duration in milliseconds"
+  "duration": 3000.0,
+  "elapsedDuration": 3000.0,
+  "movingDuration": null,
+  "averageSpeed": 8.333,
+  "calories": 610.0,
+  "averageHR": 140.0,
+  "avgPower": 185.0,
+  "hasPolyline": false,
+  "privacy": { "typeId": 2, "typeKey": "private" },
+  "_fixture": "synthetic Garmin activity-list item: no maxHR on purpose (nullable), stationary so movingDuration is null"
 }

@@ -98,7 +98,9 @@ class GarminActivityIngestionServiceTest {
         assertThat(raw.getId()).isEqualTo(result.activityRawId());
         assertThat(raw.getFetchedAt()).isEqualTo(FIRST_FETCH);
         assertThat(raw.getPayload().get("activityName").asText()).isEqualTo("Morning Run");
-        assertThat(raw.getPayload().get("laps")).hasSize(2);   // full payload kept, not just mapped fields
+        // full payload kept, not just the mapped fields
+        assertThat(raw.getPayload().get("calories").asDouble()).isEqualTo(720.0);
+        assertThat(raw.getPayload().at("/privacy/typeKey").asText()).isEqualTo("private");
         assertThat(linkedActivityId("188081596")).isEqualTo(activity.getId());
     }
 
@@ -158,7 +160,8 @@ class GarminActivityIngestionServiceTest {
         assertThat(rawAfter.getCreatedAt()).isEqualTo(rawBefore.getCreatedAt());
         assertThat(rawAfter.getFetchedAt()).isEqualTo(SECOND_FETCH);
         assertThat(rawAfter.getPayload().get("activityName").asText()).isEqualTo("Morning Run (corrected)");
-        assertThat(rawAfter.getPayload().get("laps")).hasSize(3);
+        assertThat(rawAfter.getPayload().get("calories").asDouble()).isEqualTo(725.0);
+        assertThat(rawAfter.getPayload().get("description").asText()).contains("recomputed");
         assertThat(linkedActivityId("188081596")).isEqualTo(after.getId());
     }
 

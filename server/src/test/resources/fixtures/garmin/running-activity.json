@@ -1,22 +1,23 @@
 {
   "activityId": 188081596,
   "activityName": "Morning Run",
-  "activityType": { "typeId": 1, "typeKey": "running", "parentTypeId": 17 },
-  "startTime": "2026-09-29T06:30:00+09:00",
+  "description": null,
   "startTimeLocal": "2026-09-29 06:30:00",
-  "timeZoneId": "Asia/Seoul",
-  "duration": 3600000,
-  "elapsedDuration": 3650000,
+  "startTimeGMT": "2026-09-28 21:30:00",
+  "activityType": { "typeId": 1, "typeKey": "running", "parentTypeId": 17, "isHidden": false },
   "distance": 10000.0,
-  "averageHR": 155,
-  "maxHR": 172,
-  "averageSpeed": 2.777,
-  "calories": 720,
+  "duration": 3600.0,
+  "elapsedDuration": 3650.0,
+  "movingDuration": 3590.0,
   "elevationGain": 85.0,
   "elevationLoss": 82.0,
-  "laps": [
-    { "lapIndex": 1, "distance": 1000.0, "duration": 312000 },
-    { "lapIndex": 2, "distance": 1000.0, "duration": 309000 }
-  ],
-  "_fixture": "synthetic RunningAI test payload; duration/lap durations in milliseconds, distance in metres, no GPS"
+  "averageSpeed": 2.777,
+  "maxSpeed": 3.4,
+  "calories": 720.0,
+  "averageHR": 155.0,
+  "maxHR": 172.0,
+  "averageRunningCadenceInStepsPerMinute": 172.0,
+  "hasPolyline": false,
+  "privacy": { "typeId": 2, "typeKey": "private" },
+  "_fixture": "synthetic RunningAI test payload shaped like one Garmin Connect activity-list item: duration in seconds, distance in metres, startTimeGMT = UTC without zone designator, no GPS, no real ids"
 }

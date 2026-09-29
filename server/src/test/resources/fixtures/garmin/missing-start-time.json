@@ -1,8 +1,8 @@
 {
   "activityId": 188090004,
   "activityName": "Broken Run",
-  "activityType": { "typeId": 1, "typeKey": "running" },
-  "duration": 1500000,
+  "activityType": { "typeId": 1, "typeKey": "running", "parentTypeId": 17 },
   "distance": 4000.0,
-  "_fixture": "required start time absent: raw must be preserved, mapping must fail"
+  "duration": 1500.0,
+  "_fixture": "required start time absent (no startTimeGMT): raw must be preserved, mapping must fail"
 }

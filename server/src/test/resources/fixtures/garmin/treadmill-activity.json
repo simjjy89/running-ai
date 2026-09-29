@@ -1,12 +1,19 @@
 {
   "activityId": 188090001,
   "activityName": "Treadmill Tempo",
-  "activityType": { "typeId": 18, "typeKey": "treadmill_running", "parentTypeId": 1 },
-  "startTime": "2026-09-27T19:05:30+09:00",
-  "duration": 2400500,
+  "description": null,
+  "startTimeLocal": "2026-09-27 19:05:30",
+  "startTimeGMT": "2026-09-27 10:05:30",
+  "activityType": { "typeId": 18, "typeKey": "treadmill_running", "parentTypeId": 1, "isHidden": false },
   "distance": 8000.0,
-  "averageHR": 162,
-  "maxHR": 178,
-  "calories": 560,
-  "_fixture": "synthetic RunningAI test payload; duration in milliseconds, distance in metres"
+  "duration": 2400.5,
+  "elapsedDuration": 2410.0,
+  "movingDuration": 2400.0,
+  "averageSpeed": 3.333,
+  "calories": 560.0,
+  "averageHR": 162.0,
+  "maxHR": 178.0,
+  "hasPolyline": false,
+  "privacy": { "typeId": 2, "typeKey": "private" },
+  "_fixture": "synthetic Garmin activity-list item: duration 2400.5 s rounds to 2401 s, distance in metres"
 }
