@@ -1,14 +1,16 @@
 # Automated tests: in-memory H2 in PostgreSQL compatibility mode.
-# No external services are required to run the test suite.
+# The same Flyway migrations run here as on PostgreSQL; only the JSON column type
+# differs (H2 has no JSONB). No external services are required.
 spring:
   datasource:
-    url: jdbc:h2:mem:runningai;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH
+    url: jdbc:h2:mem:running_ai;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH;DB_CLOSE_DELAY=-1
     username: sa
     password:
     driver-class-name: org.h2.Driver
+  flyway:
+    placeholders:
+      json_type: JSON
   jpa:
-    hibernate:
-      ddl-auto: create-drop
     show-sql: false
 
 logging:

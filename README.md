@@ -26,7 +26,7 @@ RunningAI는 Windows PC에서 PowerShell / Node.js / 파일 기반으로 동작�
                  │                      │
                  └──────────┬───────────┘
                             │
-                        PostgreSQL
+                  PostgreSQL (Flyway 관리)
 ```
 
 서버 내부는 도메인별 패키지(`athlete`, `activity`, 이후 `workout`, `training`,
@@ -39,7 +39,9 @@ RunningAI는 Windows PC에서 PowerShell / Node.js / 파일 기반으로 동작�
 ### 구현 완료 (`server/`)
 
 - Spring Boot 3.5 / Java 21 / Gradle 프로젝트, `local` / `test` profile 분리
+- PostgreSQL 개발환경 (`docker-compose.yml`)과 Flyway schema migration
 - `Athlete`, `Activity` JPA entity와 audit 필드(`createdAt`, `updatedAt`)
+- `ActivityRaw`: 외부 시스템 원본 payload를 JSONB로 보관 (내부 service, API 미노출)
 - 기동 시 기본 athlete 자동 생성 (이름 / timezone 설정 가능, 기본값 `default` / `Asia/Seoul`)
 - Activity API: 등록, 단건 조회, 목록 조회(최신순)
 - Request validation과 구조화된 오류 응답
@@ -47,7 +49,7 @@ RunningAI는 Windows PC에서 PowerShell / Node.js / 파일 기반으로 동작�
   `DUPLICATE_ACTIVITY`, `DATA_CONFLICT`, `INTERNAL_SERVER_ERROR`)
 - `externalSource + externalId` 중복 방지 (service 검사 + DB unique constraint)
 - Health endpoint `GET /api/v1/health`, Spring Actuator `/actuator/health`
-- 통합 테스트 (H2, 외부 서비스 불필요)
+- 통합 테스트 (H2 + Flyway, 외부 서비스 불필요)
 
 ### 미구현 (예정)
 
@@ -98,17 +100,41 @@ athlete별 timezone(`Asia/Seoul`)은 이후 표시 / 리포트용으로 athlete�
 
 validation 오류에는 `{ "field", "message" }` 형태의 `errors` 배열이 추가된다.
 
+## Database
+
+### 테이블
+
+| 테이블 | 역할 |
+|--------|------|
+| `athlete` | 사용자. `name` unique |
+| `activity` | 정규화된 운동 기록. `(external_source, external_id)` unique, `athlete_id` FK |
+| `activity_raw` | 외부 시스템 원본 payload (`JSONB`). `(external_source, external_id)` unique, `activity_id` nullable FK |
+| `flyway_schema_history` | Flyway migration 이력 |
+
+`activity`는 RunningAI가 실제 사용하는 정규화 데이터이고, `activity_raw`는 Garmin /
+Intervals.icu 등에서 받은 원본 응답이다. 원본을 보존해 두면 파싱 로직이 바뀌거나 새
+metric이 필요할 때 재수집 없이 재처리할 수 있다. 외부 activity 하나당 raw row 하나만
+유지하며, 재수집 시 `payload`와 `fetched_at`을 갱신한다.
+
+### Migration 정책
+
+- Schema는 **Flyway만** 변경한다 (`server/src/main/resources/db/migration/V{n}__{설명}.sql`).
+- Hibernate는 `ddl-auto: validate`로 mapping과 schema의 일치만 검증한다.
+- **이미 적용된 migration 파일은 수정하지 않는다.** 변경이 필요하면 새 version을 추가한다.
+- JSON 컬럼 타입은 placeholder `${json_type}`으로 두어 PostgreSQL에서는 `JSONB`,
+  H2 테스트에서는 `JSON`을 사용한다.
+
 ## Server
 
 - Java 21
-- Spring Boot 3.5 (Web, Validation, Data JPA, Actuator)
+- Spring Boot 3.5 (Web, Validation, Data JPA, Actuator, Flyway)
 - Gradle 8.14 (wrapper 포함)
-- 로컬 / 운영: PostgreSQL, 테스트: H2 (PostgreSQL mode)
+- 로컬 / 운영: PostgreSQL 17, 테스트: H2 (PostgreSQL mode)
 
 ## Development
 
-모든 명령은 `server/`에서 실행한다. Gradle wrapper는 `JAVA_HOME`이 JDK 21을 가리키거나
-`PATH`에 JDK 21이 있어야 한다.
+모든 Gradle 명령은 `server/`에서 실행한다. Gradle wrapper는 `JAVA_HOME`이 JDK 21을
+가리키거나 `PATH`에 JDK 21이 있어야 한다.
 
 ### 테스트 실행
 
@@ -117,20 +143,42 @@ cd server
 .\gradlew clean test
 ```
 
-테스트는 `test` profile(in-memory H2)로 실행되며 DB나 네트워크 서비스가 필요 없다.
+테스트는 `test` profile(in-memory H2)로 실행되며 Flyway migration을 실제로 적용한다.
+DB나 네트워크 서비스가 필요 없다.
+
+### Local Database (PostgreSQL)
+
+Repository root에서:
+
+```powershell
+docker compose up -d
+docker compose ps        # postgres 가 healthy 인지 확인
+```
+
+기본값은 database / user 모두 `running_ai`, port `5432`이다. 비밀번호를 포함한 값은
+root의 `.env`(git-ignore)로 바꿀 수 있으며 `docker compose`가 자동으로 읽는다.
+`.env.example`을 복사해서 시작한다.
+
+```powershell
+docker compose down      # 컨테이너만 정리 (데이터 유지)
+docker compose down -v   # 데이터 volume까지 삭제
+```
 
 ### 서버 실행
 
-기본 profile은 `local`이며 PostgreSQL이 필요하다. 접속 정보는 환경변수로 전달한다
-(repository root의 `.env.example` 참고):
+기본 profile은 `local`이며 PostgreSQL이 필요하다. 접속 정보는 환경변수로 전달한다:
 
 ```powershell
-$env:DB_URL      = "jdbc:postgresql://localhost:5432/runningai"
-$env:DB_USERNAME = "runningai"
-$env:DB_PASSWORD = "..."
+$env:DB_URL      = "jdbc:postgresql://localhost:5432/running_ai"
+$env:DB_USERNAME = "running_ai"
+$env:DB_PASSWORD = "<docker compose에 설정한 비밀번호>"
 cd server
 .\gradlew bootRun
 ```
+
+환경변수를 매번 설정하는 대신 root `.env`에 `DB_*` 값을 적어 두면 `local` profile이
+이를 fallback으로 읽는다 (실제 환경변수가 우선한다). 기동 시 Flyway가 migration을
+적용하고 기본 athlete가 생성된다.
 
 기동 후:
 
@@ -146,13 +194,13 @@ PostgreSQL 없이 확인하려면 in-memory `test` profile로 실행한다:
 
 ### Profile
 
-| Profile | Database                | Schema        | 용도                    |
-|---------|-------------------------|---------------|-------------------------|
-| `local` | PostgreSQL (환경변수)   | `update`      | 기본값, 로컬 개발       |
-| `test`  | H2 in-memory, PG mode   | `create-drop` | 자동화 테스트           |
+| Profile | Database                | Schema               | 용도                    |
+|---------|-------------------------|----------------------|-------------------------|
+| `local` | PostgreSQL (환경변수)   | Flyway + `validate`  | 기본값, 로컬 개발       |
+| `test`  | H2 in-memory, PG mode   | Flyway + `validate`  | 자동화 테스트           |
 
-Schema 관리는 bootstrap 단계에서만 Hibernate DDL에 의존한다. Schema를 본격적으로
-사용하기 전에 migration 도구(Flyway) 도입을 계획하고 있다.
+H2와 PostgreSQL의 알려진 차이: H2에는 `JSONB`가 없어 `JSON`을 사용하고, timestamp 소수부를
+microsecond로 반올림한다. 그 외 migration SQL은 동일하게 적용된다.
 
 ### 설정 및 민감정보
 
@@ -160,7 +208,8 @@ Schema 관리는 bootstrap 단계에서만 Hibernate DDL에 의존한다. Schema
 git-ignore되며 빈 placeholder만 담긴 `.env.example`만 추적한다. 지원하는 환경변수:
 
 ```text
-DB_URL, DB_USERNAME, DB_PASSWORD
+POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_PORT   (docker compose)
+DB_URL, DB_USERNAME, DB_PASSWORD                               (server local profile)
 RUNNING_AI_ATHLETE_NAME, RUNNING_AI_ATHLETE_TIMEZONE
 GARMIN_USERNAME, GARMIN_PASSWORD        (예약, 미사용)
 INTERVALS_API_KEY                       (예약, 미사용)
@@ -172,6 +221,7 @@ INTERVALS_API_KEY                       (예약, 미사용)
 running-ai/
 ├─ server/              Spring Boot 백엔드
 ├─ docs/work-orders/    작업지시서 및 구현 기록
+├─ docker-compose.yml   로컬 PostgreSQL
 ├─ .env.example
 └─ README.md
 ```

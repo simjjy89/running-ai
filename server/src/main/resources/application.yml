@@ -5,10 +5,19 @@ spring:
     default: local
   jpa:
     open-in-view: false
+    hibernate:
+      # Flyway owns the schema; Hibernate only checks that the mappings match it.
+      ddl-auto: validate
     properties:
       hibernate:
         jdbc:
           time_zone: UTC
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    placeholders:
+      # JSON column type used by migrations. PostgreSQL: JSONB (overridden to JSON for H2 tests).
+      json_type: JSONB
   jackson:
     default-property-inclusion: non_null
 

@@ -1,0 +1,30 @@
+# Local development database for RunningAI.
+#
+#   docker compose up -d
+#   docker compose ps
+#   docker compose down          # keep data
+#   docker compose down -v       # drop data volume
+#
+# Defaults below are development-only. Override them in a repository-root .env
+# (git-ignored, see .env.example); docker compose reads it automatically.
+services:
+  postgres:
+    image: postgres:17
+    container_name: running-ai-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-running_ai}
+      POSTGRES_USER: ${POSTGRES_USER:-running_ai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-running_ai}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - running_ai_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-running_ai} -d ${POSTGRES_DB:-running_ai}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  running_ai_postgres_data:
