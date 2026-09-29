@@ -31,6 +31,13 @@ running-ai:
       base-url: ${GARMIN_CONNECTOR_URL:http://127.0.0.1:8765}
       connect-timeout: 2s
       read-timeout: 30s
+    sync:
+      # Incremental sync (GarminIncrementalSyncService): page size per connector call,
+      # overlap re-fetched behind the high-water mark (late Garmin edits/uploads), and
+      # a page cap so a stalled cutoff cannot page through history forever.
+      page-size: 50
+      overlap: 7d
+      max-pages: 10
 
 management:
   endpoints:

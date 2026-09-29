@@ -25,32 +25,85 @@ Follow `running-ai-dev` for the workflow and `running-ai-database` for persisten
 - Retries, locks or batch frameworks are added only when a concrete need exists; the DB
   unique constraints are the last line of defence against concurrent ingestion.
 
-## Garmin — current state (Phase 3B-2)
+## Garmin — current state (Phase 3C-1)
 
 Implemented in `com.runningai.integration.garmin`:
 `GarminActivityMapper` (pure: `extractActivityId`, `parse`, `map`),
 `GarminActivityPayload`, `GarminActivityMappingException` (+ `Reason`/code),
 `GarminActivityIngestionService` (`ingest(JsonNode[, fetchedAt])`, `reprocess(id)`),
 `GarminIngestionResult`; transport boundary `GarminActivitySource` (interface) →
-`HttpGarminActivitySource` (`RestClient`, `GET {base-url}/activities?limit=N`, one
-request, no retry, errors → `GarminConnectorException` + `Reason`), config
+`HttpGarminActivitySource` (`RestClient`, `GET {base-url}/activities?start=S&limit=N`,
+one request, no retry, errors → `GarminConnectorException` + `Reason`), config
 `GarminConnectorProperties` (`running-ai.garmin.connector.base-url`, timeouts; **no
-credentials**); `GarminSyncService.syncRecent(limit)` → `GarminSyncResult(fetched,
-created, updated, skipped, failed)`. Fixtures: `server/src/test/resources/fixtures/garmin/`.
+credentials**).
+
+Two sync entry points sit on top of the same ingestion core — pick deliberately, they
+are not interchangeable:
+- `GarminSyncService.syncRecent(limit)` → `GarminSyncResult(fetched, created, updated,
+  skipped, failed)`: fetches the last `limit` activities every time (`start=0`), no
+  checkpoint. Kept for manual/ad hoc use; not what a scheduler should call.
+- `GarminIncrementalSyncService.syncIncremental()` → `GarminIncrementalSyncResult
+  (fetched, created, updated, skipped, failed, pagesFetched, checkpointAdvanced,
+  highWaterStartedAt)`: the high-water-mark + overlap-window sync described below. This
+  is the one a future scheduler/trigger (Phase 3C-2+) should call.
+
+Fixtures: `server/src/test/resources/fixtures/garmin/` (ad hoc ones for incremental
+sync's timestamp-boundary tests: `GarminIncrementalSyncFixtures`, same test package).
 
 Python connector `tools/garmin-connector/` (`python -m garmin_connector
 login|status|serve|activities`): owns Garmin auth/MFA/token store (`~/.garminconnect`),
-binds 127.0.0.1 only, returns raw items as a JSON array, error contract
+binds 127.0.0.1 only, `GET /activities?start=S&limit=N` (`start` optional, default 0,
+`limit` optional, default 20) returns raw items as a JSON array, error contract
 `{code,message}` with `GARMIN_AUTH_REQUIRED|FORBIDDEN|RATE_LIMITED|UPSTREAM_ERROR|CONNECTOR_ERROR`.
 It never touches the database and never normalises. No HTTP login endpoint.
 
-**Not implemented — do not assume it exists:** incremental sync cursor, scheduler /
-`@Scheduled`, sync HTTP API (`POST /api/v1/garmin/sync`), connector process
-supervision, FIT/TCX/details/splits collection, Intervals.icu. Phase 3B-3
+**Not implemented — do not assume it exists:** scheduler / `@Scheduled`, sync HTTP API
+(`POST /api/v1/garmin/sync`), connector process supervision, FIT/TCX/details/splits
+collection, Intervals.icu, historical backfill beyond `max-pages`. Phase 3B-3
 (`docs/work-orders/2026-09-29-garmin-live-e2e-validation.md`) ran the full
 Connector → Spring → PostgreSQL path against one real Garmin activity twice (live
 login, live fetch, live sync, live idempotency all passed) — the main contract
-fields below are now **CONFIRMED_LIVE**.
+fields below are **CONFIRMED_LIVE**. Phase 3C-1
+(`docs/work-orders/2026-09-30-garmin-incremental-sync.md`) additionally live-validated
+pagination (`start` offset), bootstrap, and a second incremental sync's overlap +
+idempotency against the real account.
+
+### Incremental sync (Phase 3C-1): high-water mark + overlap window
+
+`garmin_sync_state` (one row per athlete, `GarminSyncState`/`GarminSyncStateRepository`/
+`GarminSyncStateService`, migration `V4__create_garmin_sync_state.sql`) holds:
+- `high_water_started_at`: the newest activity start time successfully processed so far.
+  Only ever moves forward (`GarminSyncState.advance`); never advances on a failed run.
+- `last_successful_sync_at`: when an incremental sync last completed, updated on every
+  successful run even if the high-water mark itself did not move.
+
+Config (`running-ai.garmin.sync.*`, `GarminIncrementalSyncProperties`, all optional):
+`page-size` (default 50), `overlap` (default `7d`, a `Duration`), `max-pages` (default 10).
+
+Algorithm (`GarminIncrementalSyncService.syncIncremental()`):
+```text
+no GarminSyncState  -> bootstrap: exactly one page (page-size items), no cutoff,
+                       max-pages does not apply
+GarminSyncState     -> cutoff = highWaterStartedAt - overlap
+                       page newest -> oldest (start=0,page-size ; start=page-size,page-size ; ...)
+                       until: a page's oldest parseable startTime <= cutoff, OR a page
+                       returns fewer than page-size items (Garmin history exhausted), OR
+                       max-pages is exhausted (-> GarminIncrementalSyncException,
+                       "INCREMENTAL_WINDOW_INCOMPLETE", checkpoint NOT advanced)
+```
+Every item in every fetched page is ingested through the same
+`GarminActivityIngestionService` as `syncRecent` (idempotent insert/update), so an
+activity inside the overlap window is deliberately re-ingested every run — that is how
+a Garmin-side edit (distance/HR/title/timezone correction) after upload gets picked up.
+The checkpoint only advances when the whole run succeeded: no connector-level failure
+(propagates immediately, before the checkpoint is touched — a `GarminConnectorException`
+mid-pagination leaves already-ingested pages in place but the checkpoint untouched, so
+the next run re-covers the same ground via the overlap), no malformed item
+(`failed == 0`), and — for an incremental (non-bootstrap) run — the cutoff was actually
+reached within `max-pages`. **Cursor is never `activityId`** (Garmin does not guarantee
+id ordering) **and never an exclusive timestamp** (two activities can share a
+`startTimeGMT`); the high-water mark plus overlap plus idempotent ingestion is what
+makes both of those safe.
 
 Invariants: **Python knows no DB. Spring knows no Garmin password/token. Mapper knows
 no network.** Connector-level failures (401/403/429/502/unreachable) abort a sync;

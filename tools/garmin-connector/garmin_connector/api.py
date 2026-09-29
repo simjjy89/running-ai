@@ -22,12 +22,12 @@ logger = logging.getLogger(__name__)
 
 SERVICE_NAME = "garmin-connector"
 
-ActivitiesFetcher = Callable[[int], list[dict[str, Any]]]
+ActivitiesFetcher = Callable[[int, int], list[dict[str, Any]]]
 
 
 def create_app(fetch_activities: ActivitiesFetcher) -> FastAPI:
-    """Build the app around a ``fetch_activities(limit) -> list[dict]`` callable
-    (production: ``CachedGatewayProvider.recent_activities``; tests: a fake)."""
+    """Build the app around a ``fetch_activities(limit, start) -> list[dict]``
+    callable (production: ``CachedGatewayProvider.recent_activities``; tests: a fake)."""
     app = FastAPI(title=SERVICE_NAME, docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.get("/health")
@@ -36,14 +36,17 @@ def create_app(fetch_activities: ActivitiesFetcher) -> FastAPI:
         return {"status": "UP", "service": SERVICE_NAME}
 
     @app.get("/activities")
-    def activities(limit: int = Query(20, ge=1, le=MAX_LIMIT)) -> JSONResponse:
+    def activities(
+        limit: int = Query(20, ge=1, le=MAX_LIMIT),
+        start: int = Query(0, ge=0),
+    ) -> JSONResponse:
         try:
-            items = fetch_activities(limit)
+            items = fetch_activities(limit, start)
         except Exception as exc:  # noqa: BLE001 - everything becomes the error contract
             err = translate(exc)
             logger.warning("GET /activities failed: code=%s status=%d", err.code, err.http_status)
             raise err from exc
-        logger.info("GET /activities limit=%d -> %d item(s)", limit, len(items))
+        logger.info("GET /activities start=%d limit=%d -> %d item(s)", start, limit, len(items))
         return JSONResponse(content=items)
 
     @app.exception_handler(ConnectorError)

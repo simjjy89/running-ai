@@ -37,12 +37,27 @@ def test_recent_activities_requests_only_what_was_asked(fake_garmin):
     assert items == [synthetic_item(1), synthetic_item(2)]
 
 
+def test_recent_activities_forwards_a_nonzero_start_offset(fake_garmin):
+    gateway = GarminGateway(fake_garmin)
+
+    gateway.recent_activities(50, start=50)
+
+    assert fake_garmin.activities_calls == [(50, 50)]
+
+
 def test_recent_activities_validates_limit(fake_garmin):
     gateway = GarminGateway(fake_garmin)
     with pytest.raises(ValueError):
         gateway.recent_activities(0)
     with pytest.raises(ValueError):
         gateway.recent_activities(101)
+    assert fake_garmin.activities_calls == []
+
+
+def test_recent_activities_validates_start(fake_garmin):
+    gateway = GarminGateway(fake_garmin)
+    with pytest.raises(ValueError):
+        gateway.recent_activities(10, start=-1)
     assert fake_garmin.activities_calls == []
 
 

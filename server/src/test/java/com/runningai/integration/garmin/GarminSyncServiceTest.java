@@ -56,7 +56,7 @@ class GarminSyncServiceTest {
 
     @Test
     void firstSyncCreatesAllSupportedActivities() {
-        when(activitySource.fetchRecentActivities(anyInt())).thenReturn(supportedThree());
+        when(activitySource.fetchActivities(anyInt(), anyInt())).thenReturn(supportedThree());
 
         GarminSyncResult result = syncService.syncRecent(20);
 
@@ -67,7 +67,7 @@ class GarminSyncServiceTest {
 
     @Test
     void secondSyncOfTheSameWindowIsIdempotent() {
-        when(activitySource.fetchRecentActivities(anyInt())).thenReturn(supportedThree());
+        when(activitySource.fetchActivities(anyInt(), anyInt())).thenReturn(supportedThree());
         syncService.syncRecent(20);
         List<Long> idsBefore = activityRepository.findAll().stream().map(Activity::getId).sorted().toList();
 
@@ -81,7 +81,7 @@ class GarminSyncServiceTest {
 
     @Test
     void unsupportedActivityIsSkippedButItsRawIsKept() {
-        when(activitySource.fetchRecentActivities(anyInt())).thenReturn(List.of(
+        when(activitySource.fetchActivities(anyInt(), anyInt())).thenReturn(List.of(
                 GarminFixtures.load(GarminFixtures.RUNNING),
                 GarminFixtures.load(GarminFixtures.SWIMMING)));
 
@@ -95,7 +95,7 @@ class GarminSyncServiceTest {
 
     @Test
     void malformedItemsAreCountedAsFailedAndDoNotStopTheSync() {
-        when(activitySource.fetchRecentActivities(anyInt())).thenReturn(List.of(
+        when(activitySource.fetchActivities(anyInt(), anyInt())).thenReturn(List.of(
                 GarminFixtures.load(GarminFixtures.MISSING_ACTIVITY_ID),   // no id: nothing stored
                 GarminFixtures.load(GarminFixtures.MISSING_START_TIME),    // id but unmappable: raw kept
                 GarminFixtures.load(GarminFixtures.RUNNING)));
@@ -109,7 +109,7 @@ class GarminSyncServiceTest {
 
     @Test
     void connectorFailureAbortsTheSyncWithoutIngestingAnything() {
-        when(activitySource.fetchRecentActivities(anyInt()))
+        when(activitySource.fetchActivities(anyInt(), anyInt()))
                 .thenThrow(new GarminConnectorException(Reason.RATE_LIMITED, 429, "Garmin connector responded 429"));
 
         assertThatThrownBy(() -> syncService.syncRecent(20))
@@ -122,7 +122,7 @@ class GarminSyncServiceTest {
 
     @Test
     void emptyWindowIsASuccessfulNoOp() {
-        when(activitySource.fetchRecentActivities(anyInt())).thenReturn(List.of());
+        when(activitySource.fetchActivities(anyInt(), anyInt())).thenReturn(List.of());
 
         assertThat(syncService.syncRecent(5)).isEqualTo(new GarminSyncResult(0, 0, 0, 0, 0));
     }

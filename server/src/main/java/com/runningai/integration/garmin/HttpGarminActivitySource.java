@@ -35,14 +35,20 @@ public class HttpGarminActivitySource implements GarminActivitySource {
     }
 
     @Override
-    public List<JsonNode> fetchRecentActivities(int limit) {
+    public List<JsonNode> fetchActivities(int start, int limit) {
+        if (start < 0) {
+            throw new IllegalArgumentException("start must be >= 0");
+        }
         if (limit < 1 || limit > MAX_LIMIT) {
             throw new IllegalArgumentException("limit must be between 1 and " + MAX_LIMIT);
         }
         JsonNode body;
         try {
             body = restClient.get()
-                    .uri(uriBuilder -> uriBuilder.path("/activities").queryParam("limit", limit).build())
+                    .uri(uriBuilder -> uriBuilder.path("/activities")
+                            .queryParam("start", start)
+                            .queryParam("limit", limit)
+                            .build())
                     .retrieve()
                     .body(JsonNode.class);
         } catch (RestClientResponseException e) {
@@ -57,7 +63,7 @@ public class HttpGarminActivitySource implements GarminActivitySource {
         }
         List<JsonNode> items = new ArrayList<>(body.size());
         body.forEach(items::add);
-        log.info("Garmin connector returned {} activity item(s) (limit={})", items.size(), limit);
+        log.info("Garmin connector returned {} activity item(s) (start={}, limit={})", items.size(), start, limit);
         return items;
     }
 

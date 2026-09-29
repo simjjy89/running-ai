@@ -13,7 +13,7 @@ import java.util.List;
  * Pulls the most recent Garmin activities through the connector and feeds each one to
  * the existing raw-first ingestion core.
  * <pre>
- *   GarminActivitySource.fetchRecentActivities(limit)   -- connector failure => abort (exception)
+ *   GarminActivitySource.fetchActivities(0, limit)       -- connector failure => abort (exception)
  *     -> for each item: GarminActivityIngestionService.ingest(item, fetchedAt)
  *          created / updated                            -> counted
  *          UNSUPPORTED_GARMIN_ACTIVITY_TYPE              -> skipped (raw kept), continue
@@ -40,7 +40,7 @@ public class GarminSyncService {
      */
     public GarminSyncResult syncRecent(int limit) {
         Instant fetchedAt = Instant.now();
-        List<JsonNode> items = activitySource.fetchRecentActivities(limit);
+        List<JsonNode> items = activitySource.fetchActivities(0, limit);
         log.info("Garmin sync started: fetched={} limit={}", items.size(), limit);
 
         int created = 0;

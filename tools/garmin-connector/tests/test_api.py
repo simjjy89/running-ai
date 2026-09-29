@@ -16,13 +16,13 @@ class FakeFetcher:
     def __init__(self) -> None:
         self.items = [synthetic_item(188081596), synthetic_item(188090001, "treadmill_running")]
         self.error: Exception | None = None
-        self.calls: list[int] = []
+        self.calls: list[tuple[int, int]] = []
 
-    def __call__(self, limit: int):
-        self.calls.append(limit)
+    def __call__(self, limit: int, start: int = 0):
+        self.calls.append((limit, start))
         if self.error is not None:
             raise self.error
-        return self.items[:limit]
+        return self.items[start:start + limit]
 
 
 @pytest.fixture
@@ -47,12 +47,28 @@ def test_activities_returns_bare_json_array_with_items_untouched(client, fetcher
 
     assert response.status_code == 200
     assert response.json() == fetcher.items            # no renaming, no wrapper, no normalisation
-    assert fetcher.calls == [2]
+    assert fetcher.calls == [(2, 0)]
 
 
 def test_activities_default_limit_is_20(client, fetcher):
     client.get("/activities")
-    assert fetcher.calls == [20]
+    assert fetcher.calls == [(20, 0)]
+
+
+def test_activities_forwards_a_nonzero_start_offset(client, fetcher):
+    response = client.get("/activities?start=50&limit=50")
+
+    assert response.status_code == 200
+    assert fetcher.calls == [(50, 50)]
+
+
+@pytest.mark.parametrize("start", ["-1", "abc"])
+def test_activities_rejects_invalid_start_without_calling_garmin(client, fetcher, start):
+    response = client.get(f"/activities?start={start}")
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "INVALID_REQUEST"
+    assert fetcher.calls == []
 
 
 @pytest.mark.parametrize("limit", ["0", "101", "abc"])
@@ -89,7 +105,7 @@ def test_activities_maps_upstream_failures_to_error_contract(client, fetcher, er
     assert body["code"] == code
     assert set(body) == {"code", "message"}
     assert "xyz" not in body["message"] and "cookie" not in body["message"]
-    assert fetcher.calls == [1]                        # exactly one upstream attempt, no automatic retry
+    assert fetcher.calls == [(1, 0)]                   # exactly one upstream attempt, no automatic retry
 
 
 def test_no_login_endpoint_and_no_docs(client):

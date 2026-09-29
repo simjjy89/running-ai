@@ -51,10 +51,10 @@ class HttpGarminActivitySourceTest {
                   "duration": 3600.0, "distance": 10000.0, "averageHR": 155.0, "privacy": {"typeKey": "private"}},
                  {"activityId": 188090001, "activityType": {"typeKey": "treadmill_running"}, "duration": 2400.5}]
                 """;
-        server.expect(once(), requestTo(BASE_URL + "/activities?limit=2")).andExpect(method(GET))
+        server.expect(once(), requestTo(BASE_URL + "/activities?start=0&limit=2")).andExpect(method(GET))
                 .andRespond(withSuccess(body, MediaType.APPLICATION_JSON));
 
-        List<JsonNode> items = source.fetchRecentActivities(2);
+        List<JsonNode> items = source.fetchActivities(0, 2);
 
         assertThat(items).hasSize(2);
         assertThat(items.get(0).get("activityId").asLong()).isEqualTo(188081596L);
@@ -65,10 +65,25 @@ class HttpGarminActivitySourceTest {
 
     @Test
     void emptyArrayIsAnEmptyList() {
-        server.expect(requestTo(BASE_URL + "/activities?limit=5"))
+        server.expect(requestTo(BASE_URL + "/activities?start=0&limit=5"))
                 .andRespond(withSuccess("[]", MediaType.APPLICATION_JSON));
 
-        assertThat(source.fetchRecentActivities(5)).isEmpty();
+        assertThat(source.fetchActivities(0, 5)).isEmpty();
+    }
+
+    @Test
+    void nonZeroStartIsSentAsAQueryParam() {
+        server.expect(once(), requestTo(BASE_URL + "/activities?start=50&limit=50"))
+                .andRespond(withSuccess("[]", MediaType.APPLICATION_JSON));
+
+        assertThat(source.fetchActivities(50, 50)).isEmpty();
+        server.verify();
+    }
+
+    @Test
+    void rejectsNegativeStartWithoutCallingConnector() {
+        assertThatThrownBy(() -> source.fetchActivities(-1, 10)).isInstanceOf(IllegalArgumentException.class);
+        server.verify();
     }
 
     @ParameterizedTest
@@ -80,12 +95,12 @@ class HttpGarminActivitySourceTest {
             "500, GARMIN_CONNECTOR_ERROR, CONNECTOR_ERROR"
     })
     void mapsConnectorErrorContractToReasons(int status, String code, Reason expected) {
-        server.expect(once(), requestTo(BASE_URL + "/activities?limit=1"))
+        server.expect(once(), requestTo(BASE_URL + "/activities?start=0&limit=1"))
                 .andRespond(withStatus(HttpStatus.valueOf(status))
                         .contentType(MediaType.APPLICATION_JSON)
                         .body("{\"code\": \"" + code + "\", \"message\": \"connector says no\"}"));
 
-        assertThatThrownBy(() -> source.fetchRecentActivities(1))
+        assertThatThrownBy(() -> source.fetchActivities(0, 1))
                 .isInstanceOfSatisfying(GarminConnectorException.class, e -> {
                     assertThat(e.getReason()).isEqualTo(expected);
                     assertThat(e.getHttpStatus()).isEqualTo(status);
@@ -96,10 +111,10 @@ class HttpGarminActivitySourceTest {
 
     @Test
     void nonJsonErrorBodyStillMapsByStatus() {
-        server.expect(requestTo(BASE_URL + "/activities?limit=1"))
+        server.expect(requestTo(BASE_URL + "/activities?start=0&limit=1"))
                 .andRespond(withStatus(HttpStatus.SERVICE_UNAVAILABLE).body("<html>nope</html>"));
 
-        assertThatThrownBy(() -> source.fetchRecentActivities(1))
+        assertThatThrownBy(() -> source.fetchActivities(0, 1))
                 .isInstanceOfSatisfying(GarminConnectorException.class, e -> {
                     assertThat(e.getReason()).isEqualTo(Reason.CONNECTOR_ERROR);
                     assertThat(e.getHttpStatus()).isEqualTo(503);
@@ -108,20 +123,20 @@ class HttpGarminActivitySourceTest {
 
     @Test
     void nonArrayBodyIsRejected() {
-        server.expect(requestTo(BASE_URL + "/activities?limit=1"))
+        server.expect(requestTo(BASE_URL + "/activities?start=0&limit=1"))
                 .andRespond(withSuccess("{\"activityList\": []}", MediaType.APPLICATION_JSON));
 
-        assertThatThrownBy(() -> source.fetchRecentActivities(1))
+        assertThatThrownBy(() -> source.fetchActivities(0, 1))
                 .isInstanceOfSatisfying(GarminConnectorException.class,
                         e -> assertThat(e.getReason()).isEqualTo(Reason.INVALID_RESPONSE));
     }
 
     @Test
     void connectorDownOrTimeoutIsUnavailable() {
-        server.expect(requestTo(BASE_URL + "/activities?limit=1"))
+        server.expect(requestTo(BASE_URL + "/activities?start=0&limit=1"))
                 .andRespond(withException(new SocketTimeoutException("read timed out")));
 
-        assertThatThrownBy(() -> source.fetchRecentActivities(1))
+        assertThatThrownBy(() -> source.fetchActivities(0, 1))
                 .isInstanceOfSatisfying(GarminConnectorException.class, e -> {
                     assertThat(e.getReason()).isEqualTo(Reason.UNAVAILABLE);
                     assertThat(e.getHttpStatus()).isNull();
@@ -131,8 +146,8 @@ class HttpGarminActivitySourceTest {
 
     @Test
     void rejectsInvalidLimitWithoutCallingConnector() {
-        assertThatThrownBy(() -> source.fetchRecentActivities(0)).isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> source.fetchRecentActivities(101)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> source.fetchActivities(0, 0)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> source.fetchActivities(0, 101)).isInstanceOf(IllegalArgumentException.class);
         server.verify();
     }
 }

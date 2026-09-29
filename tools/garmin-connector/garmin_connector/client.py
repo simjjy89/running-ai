@@ -67,16 +67,18 @@ class GarminGateway:
     def display_name(self) -> str | None:
         return getattr(self._garmin, "display_name", None)
 
-    def recent_activities(self, limit: int) -> list[dict[str, Any]]:
-        """Most recent ``limit`` activity-list items, raw, newest first."""
+    def recent_activities(self, limit: int, start: int = 0) -> list[dict[str, Any]]:
+        """``limit`` activity-list items starting at offset ``start`` (0 = most recent), raw, newest first."""
+        if start < 0:
+            raise ValueError("start must be >= 0")
         if not 1 <= limit <= MAX_LIMIT:
             raise ValueError(f"limit must be between 1 and {MAX_LIMIT}")
         try:
-            result = self._garmin.get_activities(0, limit)
+            result = self._garmin.get_activities(start, limit)
         except Exception as exc:  # noqa: BLE001 - translated into the error contract
             raise translate(exc) from exc
         items = unwrap_activity_list(result)
-        logger.info("Fetched %d Garmin activity item(s) (limit=%d)", len(items), limit)
+        logger.info("Fetched %d Garmin activity item(s) (start=%d, limit=%d)", len(items), start, limit)
         return items
 
 
@@ -105,10 +107,10 @@ class CachedGatewayProvider:
                 raise translate(exc) from exc
         return self._gateway
 
-    def recent_activities(self, limit: int) -> list[dict[str, Any]]:
+    def recent_activities(self, limit: int, start: int = 0) -> list[dict[str, Any]]:
         gateway = self()
         try:
-            return gateway.recent_activities(limit)
+            return gateway.recent_activities(limit, start)
         except ConnectorError as err:
             if err.code == "GARMIN_AUTH_REQUIRED":
                 self._gateway = None

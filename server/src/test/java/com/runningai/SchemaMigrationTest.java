@@ -5,6 +5,8 @@ import com.runningai.activity.ActivityRepository;
 import com.runningai.activity.ActivityType;
 import com.runningai.activity.ExternalSource;
 import com.runningai.athlete.AthleteService;
+import com.runningai.integration.garmin.GarminSyncState;
+import com.runningai.integration.garmin.GarminSyncStateRepository;
 import jakarta.persistence.EntityManager;
 import org.flywaydb.core.Flyway;
 import org.flywaydb.core.api.MigrationInfo;
@@ -46,6 +48,9 @@ class SchemaMigrationTest {
     private AthleteService athleteService;
 
     @Autowired
+    private GarminSyncStateRepository garminSyncStateRepository;
+
+    @Autowired
     private EntityManager entityManager;
 
     @Test
@@ -54,24 +59,27 @@ class SchemaMigrationTest {
 
         assertThat(applied).extracting(MigrationInfo::getVersion)
                 .extracting(Object::toString)
-                .containsExactly("1", "2", "3");
+                .containsExactly("1", "2", "3", "4");
         assertThat(applied).extracting(MigrationInfo::getState)
                 .containsOnly(MigrationState.SUCCESS);
         assertThat(flyway.info().pending()).isEmpty();
 
         Integer historyRows = jdbcTemplate.queryForObject(
-                "select count(*) from flyway_schema_history where success = true and version in ('1', '2', '3')", Integer.class);
-        assertThat(historyRows).isEqualTo(3);
+                "select count(*) from flyway_schema_history where success = true and version in ('1', '2', '3', '4')",
+                Integer.class);
+        assertThat(historyRows).isEqualTo(4);
     }
 
     @Test
     void expectedTablesExist() {
         List<String> tables = jdbcTemplate.queryForList(
                 "select lower(table_name) from information_schema.tables "
-                        + "where lower(table_name) in ('athlete', 'activity', 'activity_raw', 'flyway_schema_history')",
+                        + "where lower(table_name) in "
+                        + "('athlete', 'activity', 'activity_raw', 'garmin_sync_state', 'flyway_schema_history')",
                 String.class);
 
-        assertThat(tables).containsExactlyInAnyOrder("athlete", "activity", "activity_raw", "flyway_schema_history");
+        assertThat(tables).containsExactlyInAnyOrder(
+                "athlete", "activity", "activity_raw", "garmin_sync_state", "flyway_schema_history");
     }
 
     @Test
@@ -99,6 +107,21 @@ class SchemaMigrationTest {
         assertThatThrownBy(() -> {
             activityRepository.save(new Activity(athleteId, ExternalSource.GARMIN, "db-unique",
                     ActivityType.TREADMILL_RUN, startedAt, 1800, null, null, null));
+            entityManager.flush();
+        }).isInstanceOfAny(DataIntegrityViolationException.class, jakarta.persistence.PersistenceException.class);
+    }
+
+    @Test
+    @Transactional
+    void uniqueConstraintOnGarminSyncStateAthleteIsEnforcedByTheDatabase() {
+        Long athleteId = athleteService.getDefaultAthlete().getId();
+        Instant now = Instant.parse("2026-09-30T00:00:00Z");
+
+        garminSyncStateRepository.save(new GarminSyncState(athleteId, now, now));
+        entityManager.flush();
+
+        assertThatThrownBy(() -> {
+            garminSyncStateRepository.save(new GarminSyncState(athleteId, now, now));
             entityManager.flush();
         }).isInstanceOfAny(DataIntegrityViolationException.class, jakarta.persistence.PersistenceException.class);
     }
