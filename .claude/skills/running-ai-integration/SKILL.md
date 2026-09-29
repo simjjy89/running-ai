@@ -46,8 +46,11 @@ It never touches the database and never normalises. No HTTP login endpoint.
 
 **Not implemented — do not assume it exists:** incremental sync cursor, scheduler /
 `@Scheduled`, sync HTTP API (`POST /api/v1/garmin/sync`), connector process
-supervision, FIT/TCX/details/splits collection, Intervals.icu. A live Garmin probe has
-not been run yet (contract is CONFIRMED_SOURCE only).
+supervision, FIT/TCX/details/splits collection, Intervals.icu. Phase 3B-3
+(`docs/work-orders/2026-09-29-garmin-live-e2e-validation.md`) ran the full
+Connector → Spring → PostgreSQL path against one real Garmin activity twice (live
+login, live fetch, live sync, live idempotency all passed) — the main contract
+fields below are now **CONFIRMED_LIVE**.
 
 Invariants: **Python knows no DB. Spring knows no Garmin password/token. Mapper knows
 no network.** Connector-level failures (401/403/429/502/unreachable) abort a sync;
@@ -76,18 +79,23 @@ boundaries live in the called services (different beans, so proxies apply). Keep
   re-download.
 - **Unsupported activity type** → `UNSUPPORTED_GARMIN_ACTIVITY_TYPE` exception, raw kept.
   Never default to `RUN`. Skip/aggregate policies belong to a future batch/scheduler layer.
-- **Contract (Phase 3B-1, CONFIRMED_SOURCE, not yet live-verified)**: fixtures and the
-  mapper follow one item of Garmin Connect's activity list
+- **Contract (Phase 3B-1 CONFIRMED_SOURCE → Phase 3B-3 CONFIRMED_LIVE for the fields
+  below)**: fixtures and the mapper follow one item of Garmin Connect's activity list
   (`/activitylist-service/activities/search/activities`, python-garminconnect
-  `get_activities()`): `activityId` int, `activityType{typeId,typeKey,parentTypeId}`,
-  `startTimeGMT` `"yyyy-MM-dd HH:mm:ss"` UTC **without** zone designator (primary),
-  `startTimeLocal` (no zone, never sufficient alone), `duration` **seconds** (float),
-  `distance` metres, `averageHR`/`maxHR` bpm. Real type keys: `running`,
-  `treadmill_running`, `indoor_cycling`, `virtual_ride`, `indoor_running`,
-  `trail_running`, `track_running`. The response may be a bare list or
-  `{"activityList": [...]}`. Full evidence and confidence per field:
-  `docs/work-orders/2026-09-29-garmin-live-contract-investigation.md`. Confirm against
-  a live payload in Phase 3B-2 before treating anything as CONFIRMED_LIVE.
+  `get_activities()`): `activityId` int, `activityType{typeId,typeKey,parentTypeId}`
+  (live-confirmed key: `treadmill_running` → `ActivityType.TREADMILL_RUN`),
+  `startTimeGMT` `"yyyy-MM-dd HH:mm:ss"` UTC **without** zone designator (primary,
+  live-confirmed to map to the correct UTC `Instant`), `startTimeLocal` (no zone,
+  never sufficient alone), `duration` **seconds** (float, live-confirmed),
+  `distance` metres (live-confirmed), `averageHR`/`maxHR` bpm (live-confirmed).
+  Real type keys: `running`, `treadmill_running`, `indoor_cycling`, `virtual_ride`,
+  `indoor_running`, `trail_running`, `track_running`. The response may be a bare
+  list or `{"activityList": [...]}`. Full evidence and confidence per field:
+  `docs/work-orders/2026-09-29-garmin-live-contract-investigation.md` (source
+  study) and `docs/work-orders/2026-09-29-garmin-live-e2e-validation.md` (live
+  confirmation). `activityName` is present as a live Korean-text string but is
+  **not** part of `NormalizedActivity` — see the known issue below before ever
+  promoting it to a normalized field.
 - **Access strategy (ADR in the same work order)**: Option B — a separate Python
   connector process using `python-garminconnect` (pinned, ≥ 0.3.5 for
   CVE-2026-54447; studied 0.3.16) owns Garmin auth, tokens (`~/.garminconnect`, outside
@@ -96,6 +104,19 @@ boundaries live in the called services (different beans, so proxies apply). Keep
   business-only and is the long-term migration path, not an option now. Never write
   SSO/Cloudflare/TLS-fingerprint bypass code in this repo; on 401/403/429 stop, do not
   loop.
+- **Known issue — `GARMIN_ACTIVITY_NAME_ENCODING`**: a real Garmin `activityName`
+  containing Korean text was reported as mojibake when displayed in a Windows
+  PowerShell 5.1 terminal. Phase 3B-3 traced this end-to-end against a live
+  activity: the `python-garminconnect` return value, the connector's FastAPI JSON
+  response bytes, and the value stored in `activity_raw.payload` (JSONB) in
+  PostgreSQL were all verified to be well-formed UTF-8 Korean text (valid Hangul
+  syllable code points, no Latin-1-in-UTF-8 mojibake signature). The corruption is
+  therefore isolated to the PowerShell 5.1 console/font display layer, not to the
+  connector, Spring, or the database. **Do not** add any latin1/cp1252 re-decode
+  workaround to the connector or to `GarminActivityMapper` — the data is already
+  correct; such a "fix" would corrupt genuinely clean strings. This stays open only
+  as a display-layer curiosity; it must be re-diagnosed (not assumed fixed) before
+  `activityName` is ever promoted to a normalized `Activity` field.
 
 ## Intervals.icu — current state
 
