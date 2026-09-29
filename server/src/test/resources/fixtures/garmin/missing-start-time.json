@@ -1,0 +1,8 @@
+{
+  "activityId": 188090004,
+  "activityName": "Broken Run",
+  "activityType": { "typeId": 1, "typeKey": "running" },
+  "duration": 1500000,
+  "distance": 4000.0,
+  "_fixture": "required start time absent: raw must be preserved, mapping must fail"
+}

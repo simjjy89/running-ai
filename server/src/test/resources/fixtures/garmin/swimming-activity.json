@@ -1,0 +1,11 @@
+{
+  "activityId": 188090003,
+  "activityName": "Pool Swim",
+  "activityType": { "typeId": 26, "typeKey": "lap_swimming", "parentTypeId": 26 },
+  "startTime": "2026-09-26T07:00:00+09:00",
+  "duration": 1800000,
+  "distance": 1500.0,
+  "averageHR": 130,
+  "maxHR": 150,
+  "_fixture": "unsupported activity type: must be stored as raw but never mapped to an Activity"
+}

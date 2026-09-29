@@ -1,0 +1,12 @@
+{
+  "activityId": 188090001,
+  "activityName": "Treadmill Tempo",
+  "activityType": { "typeId": 18, "typeKey": "treadmill_running", "parentTypeId": 1 },
+  "startTime": "2026-09-27T19:05:30+09:00",
+  "duration": 2400500,
+  "distance": 8000.0,
+  "averageHR": 162,
+  "maxHR": 178,
+  "calories": 560,
+  "_fixture": "synthetic RunningAI test payload; duration in milliseconds, distance in metres"
+}

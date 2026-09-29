@@ -49,11 +49,12 @@ RunningAI는 Windows PC에서 PowerShell / Node.js / 파일 기반으로 동작�
   `DUPLICATE_ACTIVITY`, `DATA_CONFLICT`, `INTERNAL_SERVER_ERROR`)
 - `externalSource + externalId` 중복 방지 (service 검사 + DB unique constraint)
 - Health endpoint `GET /api/v1/health`, Spring Actuator `/actuator/health`
+- Garmin ingestion core (offline, fixture 기반): raw 저장 → mapping → Activity upsert → reprocess
 - 통합 테스트 (H2 + Flyway, 외부 서비스 불필요)
 
 ### 미구현 (예정)
 
-Garmin 로그인 / Connect 접근, Intervals.icu API 호출, 훈련 자동 생성, Garmin structured
+Garmin 로그인 / 인증 / 네트워크 client / 실제 데이터 fetch, Intervals.icu API 호출, 훈련 자동 생성, Garmin structured
 workout 전송, 주간 / 월간 리포트, scheduler, AI / LLM 분석, 알림.
 이 중 일부는 기존 PowerShell / Node.js 구현이 메인 RunningAI PC에 존재하지만,
 아직 이 repository에는 **포함되어 있지 않다**.
@@ -115,6 +116,40 @@ validation 오류에는 `{ "field", "message" }` 형태의 `errors` 배열이 �
 Intervals.icu 등에서 받은 원본 응답이다. 원본을 보존해 두면 파싱 로직이 바뀌거나 새
 metric이 필요할 때 재수집 없이 재처리할 수 있다. 외부 activity 하나당 raw row 하나만
 유지하며, 재수집 시 `payload`와 `fetched_at`을 갱신한다.
+
+## Garmin ingestion
+
+Garmin activity ingestion은 현재 **offline, fixture 기반 pipeline**으로만 구현되어 있다.
+실제 Garmin 인증 / 네트워크 연동은 아직 구현되지 않았다.
+
+```text
+Garmin raw JSON (JsonNode)
+      │
+      ▼
+ActivityRawService.saveOrUpdate      → activity_raw (JSONB)   ─ transaction 1, commit
+      │
+      ▼
+GarminActivityMapper                 → NormalizedActivity      ─ pure, DB 접근 없음
+      │
+      ▼
+ActivityService.upsertExternalActivity → activity             ─ transaction 2, commit
+      │
+      ▼
+ActivityRawService.linkToActivity    → activity_raw.activity_id ─ transaction 3
+```
+
+- **Raw-first**: mapping이 실패해도(지원하지 않는 type, 필수 필드 누락) 원본은 `activity_raw`에 남는다.
+  Activity는 만들어지지 않고 `GarminActivityMappingException`(code 예: `UNSUPPORTED_GARMIN_ACTIVITY_TYPE`)이 발생한다.
+- **Idempotent**: 같은 Garmin activity를 여러 번 넣어도 `activity`, `activity_raw` 각 1행만 유지된다.
+  값이 바뀐 payload는 같은 row를 갱신한다 (id / createdAt 유지, updatedAt / fetchedAt 갱신).
+- **Reprocess**: `GarminActivityIngestionService.reprocess(garminActivityId)`는 저장된 JSONB만으로
+  mapping과 upsert를 다시 수행한다. Garmin에 재접속하지 않는다.
+- 지원 activity type: `running` 계열 → `RUN`, `treadmill_running` 계열 → `TREADMILL_RUN`,
+  `indoor_cycling` 계열 → `INDOOR_CYCLING`. 그 외는 실패 (임의로 RUN에 매핑하지 않음).
+- 입력 단위(fixture 기준): `duration` milliseconds → `durationSeconds`, `distance` metres,
+  `startTime` ISO-8601 offset 포함 → UTC `Instant`. 실제 Garmin payload 형태는 Phase 3B에서 확인한다.
+- HTTP API로 노출하지 않는다. 서비스 + 테스트로만 검증한다.
+- 사용자용 `POST /api/v1/activities`는 그대로 create 의미(중복 시 409)를 유지한다.
 
 ### Migration 정책
 

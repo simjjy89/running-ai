@@ -93,6 +93,33 @@ public class Activity {
         this.athleteId = Objects.requireNonNull(athleteId, "athleteId");
         this.externalSource = Objects.requireNonNull(externalSource, "externalSource");
         this.externalId = Objects.requireNonNull(externalId, "externalId");
+        applyMetrics(activityType, startedAt, durationSeconds, distanceMeters, averageHeartRate, maxHeartRate);
+    }
+
+    public Activity(Long athleteId, NormalizedActivity data) {
+        this(athleteId, data.externalSource(), data.externalId(), data.activityType(), data.startedAt(),
+                data.durationSeconds(), data.distanceMeters(), data.averageHeartRate(), data.maxHeartRate());
+    }
+
+    /**
+     * Replaces the normalised metrics with a newer snapshot of the same external
+     * activity. Identity (id, athlete, external key) and createdAt are unchanged.
+     */
+    public void updateFrom(NormalizedActivity data) {
+        if (data.externalSource() != externalSource || !data.externalId().equals(externalId)) {
+            throw new IllegalArgumentException("External identity mismatch: expected "
+                    + externalSource + "/" + externalId + " but got " + data.externalSource() + "/" + data.externalId());
+        }
+        applyMetrics(data.activityType(), data.startedAt(), data.durationSeconds(),
+                data.distanceMeters(), data.averageHeartRate(), data.maxHeartRate());
+    }
+
+    private void applyMetrics(ActivityType activityType,
+                              Instant startedAt,
+                              int durationSeconds,
+                              Double distanceMeters,
+                              Integer averageHeartRate,
+                              Integer maxHeartRate) {
         this.activityType = Objects.requireNonNull(activityType, "activityType");
         this.startedAt = Objects.requireNonNull(startedAt, "startedAt");
         if (durationSeconds < 0) {

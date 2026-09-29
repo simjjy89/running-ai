@@ -1,0 +1,23 @@
+{
+  "activityId": 188081596,
+  "activityName": "Morning Run (corrected)",
+  "activityType": { "typeId": 1, "typeKey": "running", "parentTypeId": 17 },
+  "startTime": "2026-09-29T06:30:00+09:00",
+  "startTimeLocal": "2026-09-29 06:30:00",
+  "timeZoneId": "Asia/Seoul",
+  "duration": 3612000,
+  "elapsedDuration": 3660000,
+  "distance": 10020.0,
+  "averageHR": 156,
+  "maxHR": 173,
+  "averageSpeed": 2.774,
+  "calories": 725,
+  "elevationGain": 85.0,
+  "elevationLoss": 82.0,
+  "laps": [
+    { "lapIndex": 1, "distance": 1000.0, "duration": 312000 },
+    { "lapIndex": 2, "distance": 1000.0, "duration": 309000 },
+    { "lapIndex": 3, "distance": 20.0, "duration": 12000 }
+  ],
+  "_fixture": "same Garmin activity as running-activity.json, re-fetched after Garmin recomputed metrics"
+}

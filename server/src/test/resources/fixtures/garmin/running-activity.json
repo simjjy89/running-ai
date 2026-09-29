@@ -1,0 +1,22 @@
+{
+  "activityId": 188081596,
+  "activityName": "Morning Run",
+  "activityType": { "typeId": 1, "typeKey": "running", "parentTypeId": 17 },
+  "startTime": "2026-09-29T06:30:00+09:00",
+  "startTimeLocal": "2026-09-29 06:30:00",
+  "timeZoneId": "Asia/Seoul",
+  "duration": 3600000,
+  "elapsedDuration": 3650000,
+  "distance": 10000.0,
+  "averageHR": 155,
+  "maxHR": 172,
+  "averageSpeed": 2.777,
+  "calories": 720,
+  "elevationGain": 85.0,
+  "elevationLoss": 82.0,
+  "laps": [
+    { "lapIndex": 1, "distance": 1000.0, "duration": 312000 },
+    { "lapIndex": 2, "distance": 1000.0, "duration": 309000 }
+  ],
+  "_fixture": "synthetic RunningAI test payload; duration/lap durations in milliseconds, distance in metres, no GPS"
+}

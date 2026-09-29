@@ -1,0 +1,8 @@
+{
+  "activityName": "No Id Run",
+  "activityType": { "typeId": 1, "typeKey": "running" },
+  "startTime": "2026-09-25T06:30:00+09:00",
+  "duration": 1500000,
+  "distance": 4000.0,
+  "_fixture": "activityId absent: nothing can be stored (no external key), mapping must fail"
+}

@@ -1,0 +1,12 @@
+{
+  "activityId": 188090002,
+  "activityName": "Indoor Ride",
+  "activityType": { "typeId": 25, "typeKey": "indoor_cycling", "parentTypeId": 2 },
+  "startTime": "2026-09-28T21:00:00+09:00",
+  "duration": 3000000,
+  "distance": 25000.0,
+  "averageHR": 140,
+  "averagePower": 185,
+  "calories": 610,
+  "_fixture": "synthetic RunningAI test payload; no maxHR on purpose (nullable), duration in milliseconds"
+}
