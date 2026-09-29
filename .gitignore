@@ -1,0 +1,56 @@
+# --- Secrets / environment ---
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.jks
+*.key
+credentials*
+secrets*
+tokens*
+*.token
+
+# --- Build output ---
+server/build/
+server/out/
+server/.gradle/
+build/
+out/
+target/
+*.class
+*.jar
+!server/gradle/wrapper/gradle-wrapper.jar
+*.war
+
+# --- IDE ---
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.project
+.classpath
+.factorypath
+bin/
+.metadata/
+
+# --- Logs / temp ---
+logs/
+*.log
+*.tmp
+*.swp
+*~
+hs_err_pid*
+replay_pid*
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Local databases ---
+*.db
+*.mv.db
+*.trace.db

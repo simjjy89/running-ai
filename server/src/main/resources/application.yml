@@ -1,0 +1,24 @@
+spring:
+  application:
+    name: running-ai
+  profiles:
+    default: local
+  jpa:
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+  jackson:
+    default-property-inclusion: non_null
+
+running-ai:
+  default-athlete:
+    name: ${RUNNING_AI_ATHLETE_NAME:default}
+    timezone: ${RUNNING_AI_ATHLETE_TIMEZONE:Asia/Seoul}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info

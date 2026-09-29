@@ -1,0 +1,18 @@
+# Local development: PostgreSQL.
+# Credentials come from the environment (see .env.example at the repository root).
+spring:
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/runningai}
+    username: ${DB_USERNAME:runningai}
+    password: ${DB_PASSWORD:}
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      # Bootstrap phase only. Replace with a migration tool (Flyway/Liquibase)
+      # before the schema is relied upon.
+      ddl-auto: update
+    show-sql: false
+
+logging:
+  level:
+    com.runningai: DEBUG
