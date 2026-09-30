@@ -1,0 +1,202 @@
+# Shared helpers for the RunningAI Windows runtime scripts. Dot-source, do not run.
+#
+#   . "$PSScriptRoot\RunningAI.Common.ps1"
+#
+# Nothing here hard-codes a user, drive or install path: the repository root is derived from
+# this file's location. No function touches credentials, tokens or Garmin data.
+
+Set-StrictMode -Version Latest
+
+$script:RepoRoot     = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+$script:RuntimeDir   = Join-Path $script:RepoRoot '.runtime'
+$script:LogDir       = Join-Path $script:RuntimeDir 'logs'
+$script:ConnectorDir = Join-Path $script:RepoRoot 'tools\garmin-connector'
+$script:ServerDir    = Join-Path $script:RepoRoot 'server'
+
+# Exit codes shared by start/stop/status so a Scheduled Task result identifies the failing layer.
+$script:ExitCode = @{ Ok = 0; Docker = 10; Postgres = 11; Connector = 12; Java = 13; Spring = 14; Usage = 2; Other = 1 }
+
+function Get-RepoRoot { $script:RepoRoot }
+
+function Stop-WithError {
+    param([Parameter(Mandatory)][int]$Code, [Parameter(Mandatory)][string]$Message)
+    $ex = New-Object System.Exception $Message
+    $ex.Data['ExitCode'] = $Code
+    throw $ex
+}
+
+function Get-ExitCodeFromError {
+    param($ErrorRecord)
+    $ex = $ErrorRecord.Exception
+    if ($ex -and $ex.Data -and $ex.Data.Contains('ExitCode')) { return [int]$ex.Data['ExitCode'] }
+    return $script:ExitCode.Other
+}
+
+function Write-Step { param([string]$Message) Write-Host ("[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $Message) }
+
+# Runs a native command, returns its exit code and discards output (avoids PowerShell 5.1
+# turning stderr lines into errors).
+function Invoke-NativeQuiet {
+    param([Parameter(Mandatory)][string]$Exe, [string]$Arguments = '')
+    cmd /c "`"$Exe`" $Arguments >nul 2>&1"
+    return $LASTEXITCODE
+}
+
+# Runs a native command and returns stdout+stderr as one string.
+function Invoke-NativeText {
+    param([Parameter(Mandatory)][string]$Exe, [string]$Arguments = '')
+    return (cmd /c "`"$Exe`" $Arguments 2>&1" | Out-String)
+}
+
+function Quote-Argument { param([string]$Value) if ($Value -match '[\s"]') { '"' + ($Value -replace '"', '\"') + '"' } else { $Value } }
+
+# ---- HTTP -----------------------------------------------------------------------------
+
+# Returns the HTTP status code, or $null when nothing answered.
+function Get-HttpStatus {
+    param([Parameter(Mandatory)][string]$Url, [int]$TimeoutSec = 3)
+    try {
+        return [int](Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec $TimeoutSec).StatusCode
+    } catch {
+        $response = $_.Exception.Response
+        if ($response) { return [int]$response.StatusCode }
+        return $null
+    }
+}
+
+function Get-HttpBody {
+    param([Parameter(Mandatory)][string]$Url, [int]$TimeoutSec = 3)
+    # Decode the raw bytes ourselves: for non-text content types (Spring actuator's
+    # application/vnd.spring-boot.actuator.v3+json) Windows PowerShell 5.1 returns .Content as byte[].
+    try {
+        $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec $TimeoutSec
+        return [System.Text.Encoding]::UTF8.GetString($response.RawContentStream.ToArray())
+    } catch { return $null }
+}
+
+# Polls $Test (scriptblock returning $true when ready) until the deadline. $Abort, when given,
+# returns a non-empty string to stop early (for example "process exited").
+function Wait-Until {
+    param(
+        [Parameter(Mandatory)][scriptblock]$Test,
+        [Parameter(Mandatory)][int]$TimeoutSec,
+        [int]$PollSec = 2,
+        [scriptblock]$Abort
+    )
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ($true) {
+        if (& $Test) { return $true }
+        if ($Abort) { $reason = & $Abort; if ($reason) { return $false } }
+        if ((Get-Date) -ge $deadline) { return $false }
+        Start-Sleep -Seconds $PollSec
+    }
+}
+
+function Test-ConnectorHealth {
+    param([int]$Port)
+    $body = Get-HttpBody "http://127.0.0.1:$Port/health"
+    if (-not $body) { return $false }
+    try { return ((ConvertFrom-Json $body).status -eq 'UP') } catch { return $false }
+}
+
+function Test-SpringHealth {
+    param([int]$Port)
+    $body = Get-HttpBody "http://127.0.0.1:$Port/actuator/health"
+    if (-not $body) { return $false }
+    try { return ((ConvertFrom-Json $body).status -eq 'UP') } catch { return $false }
+}
+
+# True when something already listens on the TCP port (so we never start a second process on it).
+function Test-PortInUse {
+    param([int]$Port)
+    return [bool](Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+}
+
+# ---- PID files and process identity ------------------------------------------------------
+
+function Get-PidFilePath { param([Parameter(Mandatory)][string]$Name) Join-Path $script:RuntimeDir "$Name.pid" }
+
+function Read-PidFile {
+    param([Parameter(Mandatory)][string]$Name)
+    $path = Get-PidFilePath $Name
+    if (-not (Test-Path $path)) { return $null }
+    $text = (Get-Content $path -Raw -ErrorAction SilentlyContinue)
+    $value = 0
+    if ($text -and [int]::TryParse($text.Trim(), [ref]$value) -and $value -gt 0) { return $value }
+    return $null
+}
+
+function Write-PidFile {
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][int]$ProcessId)
+    New-Item -ItemType Directory -Force $script:RuntimeDir | Out-Null
+    Set-Content -Path (Get-PidFilePath $Name) -Value $ProcessId -Encoding ascii
+}
+
+function Remove-PidFile { param([Parameter(Mandatory)][string]$Name) Remove-Item (Get-PidFilePath $Name) -Force -ErrorAction SilentlyContinue }
+
+# A PID counts as "ours" only if the live process command line contains every marker
+# (component marker AND this repository root). A recycled PID or a legacy/other process fails.
+function Test-ProcessIdentity {
+    param([Parameter(Mandatory)][int]$ProcessId, [Parameter(Mandatory)][string[]]$Markers)
+    $p = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction SilentlyContinue
+    if (-not $p -or -not $p.CommandLine) { return $false }
+    foreach ($m in $Markers) { if ($p.CommandLine.IndexOf($m, [StringComparison]::OrdinalIgnoreCase) -lt 0) { return $false } }
+    return $true
+}
+
+function Get-ConnectorMarkers { @('garmin_connector', ' serve', $script:RepoRoot) }
+function Get-SpringMarkers    { @('running-ai-server', '-jar', $script:RepoRoot) }
+
+# Returns the tracked PID when it is alive AND still our process; cleans a stale/foreign PID file.
+function Get-TrackedProcessId {
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string[]]$Markers)
+    $tracked = Read-PidFile $Name
+    if ($null -eq $tracked) { return $null }
+    if (Test-ProcessIdentity -ProcessId $tracked -Markers $Markers) { return $tracked }
+    Write-Step "Removing stale $Name.pid (PID $tracked is not this component)."
+    Remove-PidFile $Name
+    return $null
+}
+
+# ---- graceful stop -----------------------------------------------------------------------
+
+# Sends Ctrl+C to a console process from a short-lived helper process (so this script keeps its
+# own console), waits up to $TimeoutSec, and only then falls back to a forced stop.
+# Returns 'graceful', 'forced' or 'not-running'.
+function Stop-TrackedProcess {
+    param(
+        [Parameter(Mandatory)][int]$ProcessId,
+        [Parameter(Mandatory)][string[]]$Markers,
+        [int]$TimeoutSec = 30
+    )
+    if (-not (Test-ProcessIdentity -ProcessId $ProcessId -Markers $Markers)) { return 'not-running' }
+
+    $helper = Join-Path $PSScriptRoot 'Send-CtrlC.ps1'
+    $ps = (Get-Command powershell.exe).Source
+    $argLine = "-NoProfile -ExecutionPolicy Bypass -File $(Quote-Argument $helper) -ProcessId $ProcessId"
+    Start-Process -FilePath $ps -ArgumentList $argLine -WindowStyle Hidden -Wait | Out-Null
+
+    $stopped = Wait-Until -TimeoutSec $TimeoutSec -PollSec 1 -Test { -not (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue) }
+    if ($stopped) { return 'graceful' }
+
+    Write-Step "PID $ProcessId did not exit within ${TimeoutSec}s; forcing stop."
+    Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
+    return 'forced'
+}
+
+# A process inherits an "ignore Ctrl+C" flag when it was started by a parent that had Ctrl+C
+# disabled (some launchers do). Children of this script would then never react to the graceful
+# Ctrl+C in Stop-TrackedProcess, so normal Ctrl+C handling is re-enabled here before spawning them.
+function Enable-CtrlCInheritance {
+    if (-not ('RunningAiCtrlCFlag' -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class RunningAiCtrlCFlag {
+    [DllImport("kernel32.dll")] static extern bool SetConsoleCtrlHandler(IntPtr handler, bool add);
+    public static void Enable() { SetConsoleCtrlHandler(IntPtr.Zero, false); }
+}
+"@
+    }
+    [RunningAiCtrlCFlag]::Enable()
+}

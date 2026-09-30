@@ -317,6 +317,27 @@ INTERVALS_API_KEY                       (예약, 미사용)
 commit되지 않은 변경이 있을 때 Gradle 테스트를 자동으로 돌린다 (commit / push는 하지 않는다).
 같은 스크립트를 직접 실행할 수도 있다: `powershell -File scripts/dev/validate-server.ps1 -Force`.
 
+## Windows Runtime
+
+Windows PC에서 Docker/PostgreSQL → Garmin connector → Spring Boot를 의존 순서대로 기동/종료하는 PowerShell script다
+(`scripts/windows/`). 모두 repo root를 자동 계산하며 반복 실행해도 안전하다. Garmin login은 하지 않는다.
+
+```powershell
+scripts\windows\start-running-ai.ps1                # 기동 (jar가 없으면 build, -Build로 강제 rebuild)
+scripts\windows\status-running-ai.ps1               # 상태 (읽기 전용, Garmin 호출 없음)
+scripts\windows\stop-running-ai.ps1                 # Spring -> connector graceful 종료, DB는 유지 (-StopDatabase로 DB도 stop)
+scripts\windows\install-running-ai-scheduled-task.ps1     # 로그온 시 자동 기동 task "RunningAI-Startup" 등록 (-DryRun으로 미리보기)
+scripts\windows\uninstall-running-ai-scheduled-task.ps1   # 해당 task만 제거
+```
+
+- 사전 준비: Docker Desktop, JDK 21, `tools\garmin-connector\.venv`(Python 3.12 + requirements) 및 수동 `login`으로 만든 token store,
+  DB 접속 정보(OS 환경변수 또는 git-ignore된 root `.env`). 자동 sync는 `RUNNING_AI_GARMIN_SCHEDULER_ENABLED=true`일 때만 동작한다.
+- 런타임 파일은 `.runtime/`(PID, `logs/`)에 생기며 git-ignore 대상이다. stop은 데이터 volume을 절대 삭제하지 않는다.
+- exit code: 0 성공 / 10 Docker / 11 PostgreSQL / 12 connector / 13 Java·build / 14 Spring.
+- 비파괴 self-check: `powershell -File scripts\windows\tests\Test-RunningAI.ps1`.
+- 아직 없는 것: crash watchdog·자동 재시작, log rotation, Windows Service(현재는 로그온 기반). 실제 Garmin 환경(메인 PC) 검증 체크리스트는
+  `docs/work-orders/2026-09-30-windows-runtime-orchestration.md` 9장.
+
 ## Repository 구조
 
 ```text
@@ -325,6 +346,7 @@ running-ai/
 ├─ tools/garmin-connector/  Python Garmin connector (auth · token · read transport)
 ├─ docs/work-orders/    작업지시서 및 구현 기록
 ├─ scripts/dev/         개발용 스크립트 (validate-server.ps1)
+├─ scripts/windows/     Windows 운영 스크립트 (start/stop/status, Scheduled Task)
 ├─ .claude/             Claude Code project skills / hooks
 ├─ CLAUDE.md            Claude Code 프로젝트 규칙
 ├─ docker-compose.yml   로컬 PostgreSQL
