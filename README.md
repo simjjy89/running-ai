@@ -56,7 +56,7 @@ RunningAI는 Windows PC에서 PowerShell / Node.js / 파일 기반으로 동작�
 
 ### 미구현 (예정)
 
-Garmin 자동 sync(scheduler / cursor / sync API), Intervals.icu API 호출, 훈련 자동 생성, Garmin structured
+Garmin 자동 sync(scheduler / retry), Intervals.icu API 호출, 훈련 자동 생성, Garmin structured
 workout 전송, 주간 / 월간 리포트, scheduler, AI / LLM 분석, 알림.
 이 중 일부는 기존 PowerShell / Node.js 구현이 메인 RunningAI PC에 존재하지만,
 아직 이 repository에는 **포함되어 있지 않다**.
@@ -69,6 +69,11 @@ workout 전송, 주간 / 월간 리포트, scheduler, AI / LLM 분석, 알림.
 | POST   | `/api/v1/activities`       | Activity 등록 (201 + `Location`)      |
 | GET    | `/api/v1/activities/{id}`  | Activity 단건 조회                    |
 | GET    | `/api/v1/activities`       | Activity 목록 조회 (최신순)           |
+| POST   | `/api/v1/garmin/sync`      | Garmin incremental sync를 1회 실행 (200 + 결과). 동시 실행 시 409 `GARMIN_SYNC_ALREADY_RUNNING`; 401/403/429 Garmin 오류, 503 connector 불가, 502 upstream 오류 |
+| GET    | `/api/v1/garmin/sync/status` | 현재 checkpoint(`initialized`, `highWaterStartedAt`, `lastSuccessfulSyncAt`)를 DB에서만 조회 |
+
+`POST /api/v1/garmin/sync`는 로컬 Garmin connector가 실행 중이어야 한다. 인증은 아직 없으므로(local/private 전제)
+외부에 노출하지 않는다. `checkpointAdvanced`는 high-water mark가 앞으로 이동했을 때만 true다.
 
 등록 요청 예:
 
@@ -140,7 +145,8 @@ Spring Boot  GarminActivitySource → GarminSyncService → GarminActivityIngest
 `GarminSyncService.syncRecent(limit)`는 최근 N개를 받아 활동별로 ingest하고
 `fetched / created / updated / skipped(미지원 type, raw는 보존) / failed(malformed)`를 집계한다.
 connector 오류(401 / 403 / 429 / 502 / 연결 불가)는 sync를 즉시 중단시키며 자동 재시도하지 않는다.
-**아직 없는 것**: incremental sync cursor, scheduler(`@Scheduled`), sync HTTP API, connector 프로세스 감독 — Phase 3C.
+Incremental sync(high-water mark + overlap)와 운영 API(`POST /api/v1/garmin/sync`, `GET .../sync/status`)는 구현되어 있다.
+**아직 없는 것**: scheduler(`@Scheduled`), retry/backoff, connector 프로세스 감독 — Phase 3C-3.
 
 Ingestion core 자체(활동 1건 기준):
 

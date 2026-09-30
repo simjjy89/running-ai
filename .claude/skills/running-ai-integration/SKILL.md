@@ -57,8 +57,17 @@ binds 127.0.0.1 only, `GET /activities?start=S&limit=N` (`start` optional, defau
 `{code,message}` with `GARMIN_AUTH_REQUIRED|FORBIDDEN|RATE_LIMITED|UPSTREAM_ERROR|CONNECTOR_ERROR`.
 It never touches the database and never normalises. No HTTP login endpoint.
 
-**Not implemented — do not assume it exists:** scheduler / `@Scheduled`, sync HTTP API
-(`POST /api/v1/garmin/sync`), connector process supervision, FIT/TCX/details/splits
+**Operational API (Phase 3C-2):** `POST /api/v1/garmin/sync` runs one
+`GarminIncrementalSyncService.syncIncremental()` behind an in-JVM single-flight guard
+(`GarminSyncOperationService`, `tryLock`; a concurrent call gets 409
+`GARMIN_SYNC_ALREADY_RUNNING`; released in `finally`); `GET /api/v1/garmin/sync/status`
+reads `garmin_sync_state` only (never the connector). Connector failures map to
+401/403/429/503/502 via `GarminSyncExceptionHandler`. `checkpointAdvanced` means the
+high-water mark moved forward (or was created), not merely that
+`lastSuccessfulSyncAt` was refreshed. No authentication on these endpoints.
+
+**Not implemented — do not assume it exists:** scheduler / `@Scheduled`, retry/backoff,
+connector process supervision, FIT/TCX/details/splits
 collection, Intervals.icu, historical backfill beyond `max-pages`. Phase 3B-3
 (`docs/work-orders/2026-09-29-garmin-live-e2e-validation.md`) ran the full
 Connector → Spring → PostgreSQL path against one real Garmin activity twice (live

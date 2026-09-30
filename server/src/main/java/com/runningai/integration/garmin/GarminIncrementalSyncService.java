@@ -135,13 +135,16 @@ public class GarminIncrementalSyncService {
         }
 
         boolean checkpointAdvanced = false;
-        Instant highWaterStartedAt = state.map(GarminSyncState::getHighWaterStartedAt).orElse(null);
+        Instant previousHighWater = state.map(GarminSyncState::getHighWaterStartedAt).orElse(null);
+        Instant highWaterStartedAt = previousHighWater;
         if (failed == 0) {
             Instant candidate = maxStartTimeSeen != null ? maxStartTimeSeen : highWaterStartedAt;
             if (candidate != null) {
                 GarminSyncState advanced = syncStateService.advance(athleteId, candidate, Instant.now());
                 highWaterStartedAt = advanced.getHighWaterStartedAt();
-                checkpointAdvanced = true;
+                // "advanced" = the high-water mark moved forward (or was created). A run that only
+                // refreshes lastSuccessfulSyncAt leaves the high-water mark alone and reports false.
+                checkpointAdvanced = previousHighWater == null || highWaterStartedAt.isAfter(previousHighWater);
             }
         }
 
