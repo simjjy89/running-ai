@@ -357,6 +357,31 @@ scripts\windows\uninstall-running-ai-watchdog-task.ps1          # 이 task만 �
 - 진단: `.runtime/watchdog-status.json`, `.runtime/logs/watchdog.log`, `status-running-ai.ps1`의 Watchdog / RestartBudget 행. Garmin은 호출하지 않으며 `POST /sync`도 하지 않는다.
 - Log retention: 10 MB 초과 또는 재시작 전 로그는 `<name>.<yyyyMMdd-HHmmss>.log`로 rotate, 14일 지난 rotated 로그 삭제 (`.runtime/logs` 안의 RunningAI 로그만).
 
+## Raspberry Pi / Linux Deployment
+
+Raspberry Pi OS 64-bit(arm64) 같은 systemd 호스트용 배포 artifact가 `deploy/linux/`에 있다. **준비 및 정적 검증까지만 끝났고 실제 Pi/systemd에서는 실행해 본 적이 없다.**
+Windows 운영(`scripts/windows/`)과는 별개이며 수정하지 않았다. 상세 절차와 checklist는 [deploy/linux/README.md](deploy/linux/README.md).
+
+```text
+Boot -> systemd -> PostgreSQL -> running-ai-garmin-connector.service -> running-ai.service -> Spring Garmin scheduler
+```
+
+- **책임 분리**: process 생명주기·재시작·restart 폭주 제한·로그는 **systemd/journald**, Garmin 동기화 주기는 **Spring scheduler**(`RUNNING_AI_GARMIN_SCHEDULER_ENABLED=true`), Garmin 인증/token은 **connector**(127.0.0.1 전용). Windows watchdog은 Linux에 포팅하지 않았다.
+- **구성**: `deploy/linux/systemd/`(unit 2개: `Restart=on-failure`, `RestartSec=30`, 10분 3회 start limit, SIGTERM graceful stop, 비root `runningai` 사용자, `NoNewPrivileges`/`PrivateTmp`/`ProtectSystem=full`/`UMask=0077`), `env/`(secret 없는 `*.env.example`), `scripts/`(`install-runtime.sh`, `deploy-app.sh`, `status-running-ai.sh`, `validate-runtime.sh`).
+- **배치**: `/opt/running-ai`(jar·connector·venv, root 소유), `/etc/running-ai/*.env`(0600), `/var/lib/running-ai/garmin-tokens`(0700, Git 밖), 로그는 journald.
+- **PostgreSQL**: 개인 Pi에는 native PostgreSQL을 권장안으로 두되 Docker(기존 `docker-compose.yml`)도 fallback으로 유지한다. 최종 선택은 전환 시점에 한다.
+- **보안**: Spring은 기본으로 모든 interface에 bind하므로 env example에 `SERVER_ADDRESS=127.0.0.1`을 두었다. 인증이 없는 `POST /api/v1/garmin/sync`를 LAN/인터넷에 노출하지 않는다.
+
+```bash
+deploy/linux/scripts/install-runtime.sh --dry-run          # 디렉터리/user/unit 설치 미리보기 (패키지 설치·서비스 시작 없음)
+deploy/linux/scripts/deploy-app.sh --dry-run --connector   # bootJar 빌드 -> 원자적 교체 -> venv -> restart -> health
+deploy/linux/scripts/validate-runtime.sh --static          # 저장소 artifact 정적 검증 (systemd 불필요)
+sudo systemctl enable --now running-ai-garmin-connector running-ai
+journalctl -u running-ai -u running-ai-garmin-connector
+```
+
+- 한계: systemd `Restart=on-failure`는 process 종료만 복구한다(살아 있지만 HTTP가 DOWN인 상태는 감지하지 않음). DB 백업 자동화, 외부 API 인증은 아직 없다.
+
 ## Repository 구조
 
 ```text
@@ -366,6 +391,7 @@ running-ai/
 ├─ docs/work-orders/    작업지시서 및 구현 기록
 ├─ scripts/dev/         개발용 스크립트 (validate-server.ps1)
 ├─ scripts/windows/     Windows 운영 스크립트 (start/stop/status/watchdog, Scheduled Task)
+├─ deploy/linux/        Raspberry Pi / Linux 배포 artifact (systemd unit, env example, scripts)
 ├─ .claude/             Claude Code project skills / hooks
 ├─ CLAUDE.md            Claude Code 프로젝트 규칙
 ├─ docker-compose.yml   로컬 PostgreSQL

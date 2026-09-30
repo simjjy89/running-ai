@@ -1,0 +1,43 @@
+# RunningAI Garmin connector: Garmin login state, token store and read-only transport.
+# Listens on 127.0.0.1 only. systemd owns the process lifecycle (no PID files, no custom watchdog).
+#
+# Install (see deploy/linux/README.md; install-runtime.sh does this and can rewrite the default
+# paths/user below for a non-default layout):
+#   /etc/systemd/system/running-ai-garmin-connector.service
+#
+# Garmin authentication / 403 / 429 problems are answered as HTTP errors by a healthy process, so
+# they never exit the process and never trigger a restart. Only a crash does.
+[Unit]
+Description=RunningAI Garmin connector (localhost only)
+After=network-online.target
+Wants=network-online.target
+# At most 3 automatic starts per 10 minutes; then the unit stays failed until
+# "systemctl reset-failed running-ai-garmin-connector" (restart-storm protection).
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=runningai
+Group=runningai
+WorkingDirectory=/opt/running-ai/connector
+# Mandatory (no leading "-"): a missing file fails the start with a clear systemd message.
+EnvironmentFile=/etc/running-ai/garmin-connector.env
+ExecStart=/opt/running-ai/connector/.venv/bin/python -m garmin_connector --tokenstore /var/lib/running-ai/garmin-tokens serve --port ${GARMIN_CONNECTOR_PORT}
+Restart=on-failure
+RestartSec=30
+# SIGTERM (systemd default) makes uvicorn shut down gracefully.
+TimeoutStopSec=20
+
+# Token store: created 0700 and owned by the service user; the only writable location.
+StateDirectory=running-ai/garmin-tokens
+StateDirectoryMode=0700
+UMask=0077
+Environment=PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

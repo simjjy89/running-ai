@@ -1,0 +1,39 @@
+# RunningAI Spring Boot server (activity storage, Garmin sync scheduler, HTTP API).
+# systemd owns the process lifecycle; the Spring scheduler owns Garmin activity synchronisation.
+#
+# Ordering only (After=): systemd starts the units in order but does NOT wait for them to be
+# healthy. If PostgreSQL is not ready yet, Spring fails fast and Restart=on-failure retries.
+# The connector is Wants= (not Requires=) on purpose: a connector restart must not restart Spring;
+# while it is down, sync attempts just fail and are retried on the next scheduler tick.
+# There is deliberately no Wants=postgresql.service so this also works with the Docker PostgreSQL
+# option (see deploy/linux/README.md for a drop-in that orders after docker.service).
+[Unit]
+Description=RunningAI Spring Boot server
+After=network-online.target postgresql.service running-ai-garmin-connector.service
+Wants=network-online.target running-ai-garmin-connector.service
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=runningai
+Group=runningai
+WorkingDirectory=/opt/running-ai/app
+EnvironmentFile=/etc/running-ai/running-ai.env
+# Java 21 is expected at /usr/bin/java (apt alternatives). Elsewhere: "systemctl edit running-ai"
+# and override ExecStart (install-runtime.sh prints the exact drop-in). JAVA_OPTS may be empty.
+ExecStart=/usr/bin/java $JAVA_OPTS -jar /opt/running-ai/app/running-ai.jar
+# The JVM exits with 143 after a graceful SIGTERM shutdown; that is a clean stop, not a failure.
+SuccessExitStatus=143
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=30
+
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
