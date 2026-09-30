@@ -46,6 +46,17 @@ running-ai:
       fixed-delay: 1h
       initial-delay: 1m
 
+  training:
+    # Training decision context (TrainingDecisionContextService). Heuristics and descriptive labels only.
+    classification:
+      # A single RUN / TREADMILL_RUN at least this long is labelled LONG (RunningAI heuristic).
+      long-run-min-duration: 90m
+    decision:
+      # Load trend is STABLE within +/- this percent of weekly load change (descriptive, not a safety band).
+      stable-band-percent: 10
+      # Calendar days returned as recentPattern (1..28); the history window is fixed at 28 days.
+      pattern-days: 14
+
 management:
   endpoints:
     web:

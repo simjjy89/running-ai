@@ -97,14 +97,24 @@ public class TrainingLoadService {
         Instant from = fromDate.atStartOfDay(zone).toInstant();
         Instant to = toDateInclusive.plusDays(1).atStartOfDay(zone).toInstant();   // exclusive
         Long athleteId = athleteService.getDefaultAthlete().getId();
+        return aggregate(fromDate, toDateInclusive, zone,
+                activityRepository.findByAthleteIdAndStartedAtGreaterThanEqualAndStartedAtLessThan(athleteId, from, to));
+    }
 
+    /**
+     * Groups already-fetched activities into one entry per local day in {@code [fromDate, toDateInclusive]}
+     * (empty days are zeros; rows outside the range are ignored). Lets a caller that also needs the
+     * individual activities use a single query.
+     */
+    List<DailyTrainingLoad> aggregate(LocalDate fromDate, LocalDate toDateInclusive, ZoneId zone,
+                                      Iterable<Activity> activities) {
         Map<LocalDate, Totals> byDay = new TreeMap<>();
         for (LocalDate d = fromDate; !d.isAfter(toDateInclusive); d = d.plusDays(1)) {
             byDay.put(d, new Totals());
         }
-        for (Activity a : activityRepository.findByAthleteIdAndStartedAtGreaterThanEqualAndStartedAtLessThan(athleteId, from, to)) {
+        for (Activity a : activities) {
             Totals t = byDay.get(a.getStartedAt().atZone(zone).toLocalDate());
-            if (t != null) {          // always true for rows inside the queried range
+            if (t != null) {
                 t.add(a);
             }
         }

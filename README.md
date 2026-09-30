@@ -394,7 +394,7 @@ journalctl -u running-ai -u running-ai-garmin-connector
 - **Load 정의: 지원되는 정규화 활동 1분 = 1 load minute** (`trainingLoadMinutes` = 총 duration 초 / 60.0). 대상은 `RUN`, `TREADMILL_RUN`, `INDOOR_CYCLING`. 러닝 거리·시간은 `RUN`, `TREADMILL_RUN`만이며 cycling은 load와 cycling 시간에만 반영된다. 강도(HR, pace, RPE, TRIMP)는 아직 반영하지 않는다.
 - **Timezone**: 일/주는 athlete timezone(기본 `Asia/Seoul`) 캘린더 기준이며 UTC 날짜로 묶지 않는다. 범위는 `[from, to)` 반개구간, 주는 월요일 00:00 시작.
 - 거리는 항상 meters. 잘못된 `date`는 `400 INVALID_REQUEST`.
-- 아직 없는 것: readiness/recovery 모델, 훈련 추천(Phase 4C).
+- 아직 없는 것: readiness/recovery 모델, 워크아웃 처방(훈련 종류 후보는 아래 Training Decision Context).
 
 ### Training State
 
@@ -419,6 +419,36 @@ activeDays7Days   = 일별 load > 0인 날 수,  restDays7Days = 7 - activeDays7
 
 - 창은 모두 athlete timezone의 캘린더 일 기준 rolling 7일이며, `/training-load/weekly`의 월~일 주간과 다르다. 정의할 수 없는 값은 JSON에서 명시적 `null`이다.
 - 한계: duration-only load(강도 미반영), readiness·recovery·부상 위험 해석 없음, SD = 0일 때 monotony 정의 불가, 직전 구간이 0이면 변화율 정의 불가.
+
+### Training Decision Context
+
+| Method | Path | 설명 |
+|--------|------|------|
+| GET | `/api/v1/training-decision-context[?date=YYYY-MM-DD]` | `date`(없으면 athlete 현지 오늘) 기준의 최근 훈련 패턴 + 후보 훈련 종류 |
+
+Phase 4A/4B 결과(`TrainingLoadService`, `TrainingState`)를 재사용해 **의사결정 입력(context)** 만 만든다. 활동 28일치를 쿼리 1회로 읽어 메모리에서 계산하며, 저장·캐시·Garmin 호출·migration은 없다. **candidate training types는 최종 워크아웃 처방이 아니다** (pace, 목표 HR, 반복 수, 구간 거리, Garmin step 없음. 세부 처방은 이후 Phase).
+
+- **일별 분류 (`recentPattern`, 최근 14일, 과거→현재 순)**: `LONG > QUALITY_CANDIDATE > EASY_OR_GENERAL > INDOOR_CYCLING > REST` 우선순위로 하루에 하나. 각 일에 `classificationReason`(`DURATION_THRESHOLD`, `RUNNING_ACTIVITY`, `CYCLING_ONLY`, `NO_ACTIVITY`)과 activityCount, totalLoadMinutes, 러닝 시간·거리, cycling 시간이 붙는다.
+  - **LONG = 단일 RUN/TREADMILL_RUN이 90분 이상** (`running-ai.training.classification.long-run-min-duration`). 하루 합산이 아니라 활동 1건 기준.
+  - **`LONG`과 `QUALITY_CANDIDATE`는 RunningAI heuristic이며 생리학적 사실이 아니다.**
+  - **QUALITY_CANDIDATE는 이번 Phase에서 부여하지 않는다.** 정규화 Activity에는 duration, distance, 평균/최대 HR만 있고 lap·pace zone·개인 LTHR이 없어 확신할 수 있는 기준이 없다. 임의의 bpm threshold를 만들지 않았다. 응답의 `qualityDetectionAvailable=false`, `lastQualityDate`/`daysSinceQuality`는 null.
+- **경과일**: `lastRunningDate`/`daysSinceRunning`(RUN·TREADMILL_RUN), `lastActiveDate`/`daysSinceActive`(지원 활동 전체), `lastLongRunDate`/`daysSinceLongRun`. `daysSince = asOfDate - 마지막 날짜`(캘린더 일, 당일 0). 28일 이력 안에 없으면 null.
+- **연속**: `consecutiveActiveDays`(asOfDate부터 거꾸로 일별 load > 0인 날 수), `consecutiveRestDays`(load = 0인 날 수).
+- **loadTrend**: 4B의 `weeklyLoadChangePercent` 재사용. null → `UNKNOWN`, `> +10%` → `INCREASING`, `< -10%` → `DECREASING`, 그 외 `STABLE` (`running-ai.training.decision.stable-band-percent`). **load trend 라벨은 설명용이며 안전 등급이 아니다.**
+- **candidateTrainingTypes** (`REST, RECOVERY, EASY, QUALITY, LONG, CROSS_TRAINING` 선언 순서, 중복 없음, 단순 Java 조건문):
+
+  | 조건 | 후보 |
+  |------|------|
+  | 28일간 활동 없음 (`LIMITED_HISTORY`) | REST, EASY, CROSS_TRAINING |
+  | 어제·오늘 long run (`daysSinceLongRun <= 1`) 또는 연속 활동 3일 이상 | REST, RECOVERY, EASY |
+  | 위에 해당하지 않고 오늘 load 0 (`consecutiveRestDays >= 1`) | EASY, QUALITY, LONG, CROSS_TRAINING |
+  | 그 외 (오늘 활동 있음, 연속 1~2일) | REST, RECOVERY, EASY, CROSS_TRAINING |
+
+  후보는 “고려할 수 있는 종류”이며 “QUALITY가 안전하다”, “LONG이 위험하다” 같은 의미가 아니다.
+- **reasons** (`DecisionReason`, 선언 순서): `LONG_RUN_RECENT`, `MULTIPLE_ACTIVE_DAYS`, `REST_DAY_RECENT`, `LOAD_INCREASING`, `LOAD_DECREASING`, `LOW_RECENT_ACTIVITY`(이력은 있으나 최근 7일 활동 없음), `NO_RECENT_RUNNING`, `RECENT_CYCLING`(어제·오늘 cycling), `LIMITED_HISTORY`. 모두 context의 데이터로 설명 가능하다.
+- `trainingState`에 4B `TrainingState`가 그대로 포함된다. asOfDate 이후 활동은 어떤 필드에도 반영되지 않는다(look-ahead 없음). 잘못된 `date`는 `400 INVALID_REQUEST`.
+- 설정: `running-ai.training.classification.long-run-min-duration`(90m), `running-ai.training.decision.stable-band-percent`(10), `running-ai.training.decision.pattern-days`(14, 1~28). 이력 창은 4B 28일과 같은 28일 고정.
+- 한계: quality 세션 판별 불가(현재 정규화 필드 한계), pace·HR zone·LTHR 모델 없음, 워크아웃 처방 없음, race goal 인식 없음, readiness/recovery 판정 없음.
 
 ## Repository 구조
 
