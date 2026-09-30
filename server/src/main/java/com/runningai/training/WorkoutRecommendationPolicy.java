@@ -85,8 +85,17 @@ final class WorkoutRecommendationPolicy {
             summary = "An easy run is not among the candidates, so a cross-training session is suggested.";
         } else {
             // Not reachable with candidate sets produced by TrainingDecisionContextService (EASY is always
-            // present unless the restrictive branches above applied). Kept so an intent always exists.
-            intent = candidates.contains(RECOVERY) ? RECOVERY : REST;
+            // present unless a restrictive branch above applied). The intent must stay a member of the
+            // candidates, so the most conservative candidate is used; when neither is present (for example
+            // a QUALITY-only list) this is an invariant violation and no intent outside the candidates is invented.
+            if (candidates.contains(RECOVERY)) {
+                intent = RECOVERY;
+            } else if (candidates.contains(REST)) {
+                intent = REST;
+            } else {
+                throw new IllegalStateException("No selectable workout intent among candidates " + candidates
+                        + " (QUALITY is never auto-selected and no candidate outside the list may be returned)");
+            }
             confidence = RecommendationConfidence.LOW;
             summary = "No preferred intent is available among the candidates, so the most conservative one is suggested.";
         }

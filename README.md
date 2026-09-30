@@ -466,6 +466,22 @@ Phase 4A/4B 결과(`TrainingLoadService`, `TrainingState`)를 재사용해 **의
 - `confidence`는 “규칙과 데이터가 얼마나 명확한가”이고, `dataSufficiency`(최근 14일 활동일 3일 미만 LOW, 6일 이상 + trend 정의됨 HIGH)와 별개다.
 - 한계: quality-session 모델 없음, pace/HR zone/LTHR 없음, 정확한 시간·workout steps 없음, race goal 인식 없음, readiness/recovery 모델 없음.
 
+### Workout Prescription
+
+| Method | Path | 설명 |
+|--------|------|------|
+| GET | `/api/v1/workout-prescription[?date=YYYY-MM-DD]` | `date`(없으면 athlete 현지 오늘)의 추천 intent를 **정확한 시간과 warm-up / main / cool-down 구조**로 변환 |
+
+**Phase 5B-1 converts an intent recommendation into an exact-duration qualitative workout structure. It does not yet contain pace, HR, LTHR, incline, intervals, or Garmin steps.**
+
+`WorkoutRecommendation`(Workout Recommendation)만을 source로 쓰며 intent를 바꾸지 않는다. 응답: `asOfDate`, `intent`, `totalDurationMinutes`(정수 분), `segments`(`type` = `WARM_UP|MAIN|COOL_DOWN|REST`, `durationMinutes`, `intensityClass`, `description`), `summary`(고정 템플릿 영어 문장), 근거 추적용 `recommendation` 전체. 잘못된 `date`는 `400 INVALID_REQUEST`. 저장·캐시·Garmin 호출 없음.
+
+- **Exact duration is currently selected by a deterministic scheduling policy within the recommendation range.** intent별 기본값을 추천 범위 `[durationMinMinutes, durationMaxMinutes]`로 clamp한다(범위가 항상 우선). 생리학적 최적값이 아니다.
+- 현재 기본값(모두 deterministic scheduling default): `REST` 0분(REST segment 1개), `RECOVERY` ≈30분(5/20/5), `EASY` ≈45분(10/30/5), `LONG` ≈90분(10/70/10), `CROSS_TRAINING` ≈45분(5/35/5, 종목 미지정). 범위가 달라지면 segment 시간도 함께 조정된다(EASY 35분 → 5/25/5). segment 합 = 총 시간, 모든 segment >= 0, REST 외에는 MAIN > 0이 항상 보장된다.
+- intensity: warm-up/cool-down `VERY_EASY`, MAIN은 RECOVERY `VERY_EASY`, EASY·LONG·CROSS_TRAINING `EASY` (정성 라벨).
+- **QUALITY는 구조를 만들지 않는다.** QUALITY recommendation이 들어오면 `422 QUALITY_PRESCRIPTION_NOT_SUPPORTED` (현재 추천 모델은 QUALITY를 선택하지 않으므로 정상 경로에서는 발생하지 않는다). 추천 범위가 잘못된 경우(min > max 등)는 조용히 보정하지 않고 내부 오류로 처리한다.
+- 한계: 정확한 시간은 heuristic 기본값이며 athlete별 적응 없음, pace/HR/LTHR/incline 모델 없음, interval 구조 없음, QUALITY 미지원, cross-training 종목 미지정.
+
 ## Repository 구조
 
 ```text

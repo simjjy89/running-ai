@@ -16,6 +16,7 @@ import static com.runningai.training.CandidateTrainingType.QUALITY;
 import static com.runningai.training.CandidateTrainingType.RECOVERY;
 import static com.runningai.training.CandidateTrainingType.REST;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Pure rule tests on hand-built contexts (no database). */
 class WorkoutRecommendationPolicyTest {
@@ -209,11 +210,16 @@ class WorkoutRecommendationPolicyTest {
     // ---- QUALITY -----------------------------------------------------------------------------------
 
     @Test
-    void qualityIsNeverSelectedEvenWhenItIsTheOnlyCandidate() {
-        WorkoutRecommendation onlyQuality = WorkoutRecommendationPolicy.recommend(
-                regular(null, 2, 0, 2, LoadTrend.STABLE, List.of(QUALITY)));
-        assertThat(onlyQuality.recommendedIntent()).isNotEqualTo(QUALITY);
-        assertThat(onlyQuality.recommendedIntent()).isNotNull();
+    void qualityIsNeverSelectedAndNoIntentOutsideTheCandidatesIsInvented() {
+        // QUALITY-only (and other unselectable) candidate lists are invariant violations: no silent fallback
+        for (List<CandidateTrainingType> unselectable : List.of(List.of(QUALITY), List.of(QUALITY, CandidateTrainingType.LONG))) {
+            assertThatThrownBy(() -> WorkoutRecommendationPolicy.recommend(regular(null, 2, 0, 2, LoadTrend.STABLE, unselectable)))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("No selectable workout intent");
+        }
+        // the conservative fallback still stays inside the candidates
+        assertThat(WorkoutRecommendationPolicy.recommend(regular(null, 2, 0, 2, LoadTrend.STABLE, List.of(QUALITY, REST))).recommendedIntent()).isEqualTo(REST);
+        assertThat(WorkoutRecommendationPolicy.recommend(regular(null, 2, 0, 2, LoadTrend.STABLE, List.of(QUALITY, RECOVERY))).recommendedIntent()).isEqualTo(RECOVERY);
 
         WorkoutRecommendation rested = WorkoutRecommendationPolicy.recommend(regular(null, 2, 0, 2, LoadTrend.STABLE, RESTED));
         assertThat(rested.recommendedIntent()).isNotEqualTo(QUALITY);

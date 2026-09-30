@@ -46,6 +46,12 @@ public class GlobalExceptionHandler {
                 .body(ErrorResponse.of("NOT_FOUND", "Resource not found"));
     }
 
+    @ExceptionHandler(UnprocessableRequestException.class)
+    public ResponseEntity<ErrorResponse> handleUnprocessable(UnprocessableRequestException ex) {
+        return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
+                .body(ErrorResponse.of(ex.getCode(), ex.getMessage()));
+    }
+
     @ExceptionHandler(DuplicateResourceException.class)
     public ResponseEntity<ErrorResponse> handleDuplicate(DuplicateResourceException ex) {
         return ResponseEntity.status(HttpStatus.CONFLICT)

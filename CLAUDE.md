@@ -15,9 +15,9 @@ RunningAI automation (which lives only on the main PC and is NOT in this repo).
 - Implemented: Activity API, ActivityRaw JSONB storage, Garmin ingestion + incremental sync via the
   localhost Python connector (`tools/garmin-connector`; Spring never holds Garmin credentials),
   sync API and opt-in scheduler, Windows (`scripts/windows`) and Linux (`deploy/linux`) runtime
-  artifacts, and duration-based training load (`/api/v1/training-load`, `/api/v1/training-state` (acute/chronic, progression, ramp, monotony, strain; measurement only, no ratings), `/api/v1/training-decision-context` (recent daily pattern, days since run/long run, consecutive counters, load trend label, candidate training types; context only, no prescription), `/api/v1/workout-recommendation` (one workout intent + duration range + intensity class from the decision context; deterministic rules, QUALITY never auto-selected, no workout steps), computed from normalised
+  artifacts, and duration-based training load (`/api/v1/training-load`, `/api/v1/training-state` (acute/chronic, progression, ramp, monotony, strain; measurement only, no ratings), `/api/v1/training-decision-context` (recent daily pattern, days since run/long run, consecutive counters, load trend label, candidate training types; context only, no prescription), `/api/v1/workout-recommendation` (one workout intent + duration range + intensity class from the decision context; deterministic rules, QUALITY never auto-selected, no workout steps), `/api/v1/workout-prescription` (exact duration + warm-up/main/cool-down segments for the recommended intent; qualitative intensity only, QUALITY unsupported), computed from normalised
   activities in the athlete timezone, nothing persisted).
-- Planned, not started: workout prescription (exact duration, steps, targets), Intervals.icu, workout generation, reporting.
+- Planned, not started: intensity targets (pace, HR, LTHR, treadmill), QUALITY workout structure, Intervals.icu, workout generation, reporting.
 - Skills with the detailed rules: `running-ai-dev` (workflow), `running-ai-database`
   (schema/persistence), `running-ai-integration` (Garmin / external systems).
 
