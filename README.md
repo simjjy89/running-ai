@@ -71,6 +71,9 @@ workout 전송, 주간 / 월간 리포트, scheduler, AI / LLM 분석, 알림.
 | GET    | `/api/v1/activities`       | Activity 목록 조회 (최신순)           |
 | POST   | `/api/v1/garmin/sync`      | Garmin incremental sync를 1회 실행 (200 + 결과). 동시 실행 시 409 `GARMIN_SYNC_ALREADY_RUNNING`; 401/403/429 Garmin 오류, 503 connector 불가, 502 upstream 오류 |
 | GET    | `/api/v1/garmin/sync/status` | 현재 checkpoint(`initialized`, `highWaterStartedAt`, `lastSuccessfulSyncAt`)를 DB에서만 조회 |
+| GET    | `/api/v1/athlete/intensity-profile` | 현재 athlete의 LTHR / threshold pace 조회 (아래 Athlete Intensity Profile) |
+| PUT    | `/api/v1/athlete/intensity-profile` | LTHR / threshold pace 전체 교체 |
+| GET    | `/api/v1/workout-intensity-targets[?date=YYYY-MM-DD]` | Workout Prescription + pace/HR/트레드밀 target (아래 Workout Intensity Targets) |
 
 `POST /api/v1/garmin/sync`는 로컬 Garmin connector가 실행 중이어야 한다. 인증은 아직 없으므로(local/private 전제)
 외부에 노출하지 않는다. `checkpointAdvanced`는 high-water mark가 앞으로 이동했을 때만 true다.
@@ -117,6 +120,8 @@ validation 오류에는 `{ "field", "message" }` 형태의 `errors` 배열이 �
 | `athlete` | 사용자. `name` unique |
 | `activity` | 정규화된 운동 기록. `(external_source, external_id)` unique, `athlete_id` FK |
 | `activity_raw` | 외부 시스템 원본 payload (`JSONB`). `(external_source, external_id)` unique, `activity_id` nullable FK |
+| `garmin_sync_state` | Garmin incremental sync checkpoint (athlete당 1행, `athlete_id` unique) |
+| `athlete_intensity_profile` | Athlete LTHR / threshold pace (athlete당 1행, `athlete_id` unique, 두 metric 모두 nullable) |
 | `flyway_schema_history` | Flyway migration 이력 |
 
 `activity`는 RunningAI가 실제 사용하는 정규화 데이터이고, `activity_raw`는 Garmin /
@@ -481,6 +486,70 @@ Phase 4A/4B 결과(`TrainingLoadService`, `TrainingState`)를 재사용해 **의
 - intensity: warm-up/cool-down `VERY_EASY`, MAIN은 RECOVERY `VERY_EASY`, EASY·LONG·CROSS_TRAINING `EASY` (정성 라벨).
 - **QUALITY는 구조를 만들지 않는다.** QUALITY recommendation이 들어오면 `422 QUALITY_PRESCRIPTION_NOT_SUPPORTED` (현재 추천 모델은 QUALITY를 선택하지 않으므로 정상 경로에서는 발생하지 않는다). 추천 범위가 잘못된 경우(min > max 등)는 조용히 보정하지 않고 내부 오류로 처리한다.
 - 한계: 정확한 시간은 heuristic 기본값이며 athlete별 적응 없음, pace/HR/LTHR/incline 모델 없음, interval 구조 없음, QUALITY 미지원, cross-training 종목 미지정.
+
+### Athlete Intensity Profile
+
+| Method | Path | 설명 |
+|--------|------|------|
+| GET | `/api/v1/athlete/intensity-profile` | 현재 athlete의 LTHR / threshold pace 조회 |
+| PUT | `/api/v1/athlete/intensity-profile` | LTHR / threshold pace를 **전체 교체**(partial update 아님) |
+
+LTHR(`lactateThresholdHeartRateBpm`, bpm)와 threshold pace(`lactateThresholdPaceSecondsPerKm`, 초/km)는
+workout마다 달라지는 값이 아니라 **athlete 고유 데이터**이므로 persistent model(`athlete_intensity_profile`
+테이블, athlete당 1행)로 관리하며 property/설정 파일에 두지 않는다. 아직 profile이 없으면 GET은 404가 아니라
+`{"initialized": false, "lactateThresholdHeartRateBpm": null, "lactateThresholdPaceSecondsPerKm": null}`을
+반환한다. PUT은 두 필드 모두 optional이며(둘 다, 하나만, 혹은 `null`도 허용 — `null`은 "그 metric 미설정"을
+의미), 값이 있으면 `> 0`만 검증한다(생리학적 상한/하한은 두지 않음, `<= 0`은 `400 VALIDATION_ERROR`). Garmin에서
+LTHR을 자동으로 가져오지 않는다(수동/domain profile만 사용, Garmin 자동 감지는 별도 Phase).
+
+### Workout Intensity Targets
+
+| Method | Path | 설명 |
+|--------|------|------|
+| GET | `/api/v1/workout-intensity-targets[?date=YYYY-MM-DD]` | `date`(없으면 athlete 현지 오늘)의 Workout Prescription에 **pace / %LTHR 심박 / 트레드밀 speed·incline target**을 얹은 결과 |
+
+**Phase 5B-2 layers numeric intensity targets onto the existing Workout Prescription. It does not add
+interval/repeat structure, QUALITY workout generation, or Garmin/Intervals.icu rendering.** 기존
+`GET /api/v1/workout-prescription` 응답/동작은 변경되지 않았다; 이 endpoint는 그 위에 target만 추가한
+새 응답(`TargetedWorkoutPrescription`)을 반환하며 원본 `prescription`과, target을 계산할 때 사용한
+`profile`(위 Athlete Intensity Profile 응답과 동일한 모양)을 그대로 포함한다. Target은 매 요청마다
+"현재" intensity profile로 재계산될 뿐 DB에 저장되지 않으므로, profile을 PUT한 바로 다음 호출부터 새 값이
+반영된다. **과거 `date`를 조회해도 그 시점이 아니라 현재 profile을 사용한다** (profile 변경 이력을 보관하지
+않기 때문 — 알려진 한계).
+
+각 segment는 `primaryTargetType`(`NONE | PACE | HEART_RATE | QUALITATIVE`)을 갖는다: threshold pace가
+있으면 `PACE`, 없고 LTHR만 있으면 `HEART_RATE`, 둘 다 없거나(또는 intensity class에 정의된 band가 없으면)
+`QUALITATIVE`로 fallback한다 — **profile이 전혀 없어도 prescription 자체는 실패하지 않는다.** Pace를 HR보다
+우선하는 것은 향후 outdoor pace / 트레드밀 km/h / Garmin pace target으로의 변환이 더 단순하기 때문이며,
+생리학적 우월성을 뜻하지 않는다. `REST` segment는 항상 `NONE`(target 전부 `null`)이고, **`CROSS_TRAINING`
+intent는 profile 존재 여부와 무관하게 모든 segment가 항상 `QUALITATIVE`다** — 현재 profile은 *running*
+threshold 전용이며 cycling 등 다른 modality에 적용하지 않는다(별도 모델은 향후 Phase). 상위 응답의
+`targetAvailability`(`FULL | PACE_ONLY | HEART_RATE_ONLY | QUALITATIVE_ONLY`)는 이 가용성을 prescription
+전체 기준으로 요약한다.
+
+현재 숫자 target은 5B-1이 실제로 만드는 `VERY_EASY`/`EASY` running segment에만 정의되어 있다(`HARD`/QUALITY
+target 없음). **아래 수치는 RunningAI의 초기 deterministic scheduling heuristic이며, 생리학적으로 검증되거나
+실제 데이터로 튜닝된 값이 아니다:**
+
+```text
+Threshold pace: seconds/km 로 저장. LTHR: bpm 로 저장.
+
+VERY_EASY pace : threshold pace의 125–145%  (숫자가 작을수록 빠른 pace이므로
+EASY pace      : threshold pace의 115–130%   `fastSecondsPerKm`/`slowSecondsPerKm`로 표기, min/max 아님)
+
+VERY_EASY heart rate : LTHR의 65–78%
+EASY heart rate      : LTHR의 75–85%
+```
+
+트레드밀 speed는 `speedKph = 3600 / paceSecondsPerKm`(pace target이 있을 때만; pace 방향과 반대이므로
+`minSpeedKph = 3600 / slowSecondsPerKm`, `maxSpeedKph = 3600 / fastSecondsPerKm`)로 변환하고 0.1 km/h
+단위로 반올림한다(HALF_UP, 예: 10.74→10.7, 10.75→10.8). Treadmill incline은 pace/HR profile과 **무관하게**
+running segment면 항상 제공되는 운영 기본값이다(야외 달리기와 동일한 부하를 의미하지 않음): warm-up/cool-down
+0.0–0.5%, main 0.5–1.0%.
+
+한계: interval/repeat/distance target 없음, QUALITY target 없음, running threshold만 지원(cycling 없음),
+profile 변경 이력 없음(과거 조회도 현재 profile 사용), race pace 없음, RPE 모델 없음, Garmin/Intervals.icu
+렌더링 없음, pace/HR heuristic은 실제 데이터로 튜닝되지 않음.
 
 ## Repository 구조
 
