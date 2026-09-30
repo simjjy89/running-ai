@@ -382,6 +382,20 @@ journalctl -u running-ai -u running-ai-garmin-connector
 
 - 한계: systemd `Restart=on-failure`는 process 종료만 복구한다(살아 있지만 HTTP가 DOWN인 상태는 감지하지 않음). DB 백업 자동화, 외부 API 인증은 아직 없다.
 
+## Training Load
+
+저장된 **정규화 Activity**만으로 훈련량을 계산한다 (Garmin/connector/`activity_raw` 호출 없음, 저장·캐시 없음, 요청마다 계산).
+
+| Method | Path | 설명 |
+|--------|------|------|
+| GET | `/api/v1/training-load[?date=YYYY-MM-DD]` | `date`(없으면 athlete 현지 오늘)를 포함한 최근 7일 / 28일 rolling: `load7Days`, `load28Days`, `runningDistance{7,28}DaysMeters`, `runningDuration{7,28}DaysSeconds`, `activityCount{7,28}Days` |
+| GET | `/api/v1/training-load/weekly[?date=YYYY-MM-DD]` | `date`가 속한 ISO 주(월~일): `weekStart`, `weekEnd`, `activityCount`, `trainingLoadMinutes`, `runningDistanceMeters`, `runningDurationSeconds`, `cyclingDurationSeconds` |
+
+- **Load 정의: 지원되는 정규화 활동 1분 = 1 load minute** (`trainingLoadMinutes` = 총 duration 초 / 60.0). 대상은 `RUN`, `TREADMILL_RUN`, `INDOOR_CYCLING`. 러닝 거리·시간은 `RUN`, `TREADMILL_RUN`만이며 cycling은 load와 cycling 시간에만 반영된다. 강도(HR, pace, RPE, TRIMP)는 아직 반영하지 않는다.
+- **Timezone**: 일/주는 athlete timezone(기본 `Asia/Seoul`) 캘린더 기준이며 UTC 날짜로 묶지 않는다. 범위는 `[from, to)` 반개구간, 주는 월요일 00:00 시작.
+- 거리는 항상 meters. 잘못된 `date`는 `400 INVALID_REQUEST`.
+- 아직 없는 것: acute/chronic·ramp 등 training state(Phase 4B), readiness/recovery 모델.
+
 ## Repository 구조
 
 ```text

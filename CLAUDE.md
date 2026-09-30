@@ -9,12 +9,15 @@ RunningAI automation (which lives only on the main PC and is NOT in this repo).
 - `server/` — Spring Boot 3.5.x, Java 21, Gradle wrapper, PostgreSQL 17, Flyway,
   Spring Data JPA / Hibernate 6, Jackson, JUnit 5 + Spring Test (H2 in tests).
 - Packages under `com.runningai`: `common` (config, exception, health), `athlete`,
-  `activity` (Activity, ActivityRaw, services, HTTP API), `integration/garmin`
-  (offline, fixture-driven ingestion core). Layering: Controller → Service → Entity → Repository.
-- Implemented: Activity API, ActivityRaw JSONB storage, Garmin ingestion core
-  (raw-first, mapper, upsert, reprocess, idempotent). No Garmin network/auth code exists.
-- Planned, not started: Garmin client/auth/scheduler, Intervals.icu, training analysis,
-  workout generation, reporting.
+  `activity` (Activity, ActivityRaw, services, HTTP API), `integration/garmin` (ingestion core,
+  connector HTTP source, incremental sync, sync API, scheduler), `training` (derived training
+  load). Layering: Controller → Service → Entity → Repository.
+- Implemented: Activity API, ActivityRaw JSONB storage, Garmin ingestion + incremental sync via the
+  localhost Python connector (`tools/garmin-connector`; Spring never holds Garmin credentials),
+  sync API and opt-in scheduler, Windows (`scripts/windows`) and Linux (`deploy/linux`) runtime
+  artifacts, and duration-based training load (`/api/v1/training-load`, computed from normalised
+  activities in the athlete timezone, nothing persisted).
+- Planned, not started: training state (acute/chronic), Intervals.icu, workout generation, reporting.
 - Skills with the detailed rules: `running-ai-dev` (workflow), `running-ai-database`
   (schema/persistence), `running-ai-integration` (Garmin / external systems).
 
