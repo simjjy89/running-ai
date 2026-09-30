@@ -22,10 +22,13 @@ RunningAI automation (which lives only on the main PC and is NOT in this repo).
   `/api/v1/workout-intensity-targets` (Workout Prescription + pace / %LTHR heart-rate / treadmill
   speed+incline targets per segment; pace preferred over HR when both available, QUALITATIVE
   fallback when the profile is absent or incomplete, CROSS_TRAINING never uses the running
-  threshold profile; targets are derived every call, never persisted).
+  threshold profile; targets are derived every call, never persisted), and `StructuredWorkout`/
+  `StructuredWorkoutMapper` (`training` package): a provider-neutral, ordered re-shaping of
+  `TargetedWorkoutPrescription` with no Intervals.icu/Garmin syntax, HTTP, publishing or
+  persistence — the intermediate step before a future renderer (not yet implemented).
 - Planned, not started: interval/repeat workout structure, QUALITY workout structure,
-  Garmin/Intervals.icu structured-workout rendering, Intervals.icu API, cycling threshold
-  profile, race pace, RPE model, reporting.
+  Garmin/Intervals.icu structured-workout renderer + publisher (consumes `StructuredWorkout`),
+  cycling threshold profile, race pace, RPE model, reporting.
 - Skills with the detailed rules: `running-ai-dev` (workflow), `running-ai-database`
   (schema/persistence), `running-ai-integration` (Garmin / external systems).
 
