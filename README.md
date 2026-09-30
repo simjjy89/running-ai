@@ -334,9 +334,28 @@ scripts\windows\uninstall-running-ai-scheduled-task.ps1   # 해당 task만 제�
   DB 접속 정보(OS 환경변수 또는 git-ignore된 root `.env`). 자동 sync는 `RUNNING_AI_GARMIN_SCHEDULER_ENABLED=true`일 때만 동작한다.
 - 런타임 파일은 `.runtime/`(PID, `logs/`)에 생기며 git-ignore 대상이다. stop은 데이터 volume을 절대 삭제하지 않는다.
 - exit code: 0 성공 / 10 Docker / 11 PostgreSQL / 12 connector / 13 Java·build / 14 Spring.
-- 비파괴 self-check: `powershell -File scripts\windows\tests\Test-RunningAI.ps1`.
-- 아직 없는 것: crash watchdog·자동 재시작, log rotation, Windows Service(현재는 로그온 기반). 실제 Garmin 환경(메인 PC) 검증 체크리스트는
-  `docs/work-orders/2026-09-30-windows-runtime-orchestration.md` 9장.
+- 비파괴 self-check: `powershell -File scripts\windows\tests\Test-RunningAI.ps1`, `...\Test-Watchdog.ps1` (Docker/Garmin 불필요).
+- 아직 없는 것: Windows Service(현재는 로그온 기반), 알림. 실제 Garmin 환경(메인 PC) 검증 체크리스트는
+  `docs/work-orders/2026-09-30-windows-runtime-orchestration.md` 9장, watchdog은 `docs/work-orders/2026-09-30-windows-watchdog.md` 10장.
+
+### Watchdog (자동 복구)
+
+`RunningAI-Startup` task는 로그온 시 전체 기동만 담당하고, **`RunningAI-Watchdog` task**는 운영 중 장애를 5분마다 점검한다
+(one-shot `watch-running-ai.ps1`, 로그온 5분 후 시작, `MultipleInstances=IgnoreNew`).
+
+```powershell
+scripts\windows\watch-running-ai.ps1 -DryRun                    # 관찰·분류·예정 action만 출력 (아무것도 실행/기록하지 않음)
+scripts\windows\watch-running-ai.ps1 -NoRecovery                # 상태/로그만 갱신, 복구 안 함
+scripts\windows\install-running-ai-watchdog-task.ps1 -DryRun    # task 정의 미리보기
+scripts\windows\install-running-ai-watchdog-task.ps1            # 등록 (AtLogOn +5분, 5분 반복)
+scripts\windows\uninstall-running-ai-watchdog-task.ps1          # 이 task만 제거
+```
+
+- 복구 대상: 죽은 Docker daemon, 중지된 PostgreSQL 컨테이너, 죽었거나 재확인 후에도 unhealthy인 connector / Spring (Docker → PostgreSQL → connector → Spring 순, 단계별 검증, 기존 `start-running-ai.ps1` 재사용).
+- **복구하지 않는 것**: Garmin 인증/403/429/upstream 문제(재시작으로 해결되지 않음, `GarminHint`로 표시만), running-but-unhealthy PostgreSQL(진단만), 다른 프로세스가 점유한 connector/Spring port(FOREIGN_PROCESS, 절대 kill하지 않음).
+- Restart budget: component당 10분에 3회까지. 초과하면 `RESTART_BUDGET_EXCEEDED`로 멈추고 window가 지나면 다시 시도한다. 상태는 `.runtime/watchdog-state.json`(손상되면 격리하고 그 tick은 복구하지 않음).
+- 진단: `.runtime/watchdog-status.json`, `.runtime/logs/watchdog.log`, `status-running-ai.ps1`의 Watchdog / RestartBudget 행. Garmin은 호출하지 않으며 `POST /sync`도 하지 않는다.
+- Log retention: 10 MB 초과 또는 재시작 전 로그는 `<name>.<yyyyMMdd-HHmmss>.log`로 rotate, 14일 지난 rotated 로그 삭제 (`.runtime/logs` 안의 RunningAI 로그만).
 
 ## Repository 구조
 
@@ -346,7 +365,7 @@ running-ai/
 ├─ tools/garmin-connector/  Python Garmin connector (auth · token · read transport)
 ├─ docs/work-orders/    작업지시서 및 구현 기록
 ├─ scripts/dev/         개발용 스크립트 (validate-server.ps1)
-├─ scripts/windows/     Windows 운영 스크립트 (start/stop/status, Scheduled Task)
+├─ scripts/windows/     Windows 운영 스크립트 (start/stop/status/watchdog, Scheduled Task)
 ├─ .claude/             Claude Code project skills / hooks
 ├─ CLAUDE.md            Claude Code 프로젝트 규칙
 ├─ docker-compose.yml   로컬 PostgreSQL

@@ -14,7 +14,7 @@ $script:ConnectorDir = Join-Path $script:RepoRoot 'tools\garmin-connector'
 $script:ServerDir    = Join-Path $script:RepoRoot 'server'
 
 # Exit codes shared by start/stop/status so a Scheduled Task result identifies the failing layer.
-$script:ExitCode = @{ Ok = 0; Docker = 10; Postgres = 11; Connector = 12; Java = 13; Spring = 14; Usage = 2; Other = 1 }
+$script:ExitCode = @{ Ok = 0; Docker = 10; Postgres = 11; Connector = 12; Java = 13; Spring = 14; Usage = 2; Other = 1; WatchdogError = 20; RecoveryFailed = 21 }
 
 function Get-RepoRoot { $script:RepoRoot }
 
@@ -199,4 +199,48 @@ public static class RunningAiCtrlCFlag {
 "@
     }
     [RunningAiCtrlCFlag]::Enable()
+}
+
+# ---- log rotation / retention ------------------------------------------------------------
+# Scope is strictly the RunningAI log directory passed in; only files whose names match the
+# rotated-name pattern below are ever deleted.
+
+$script:ManagedLogNames = @('spring.out', 'spring.err', 'garmin-connector.out', 'garmin-connector.err', 'watchdog')
+$script:RotatedLogPattern = '^(spring\.out|spring\.err|garmin-connector\.out|garmin-connector\.err|watchdog)\.\d{8}-\d{6}(-\d+)?\.log$'
+
+# Renames <name>.log to <name>.<yyyyMMdd-HHmmss>.log when it is non-empty and either -Always is
+# given (before a component (re)starts and re-creates the file) or it exceeds -MaxBytes.
+# A file that is still held open by a running process cannot be renamed; that is reported as
+# $false and simply retried on a later call.
+function Invoke-LogRotation {
+    param(
+        [Parameter(Mandatory)][string]$LogDir,
+        [Parameter(Mandatory)][string]$Name,
+        [long]$MaxBytes = 10MB,
+        [switch]$Always,
+        [datetime]$Now = (Get-Date)
+    )
+    $path = Join-Path $LogDir "$Name.log"
+    if (-not (Test-Path -LiteralPath $path)) { return $false }
+    $length = (Get-Item -LiteralPath $path).Length
+    if ($length -eq 0) { return $false }
+    if (-not $Always -and $length -le $MaxBytes) { return $false }
+    $dest = Join-Path $LogDir ("{0}.{1}.log" -f $Name, $Now.ToString('yyyyMMdd-HHmmss'))
+    $n = 1
+    while (Test-Path -LiteralPath $dest) { $dest = Join-Path $LogDir ("{0}.{1}-{2}.log" -f $Name, $Now.ToString('yyyyMMdd-HHmmss'), $n); $n++ }
+    try { Move-Item -LiteralPath $path -Destination $dest -ErrorAction Stop; return $true } catch { return $false }
+}
+
+# Deletes rotated logs older than $MaxAgeDays. Returns the names removed.
+function Remove-ExpiredLogs {
+    param([Parameter(Mandatory)][string]$LogDir, [int]$MaxAgeDays = 14, [datetime]$Now = (Get-Date))
+    if (-not (Test-Path -LiteralPath $LogDir)) { return @() }
+    $cutoff = $Now.AddDays(-$MaxAgeDays)
+    $removed = @()
+    foreach ($f in (Get-ChildItem -LiteralPath $LogDir -File -ErrorAction SilentlyContinue)) {
+        if ($f.Name -match $script:RotatedLogPattern -and $f.LastWriteTime -lt $cutoff) {
+            try { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction Stop; $removed += $f.Name } catch { }
+        }
+    }
+    return $removed
 }

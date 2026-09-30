@@ -68,3 +68,6 @@ __pycache__/
 # --- Windows runtime orchestration (scripts/windows) ---
 .runtime/
 *.pid
+watchdog-state.json
+watchdog-status.json
+*.corrupt

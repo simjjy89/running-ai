@@ -86,6 +86,7 @@ function Stop-NewConnectorOnFailure {
 
 try {
     New-Item -ItemType Directory -Force $script:LogDir | Out-Null
+    Remove-ExpiredLogs -LogDir $script:LogDir | Out-Null
 
     # ---- 1. Docker -------------------------------------------------------------------
     if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
@@ -137,6 +138,8 @@ try {
         }
 
         $stale = Get-TrackedProcessId 'garmin-connector' (Get-ConnectorMarkers)   # cleans stale PID files
+        # Start-Process truncates the redirected log files, so keep the previous run's logs first.
+        foreach ($n in 'garmin-connector.out', 'garmin-connector.err') { Invoke-LogRotation -LogDir $script:LogDir -Name $n -Always | Out-Null }
         Enable-CtrlCInheritance
         $proc = Start-Process -FilePath $py `
             -ArgumentList "-m garmin_connector serve --port $ConnectorPort" `
@@ -189,6 +192,7 @@ try {
             Write-Warning 'Neither DB_PASSWORD nor a repository-root .env is set; the local profile will try an empty database password.'
         }
         $stale = Get-TrackedProcessId 'spring' (Get-SpringMarkers)
+        foreach ($n in 'spring.out', 'spring.err') { Invoke-LogRotation -LogDir $script:LogDir -Name $n -Always | Out-Null }
         Enable-CtrlCInheritance
         $spring = Start-Process -FilePath $java.Exe `
             -ArgumentList "-jar $(Quote-Argument $jar.FullName)" `

@@ -51,12 +51,10 @@ $detail = if ($springPid) { " (managed, PID $springPid)" } elseif ($springUp) { 
 Format-Row 'Spring' ($(if ($springUp) { 'UP' } else { 'DOWN' }) + " port $SpringPort$detail")
 if (-not $springUp) { $allUp = $false }
 
-# Scheduler: the flag is only visible through the environment of this shell (there is no scheduler status API).
-$scheduler = 'UNKNOWN'
-if ($springUp) {
-    $scheduler = if ($env:RUNNING_AI_GARMIN_SCHEDULER_ENABLED -eq 'true') { 'ENABLED (per this shell environment)' } else { 'DISABLED (default; per this shell environment)' }
-}
-Format-Row 'Scheduler' $scheduler
+# SchedulerConfig: Spring has no scheduler status API, so this only reflects the environment of THIS shell.
+# It does not prove what the running Spring process was started with.
+$schedulerConfig = if ($env:RUNNING_AI_GARMIN_SCHEDULER_ENABLED -eq 'true') { 'enabled=true' } else { 'enabled=false (default)' }
+Format-Row 'SchedulerConfig' "$schedulerConfig (source: current shell environment; Spring not queried)"
 
 # Garmin sync state (database only, no Garmin call)
 if ($springUp) {
@@ -74,6 +72,26 @@ if ($springUp) {
     } else { Format-Row 'LastSync' 'UNKNOWN (status endpoint unreachable)' }
 } else {
     Format-Row 'LastSync' 'UNKNOWN (Spring is down)'
+}
+
+# Watchdog (reads the file the watchdog wrote; nothing is probed or restarted here)
+$watchdogFile = Join-Path $script:RuntimeDir 'watchdog-status.json'
+if (Test-Path -LiteralPath $watchdogFile) {
+    try {
+        $w = ConvertFrom-Json (Get-Content -LiteralPath $watchdogFile -Raw)
+        $checked = [DateTimeOffset]::Parse([string]$w.checkedAt)
+        $ageMin = [int]([DateTimeOffset]::UtcNow - $checked.ToUniversalTime()).TotalMinutes
+        $stale = if ($ageMin -gt 15) { ' - STALE, is the RunningAI-Watchdog task running?' } else { '' }
+        Format-Row 'Watchdog' "$($w.overall)$stale"
+        Format-Row 'LastWatchdogCheck' "$($w.checkedAt) (${ageMin} min ago)"
+        Format-Row 'LastRecovery' "$($w.lastAction)"
+        $used = ($w.restartBudget.used.PSObject.Properties | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join ' '
+        Format-Row 'RestartBudget' "$used (max $($w.restartBudget.maxRestarts) per $($w.restartBudget.windowMinutes) min)"
+        if (@($w.blocked).Count -gt 0) { Format-Row 'WatchdogBlocked' ((@($w.blocked)) -join '; ') }
+        if ($w.garminHint) { Format-Row 'GarminHint' "$($w.garminHint) (informational; needs operator action, not a restart)" }
+    } catch { Format-Row 'Watchdog' 'UNKNOWN (status file unreadable)' }
+} else {
+    Format-Row 'Watchdog' 'NOT RUN (no watchdog-status.json yet)'
 }
 
 exit $(if ($allUp) { $ExitCode.Ok } else { $ExitCode.Other })
