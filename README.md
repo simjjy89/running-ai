@@ -394,7 +394,31 @@ journalctl -u running-ai -u running-ai-garmin-connector
 - **Load 정의: 지원되는 정규화 활동 1분 = 1 load minute** (`trainingLoadMinutes` = 총 duration 초 / 60.0). 대상은 `RUN`, `TREADMILL_RUN`, `INDOOR_CYCLING`. 러닝 거리·시간은 `RUN`, `TREADMILL_RUN`만이며 cycling은 load와 cycling 시간에만 반영된다. 강도(HR, pace, RPE, TRIMP)는 아직 반영하지 않는다.
 - **Timezone**: 일/주는 athlete timezone(기본 `Asia/Seoul`) 캘린더 기준이며 UTC 날짜로 묶지 않는다. 범위는 `[from, to)` 반개구간, 주는 월요일 00:00 시작.
 - 거리는 항상 meters. 잘못된 `date`는 `400 INVALID_REQUEST`.
-- 아직 없는 것: acute/chronic·ramp 등 training state(Phase 4B), readiness/recovery 모델.
+- 아직 없는 것: readiness/recovery 모델, 훈련 추천(Phase 4C).
+
+### Training State
+
+| Method | Path | 설명 |
+|--------|------|------|
+| GET | `/api/v1/training-state[?date=YYYY-MM-DD]` | `date`(없으면 athlete 현지 오늘) 기준의 훈련 상태 **측정값** |
+
+`TrainingLoadService`의 일별 load(최근 28일, 쿼리 1회)에서 계산한다. 저장·캐시·Garmin 호출 없음. **숫자만 제공하며 READY/FATIGUED/위험 같은 판정이나 threshold는 없다.**
+
+```text
+acuteLoad         = 최근 7일 load 합                      (= current7DayLoad)
+chronicLoad       = 최근 28일 load 합 / 4                 (최근 4주의 평균 주간 load. 28일 총합이 아님)
+acuteChronicRatio = acuteLoad / chronicLoad               (chronicLoad = 0이면 null)
+previous7DayLoad  = 그 직전 7일(D-13..D-7) load 합
+rampLoad          = current7DayLoad - previous7DayLoad     (load minutes)
+weeklyLoadChangePercent = (current - previous) / previous * 100   (previous = 0이면 null, 둘 다 0이어도 null)
+runningDistance / runningDuration 의 7일 값, 직전 7일 값, 변화율 (RUN + TREADMILL_RUN만, previous = 0이면 null)
+monotony          = 최근 7일 일별 load의 평균 / 모집단 표준편차(÷N), 휴식일 0 포함  (SD = 0이면 null)
+strain            = current7DayLoad * monotony            (monotony가 null이면 null)
+activeDays7Days   = 일별 load > 0인 날 수,  restDays7Days = 7 - activeDays7Days
+```
+
+- 창은 모두 athlete timezone의 캘린더 일 기준 rolling 7일이며, `/training-load/weekly`의 월~일 주간과 다르다. 정의할 수 없는 값은 JSON에서 명시적 `null`이다.
+- 한계: duration-only load(강도 미반영), readiness·recovery·부상 위험 해석 없음, SD = 0일 때 monotony 정의 불가, 직전 구간이 0이면 변화율 정의 불가.
 
 ## Repository 구조
 

@@ -15,9 +15,9 @@ RunningAI automation (which lives only on the main PC and is NOT in this repo).
 - Implemented: Activity API, ActivityRaw JSONB storage, Garmin ingestion + incremental sync via the
   localhost Python connector (`tools/garmin-connector`; Spring never holds Garmin credentials),
   sync API and opt-in scheduler, Windows (`scripts/windows`) and Linux (`deploy/linux`) runtime
-  artifacts, and duration-based training load (`/api/v1/training-load`, computed from normalised
+  artifacts, and duration-based training load (`/api/v1/training-load`, `/api/v1/training-state` (acute/chronic, progression, ramp, monotony, strain; measurement only, no ratings), computed from normalised
   activities in the athlete timezone, nothing persisted).
-- Planned, not started: training state (acute/chronic), Intervals.icu, workout generation, reporting.
+- Planned, not started: training recommendation inputs, Intervals.icu, workout generation, reporting.
 - Skills with the detailed rules: `running-ai-dev` (workflow), `running-ai-database`
   (schema/persistence), `running-ai-integration` (Garmin / external systems).
 
