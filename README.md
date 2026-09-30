@@ -146,7 +146,30 @@ Spring Boot  GarminActivitySource → GarminSyncService → GarminActivityIngest
 `fetched / created / updated / skipped(미지원 type, raw는 보존) / failed(malformed)`를 집계한다.
 connector 오류(401 / 403 / 429 / 502 / 연결 불가)는 sync를 즉시 중단시키며 자동 재시도하지 않는다.
 Incremental sync(high-water mark + overlap)와 운영 API(`POST /api/v1/garmin/sync`, `GET .../sync/status`)는 구현되어 있다.
-**아직 없는 것**: scheduler(`@Scheduled`), retry/backoff, connector 프로세스 감독 — Phase 3C-3.
+
+### Garmin 자동 sync (scheduler)
+
+기존 `POST /sync`와 같은 경로(`GarminSyncOperationService`, single-flight 공유)를 주기적으로 실행한다. **기본 비활성**이라
+서버를 켜기만 해서는 Garmin/connector를 호출하지 않는다.
+
+```yaml
+running-ai.garmin.scheduler.enabled: false   # 기본값
+running-ai.garmin.scheduler.fixed-delay: 1h  # 이전 실행 종료 후 대기 (fixed delay)
+running-ai.garmin.scheduler.initial-delay: 1m
+```
+
+운영 PC에서 환경변수로 켠다 (로컬 Garmin connector가 실행 중이어야 한다):
+
+```text
+RUNNING_AI_GARMIN_SCHEDULER_ENABLED=true
+RUNNING_AI_GARMIN_SCHEDULER_FIXED_DELAY=1h
+RUNNING_AI_GARMIN_SCHEDULER_INITIAL_DELAY=1m
+```
+
+실패(401/403/429/connector 불가 등)는 로그만 남기고 같은 tick에서 재시도하지 않으며 다음 정기 실행을 기다린다.
+수동 sync가 실행 중이면 해당 tick은 건너뛴다.
+
+**아직 없는 것**: connector 프로세스 감독, scheduler 실행 이력, 외부 API 인증 — Phase 3C-4 이후.
 
 Ingestion core 자체(활동 1건 기준):
 

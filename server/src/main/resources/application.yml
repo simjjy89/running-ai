@@ -38,6 +38,13 @@ running-ai:
       page-size: 50
       overlap: 7d
       max-pages: 10
+    scheduler:
+      # Automatic incremental sync (GarminSyncScheduler). OFF by default so that starting the
+      # server (tests, CI, PCs without a Garmin token) never calls Garmin. Enable on the
+      # operating PC with RUNNING_AI_GARMIN_SCHEDULER_ENABLED=true; needs the local connector.
+      enabled: false
+      fixed-delay: 1h
+      initial-delay: 1m
 
 management:
   endpoints:

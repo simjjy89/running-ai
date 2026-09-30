@@ -66,7 +66,13 @@ reads `garmin_sync_state` only (never the connector). Connector failures map to
 high-water mark moved forward (or was created), not merely that
 `lastSuccessfulSyncAt` was refreshed. No authentication on these endpoints.
 
-**Not implemented — do not assume it exists:** scheduler / `@Scheduled`, retry/backoff,
+**Scheduler (Phase 3C-3):** `GarminSyncScheduler` (`@Scheduled` fixedDelay, `running-ai.garmin.scheduler.enabled`
+default **false**, `fixed-delay` 1h, `initial-delay` 1m; env `RUNNING_AI_GARMIN_SCHEDULER_*`) only calls
+`GarminSyncOperationService.runSync()`, so it shares the single-flight guard with the API. One attempt per tick, no
+retry inside a tick (429/auth/connector-down just wait for the next tick), already-running is a quiet skip,
+nothing escapes the scheduler thread, logs carry counts/reason codes only. Tests must never enable it against a real connector.
+
+**Not implemented — do not assume it exists:** retry/backoff growth, scheduler history,
 connector process supervision, FIT/TCX/details/splits
 collection, Intervals.icu, historical backfill beyond `max-pages`. Phase 3B-3
 (`docs/work-orders/2026-09-29-garmin-live-e2e-validation.md`) ran the full
