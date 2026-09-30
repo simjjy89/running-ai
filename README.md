@@ -450,6 +450,22 @@ Phase 4A/4B 결과(`TrainingLoadService`, `TrainingState`)를 재사용해 **의
 - 설정: `running-ai.training.classification.long-run-min-duration`(90m), `running-ai.training.decision.stable-band-percent`(10), `running-ai.training.decision.pattern-days`(14, 1~28). 이력 창은 4B 28일과 같은 28일 고정.
 - 한계: quality 세션 판별 불가(현재 정규화 필드 한계), pace·HR zone·LTHR 모델 없음, 워크아웃 처방 없음, race goal 인식 없음, readiness/recovery 판정 없음.
 
+### Workout Recommendation
+
+| Method | Path | 설명 |
+|--------|------|------|
+| GET | `/api/v1/workout-recommendation[?date=YYYY-MM-DD]` | `date`(없으면 athlete 현지 오늘)의 **workout intent 하나**와 duration 범위 |
+
+`TrainingDecisionContext`(Training Decision Context)만을 입력으로 오늘 고려할 훈련 종류를 하나 고른다. 저장·캐시·Garmin·외부 모델 호출 없음. 응답: `recommendedIntent`, `durationMinMinutes`/`durationMaxMinutes`, `intensityClass`(`NONE, VERY_EASY, EASY, MODERATE, HARD`), `confidence`, `dataSufficiency`(`LOW, MEDIUM, HIGH`), `reasons`, `summary`(고정 템플릿 영어 문장), 그리고 근거 확인용 `decisionContext` 전체. 잘못된 `date`는 `400 INVALID_REQUEST`.
+
+- **Recommendation chooses workout intent only. It does not generate workout steps** (정확한 시간, 반복, pace, HR target 없음. Phase 5B 이후).
+- **QUALITY is not automatically selected in the initial model.** QUALITY intent는 enum/API에 있지만 quality-session/intensity context가 생기기 전까지 자동 선택하지 않으며, 후보에 있으면 `QUALITY_HISTORY_UNAVAILABLE`이 붙는다.
+- **Recommendation heuristics are scheduling rules, not medical or injury-risk assessments.** 아래 숫자는 훈련 배치용 규칙이며 4B 지표(acute/chronic ratio, monotony, strain)에는 threshold를 걸지 않는다.
+- 선택 순서(첫 매칭, 반드시 context 후보 안에서): ① long run 어제·오늘 + 연속 활동 2일 이상, 또는 연속 활동 4일 이상 → `REST` ② long run 어제·오늘, 또는 연속 활동 3일 이상 → `RECOVERY` ③ 28일간 활동 없음 → `EASY` ④ 마지막 long run이 6일 이상 전이고 history 충분(HIGH)·연속 활동 2일 이하·load trend가 INCREASING 아님·3일 내 러닝 있음 → `LONG` ⑤ 그 외 `EASY`(기본) ⑥ EASY가 후보에 없을 때만 `CROSS_TRAINING`. 후보 목록의 순서는 우선순위가 아니다.
+- duration 범위(분): REST 0-0, RECOVERY 20-40, EASY 30-60, QUALITY 30-70, LONG 75-120, CROSS_TRAINING 30-60. intensity class는 pace/HR/LTHR/RPE 모델이 없는 정성 라벨이다.
+- `confidence`는 “규칙과 데이터가 얼마나 명확한가”이고, `dataSufficiency`(최근 14일 활동일 3일 미만 LOW, 6일 이상 + trend 정의됨 HIGH)와 별개다.
+- 한계: quality-session 모델 없음, pace/HR zone/LTHR 없음, 정확한 시간·workout steps 없음, race goal 인식 없음, readiness/recovery 모델 없음.
+
 ## Repository 구조
 
 ```text
