@@ -242,3 +242,15 @@ publisher stack `IntervalsWorkoutPublisher` → `IntervalsWorkoutClient` (interf
 - The scheduler switch is independent of the master switch and never bypasses it. Tests that enable the scheduler mock `WorkoutPublishApplicationService`
   and pin a blank Intervals key and an unreachable URL; never enable it outside tests until the main-PC legacy writer is disabled and a manual
   smoke test passed (turn master on first, scheduler last).
+
+## MCP workout tool (Phase 6C)
+
+- `com.runningai.integration.mcp`: `PublishWorkoutMcpTool` (adapter; depends only on `WorkoutPublishApplicationService` + `ObjectMapper`) and `McpToolConfig`
+  (only with `running-ai.mcp.enabled=true`; registers the tool as a `List<McpStatelessServerFeatures.SyncToolSpecification>` bean — Spring AI collects
+  List beans, a single spec bean is silently ignored). Spring AI 1.1.8 / MCP SDK 0.18.3, `spring.ai.mcp.server.protocol=STATELESS`, endpoint `/mcp`.
+- `spring.ai.mcp.server.enabled` defaults to **true** in Spring AI; keep it bound to `${running-ai.mcp.enabled}` (`RUNNINGAI_MCP_ENABLED`, default false).
+  Keep annotation scanning and resource/prompt/completion capabilities off; add a tool only deliberately (tool names are stable API).
+- Tool input is an explicit ISO date only (no natural language, no extra arguments, never credentials); failures return `isError=true` with
+  `{"success":false,"code":…}` using the 6A codes; no retry, no MCP lock, no direct Intervals access; the master switch is never bypassed.
+- Do not upgrade Spring Boot or move to Spring AI 2.x for MCP; check `gradlew dependencies` keeps Boot 3.5.16 after any MCP dependency change.
+- `/mcp` is unauthenticated: local/private only. Connecting ChatGPT (and its auth/tunnel) is a separate operational step after the main-PC cutover.

@@ -20,8 +20,33 @@ spring:
       json_type: JSONB
   jackson:
     default-property-inclusion: non_null
+  ai:
+    mcp:
+      server:
+        # MCP server (Spring AI 1.1.x, Phase 6C). Its own default is ON, so it is tied to running-ai.mcp.enabled
+        # (RUNNINGAI_MCP_ENABLED, default false). Streamable HTTP in stateless mode on POST /mcp; only the explicitly
+        # registered publish_workout tool is exposed (no resources / prompts / completions / annotation scanning).
+        # No authentication: never expose /mcp to the public Internet.
+        enabled: ${running-ai.mcp.enabled}
+        protocol: STATELESS
+        type: SYNC
+        name: running-ai
+        version: 0.0.1
+        streamable-http:
+          mcp-endpoint: /mcp
+        annotation-scanner:
+          enabled: false
+        capabilities:
+          tool: true
+          resource: false
+          prompt: false
+          completion: false
 
 running-ai:
+  mcp:
+    # Master switch of the MCP adapter (also switches the Spring AI MCP server above). OFF by default. Even when on, a
+    # publish still needs running-ai.workout-publishing.enabled=true: the tool goes through WorkoutPublishApplicationService.
+    enabled: ${RUNNINGAI_MCP_ENABLED:false}
   default-athlete:
     name: ${RUNNING_AI_ATHLETE_NAME:default}
     timezone: ${RUNNING_AI_ATHLETE_TIMEZONE:Asia/Seoul}

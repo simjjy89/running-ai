@@ -14,7 +14,7 @@ RunningAI automation (which lives only on the main PC and is NOT in this repo).
   scheduler), `integration/intervals` (`IntervalsWorkoutRenderer` + `GarminSafeCueFormatter`:
   renders a `StructuredWorkout` into Intervals.icu Workout Builder text; `IntervalsWorkoutPublisher` +
   `IntervalsWorkoutClient` publish it idempotently with readback verification (Phase 5C-3); no
-  scheduler yet), `training` (derived training load, workout recommendation/prescription/intensity
+  scheduler yet), `integration/mcp` (`publish_workout` MCP tool, off by default), `training` (derived training load, workout recommendation/prescription/intensity
   targets). Layering: Controller → Service → Entity → Repository.
 - Implemented: Activity API, ActivityRaw JSONB storage, Garmin ingestion + incremental sync via the
   localhost Python connector (`tools/garmin-connector`; Spring never holds Garmin credentials),
@@ -47,8 +47,12 @@ RunningAI automation (which lives only on the main PC and is NOT in this repo).
   (`running-ai.workout-publishing.scheduler.enabled` / `WORKOUT_PUBLISHING_SCHEDULER_ENABLED` = false, cron 05:00 Asia/Seoul) only calls
   `WorkoutPublishApplicationService`, never bypasses the master switch, and has no retry or missed-run catch-up. Do not enable the scheduler
   until the main-PC legacy workout writer is disabled and manual Spring publishing has passed an operational smoke test.
+- **MCP adapter is disabled by default** (Phase 6C, package `integration.mcp`): Spring AI 1.1.8 MCP server (Boot 3.5-compatible 1.x line; never
+  Spring AI 2.x / Boot 4 for this), Streamable HTTP stateless on `POST /mcp`, exactly one tool `publish_workout({"date":"YYYY-MM-DD"})` that only
+  calls `WorkoutPublishApplicationService` (master switch still applies). `RUNNINGAI_MCP_ENABLED` (`running-ai.mcp.enabled`) = false also switches
+  the Spring AI server off (its own default is on). `/mcp` has no auth: never expose it publicly; remote ChatGPT transport is not set up.
 - Planned, not started: interval/repeat workout structure, QUALITY workout structure,
-  cycling threshold profile, race pace, RPE model, reporting, ChatGPT integration (Phase 6C), missed-run catch-up / retry / notifications for publishing.
+  cycling threshold profile, race pace, RPE model, reporting, remote ChatGPT ↔ MCP transport + authentication, missed-run catch-up / retry / notifications for publishing.
 - Skills with the detailed rules: `running-ai-dev` (workflow), `running-ai-database`
   (schema/persistence), `running-ai-integration` (Garmin / external systems).
 

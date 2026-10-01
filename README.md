@@ -72,6 +72,7 @@ workout 전송, 주간 / 월간 리포트, scheduler, AI / LLM 분석, 알림.
 | POST   | `/api/v1/garmin/sync`      | Garmin incremental sync를 1회 실행 (200 + 결과). 동시 실행 시 409 `GARMIN_SYNC_ALREADY_RUNNING`; 401/403/429 Garmin 오류, 503 connector 불가, 502 upstream 오류 |
 | GET    | `/api/v1/garmin/sync/status` | 현재 checkpoint(`initialized`, `highWaterStartedAt`, `lastSuccessfulSyncAt`)를 DB에서만 조회 |
 | POST   | `/api/v1/workout-publish`  | 지정 날짜 workout을 Spring 파이프라인으로 Intervals.icu에 publish (기본 비활성 `WORKOUT_PUBLISHING_ENABLED=false` → 409 `WORKOUT_PUBLISHING_DISABLED`; 아래 Workout Publish) |
+| POST   | `/mcp`                     | MCP(Streamable HTTP, stateless) `publish_workout` tool. 기본 비활성(`RUNNINGAI_MCP_ENABLED=false` → 404); 아래 MCP 참고 |
 | GET    | `/api/v1/athlete/intensity-profile` | 현재 athlete의 LTHR / threshold pace 조회 (아래 Athlete Intensity Profile) |
 | PUT    | `/api/v1/athlete/intensity-profile` | LTHR / threshold pace 전체 교체 |
 | GET    | `/api/v1/workout-intensity-targets[?date=YYYY-MM-DD]` | Workout Prescription + pace/HR/트레드밀 target (아래 Workout Intensity Targets) |
@@ -600,6 +601,17 @@ POST /api/v1/workout-publish
 - REST day / 빈 workout은 현재 contract(`INTERVALS_EMPTY_WORKOUT`)대로 오류 로그로 남는다(`SKIPPED_REST_DAY` 같은 새 의미를 만들지 않았다).
 - 로그에는 date / operation / verified / error code / exception 종류만 남는다(키, Authorization, workout 본문, 생리 수치 없음).
 - **운영 활성화 순서**: ① legacy Scheduled Task 조회 → ② legacy writer(create-today-workout / command-channel) disable → ③ legacy 수동 실행 중단 → ④ Spring 최신 main 반영 → ⑤ 재기동 → ⑥ `WORKOUT_PUBLISHING_ENABLED=true` → ⑦ `WORKOUT_PUBLISHING_SCHEDULER_ENABLED=false` 유지 → ⑧ 수동 POST smoke test → ⑨ Intervals/Garmin 정상 확인 → ⑩ 그 뒤에만 scheduler=true. 두 스위치를 한 번에 올리지 않는다.
+
+#### MCP `publish_workout` (Phase 6C, 기본 비활성)
+
+ChatGPT 같은 MCP client용 adapter다. Spring AI **1.1.8**(Spring Boot 3.5 호환 1.x 라인; 2.x는 Boot 4 전용이라 사용하지 않음) + MCP Java SDK 0.18.3, **Streamable HTTP(stateless)** `POST /mcp`.
+
+- 스위치: `RUNNINGAI_MCP_ENABLED`(`running-ai.mcp.enabled`) 기본 **false**. 이 값이 Spring AI MCP 서버 자체(`spring.ai.mcp.server.enabled`, 라이브러리 기본은 true)도 켜고 끈다. 꺼져 있으면 서버·transport·tool이 없고 `/mcp`는 404.
+- tool은 **`publish_workout` 하나**뿐(resources/prompts/completions, annotation scanning 비활성). 입력 `{"date":"YYYY-MM-DD"}`만 허용(자연어 날짜, 추가 인자·credential 거부 → `INVALID_DATE`/`INVALID_ARGUMENT`).
+- 동작: `WorkoutPublishApplicationService.publish(date)` 1회 호출(REST loopback 아님) → 성공 `{"success":true,"date":…,"operation":"CREATED|UPDATED|NO_CHANGE","verified":true,"intent":…,"stepCount":…}`, 실패 `isError=true` + `{"success":false,"code":…,"message":…}`(6A와 같은 코드: `WORKOUT_PUBLISHING_DISABLED`, `WORKOUT_PUBLISH_ALREADY_RUNNING`, `INTERVALS_*`). retry 없음, MCP 전용 lock 없음(6A per-date single-flight 재사용).
+- master switch(`WORKOUT_PUBLISHING_ENABLED`)를 우회하지 못한다: 실제 publish에는 MCP=true **그리고** master=true가 모두 필요. scheduler와는 독립.
+- `/mcp`에는 인증이 없다. 공용 인터넷에 노출하지 않는다(tunnel/port forwarding/reverse proxy 미구성). 실제 ChatGPT 연결은 아직 하지 않았고, **RunningAI MCP 준비 ≠ ChatGPT 계정/워크스페이스의 MCP write 사용 가능 여부**다.
+- 메인 PC 순서: legacy writer 확인·disable → main pull → 재기동 → master=true(scheduler·MCP는 false) → REST 수동 smoke → Intervals/Garmin 확인 → (보안된) MCP transport 연결 → MCP=true → MCP tool smoke → 마지막에 필요하면 scheduler=true. 스위치는 하나씩.
 
 ## Repository 구조
 
