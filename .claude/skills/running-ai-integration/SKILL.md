@@ -206,4 +206,4 @@ publisher stack `IntervalsWorkoutPublisher` → `IntervalsWorkoutClient` (interf
 - `INTERVALS_API_KEY` is never logged or put in an exception; tests use synthetic keys, a mock server or the stateful
   `FakeIntervalsWorkoutClient`, and any Spring test that could publish pins a blank key and an unreachable URL.
 - Not implemented: scheduler / automatic daily publishing, any controller calling the publisher, deletion/cancel,
-  persistence of remote ids, Garmin device validation (Phase 5C-4). Live validation (Phase 5C-3.5, SERVER_VERIFIED: CREATE → NO_CHANGE → UPDATE same id → NO_CHANGE, external_id round-trips) needs a real key and a safe empty date; on this PC the JVM needs `-Djavax.net.ssl.trustStoreType=Windows-ROOT`.
+  persistence of remote ids. Garmin 265 device validation (Phase 5C-4): pace target, %LTHR bpm target and treadmill cue (cue before duration/target) all DEVICE_VERIFIED; in-run gauge/alert NOT TESTED. Live validation (Phase 5C-3.5, SERVER_VERIFIED: CREATE → NO_CHANGE → UPDATE same id → NO_CHANGE, external_id round-trips) needs a real key and a safe empty date; on this PC the JVM needs `-Djavax.net.ssl.trustStoreType=Windows-ROOT`.

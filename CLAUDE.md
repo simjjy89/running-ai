@@ -32,7 +32,7 @@ RunningAI automation (which lives only on the main PC and is NOT in this repo).
   `StructuredWorkout` → deterministic Intervals.icu Workout Builder text), and
   `IntervalsWorkoutPublisher`/`HttpIntervalsWorkoutClient` (Phase 5C-3: Basic-auth HTTP, marker =
   `external_id`, CREATE/UPDATE/NO_CHANGE, no blind POST retry, readback verification; API key from
-  `INTERVALS_API_KEY` only; not called by any controller or scheduler yet; live-validated SERVER_VERIFIED in Phase 5C-3.5).
+  `INTERVALS_API_KEY` only; not called by any controller or scheduler yet; live-validated SERVER_VERIFIED in Phase 5C-3.5; Pace, %LTHR and treadmill-cue Garmin 265 DEVICE_VERIFIED in Phase 5C-4).
 - Planned, not started: interval/repeat workout structure, QUALITY workout structure,
   scheduler/automatic publishing, Garmin device
   end-to-end validation, cycling threshold profile, race pace, RPE model, reporting.
