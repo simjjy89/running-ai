@@ -1,5 +1,13 @@
 plugins {
     id 'java'
+    // Kotlin is the primary language for new AI-coach code (Phase 6E) only; the existing Java
+    // code stays Java. The Kotlin version is the one Spring Boot 3.5.16 already manages for
+    // kotlin-reflect/kotlin-stdlib, so plugin and runtime library versions cannot drift apart.
+    id 'org.jetbrains.kotlin.jvm' version '2.1.21'
+    // Makes Spring-annotated Kotlin classes open and gives @ConfigurationProperties/@Entity
+    // classes a no-arg constructor, so no Kotlin class has to be manually marked `open`.
+    id 'org.jetbrains.kotlin.plugin.spring' version '2.1.21'
+    id 'org.jetbrains.kotlin.plugin.jpa' version '2.1.21'
     id 'org.springframework.boot' version '3.5.16'
     id 'io.spring.dependency-management' version '1.1.7'
 }
@@ -34,6 +42,10 @@ dependencies {
     implementation 'org.flywaydb:flyway-core'
     implementation 'org.flywaydb:flyway-database-postgresql'
 
+    // Kotlin (Phase 6E). Versions come from the Spring Boot BOM, not pinned here.
+    implementation 'org.jetbrains.kotlin:kotlin-reflect'
+    implementation 'com.fasterxml.jackson.module:jackson-module-kotlin'
+
     runtimeOnly 'org.postgresql:postgresql'
     runtimeOnly 'com.h2database:h2'
 
@@ -41,8 +53,25 @@ dependencies {
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
+kotlin {
+    compilerOptions {
+        // Strict JSR-305: Java types annotated @Nullable/@NonNull are treated as genuinely
+        // nullable/non-null in Kotlin instead of as platform types, so the Java interop boundary
+        // is checked by the compiler rather than at runtime.
+        freeCompilerArgs.addAll('-Xjsr305=strict')
+        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21
+    }
+    jvmToolchain(21)
+}
+
 tasks.named('test') {
-    useJUnitPlatform()
+    useJUnitPlatform {
+        // Live Claude CLI evaluation is opt-in: it calls the real CLI and costs money, so it is
+        // never part of `gradlew test`. Run it with -PliveCoachEval (see the Phase 6E work order).
+        if (!project.hasProperty('liveCoachEval')) {
+            excludeTags 'live-coach'
+        }
+    }
     testLogging {
         events 'passed', 'skipped', 'failed'
     }
