@@ -155,8 +155,7 @@ port 8080 was left running throughout, untouched.
 
 ## 8. Commit
 
-See the commit this result doc is part of (branch `main`). Message summarizes the Phase 6D change;
-the commit SHA is reported alongside this summary after it is created.
+`8a6d695` on branch `main` — "feat: add Garmin athlete intensity-profile auto-sync (Phase 6D)".
 
 ## 9. Next phase recommendation
 
