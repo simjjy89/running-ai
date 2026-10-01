@@ -551,6 +551,17 @@ running segment면 항상 제공되는 운영 기본값이다(야외 달리기�
 profile 변경 이력 없음(과거 조회도 현재 profile 사용), race pace 없음, RPE 모델 없음, Garmin/Intervals.icu
 렌더링 없음, pace/HR heuristic은 실제 데이터로 튜닝되지 않음.
 
+### Intervals Workout Publisher
+
+내부 코드(`com.runningai.integration.intervals`)이며 아직 HTTP API, scheduler, 자동 생성에 연결되지 않았다(5C-3).
+`RenderedIntervalsWorkout`을 Intervals.icu 캘린더에 **idempotent하게 publish하고 서버 readback으로 검증**한다.
+
+- 인증/설정: `INTERVALS_API_KEY`(환경변수만, 저장소·로그·예외에 남기지 않음), `running-ai.intervals.athlete-id`(기본 `0` = key 소유자), `base-url`, 타임아웃(기본 3s/15s). key가 없으면 앱은 정상 기동하고 publish만 `INTERVALS_NOT_CONFIGURED`로 실패한다.
+- Logical identity = RunningAI + athlete + 날짜. 소유 표시는 이벤트 `external_id` = `runningai:workout:v1:<athleteId>:<yyyy-MM-dd>` (description은 렌더 텍스트 그대로). legacy `[RunningAI-Control]` description marker 이벤트는 새 이벤트를 만들지 않고 제자리 UPDATE로 인수한다.
+- 결과: `CREATED` / `UPDATED`(같은 event id) / `NO_CHANGE`(쓰기 요청 없음). 소유하지 않은 이벤트는 수정하지 않으며(`INTERVALS_UNMANAGED_WORKOUT_CONFLICT`), 소유 이벤트가 2개 이상이면 아무것도 하지 않고 `INTERVALS_DUPLICATE_OWNED_WORKOUT`.
+- **쓰기 요청은 절대 자동 재시도하지 않는다.** POST가 timeout 등으로 결과를 모르면 같은 POST를 다시 보내지 않고 marker로 재조회해 실제 상태를 따른다. CREATE/UPDATE 후에는 서버에서 다시 읽어 marker·날짜·workout text를 확인하며 다르면 `INTERVALS_READBACK_MISMATCH`.
+- 한계: Intervals 서버 readback까지만 검증한다. Garmin 전달(Intervals→Garmin Connect→기기)은 불투명하며 pace Garmin target은 UNRESOLVED, %LTHR Garmin은 ASSUMED, 새 treadmill cue는 기기 검증 필요(5C-4).
+
 ## Repository 구조
 
 ```text

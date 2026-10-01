@@ -74,7 +74,7 @@ nothing escapes the scheduler thread, logs carry counts/reason codes only. Tests
 
 **Not implemented — do not assume it exists:** retry/backoff growth, scheduler history,
 connector process supervision, FIT/TCX/details/splits
-collection, Intervals.icu, historical backfill beyond `max-pages`. Phase 3B-3
+collection, historical backfill beyond `max-pages`. Phase 3B-3
 (`docs/work-orders/2026-09-29-garmin-live-e2e-validation.md`) ran the full
 Connector → Spring → PostgreSQL path against one real Garmin activity twice (live
 login, live fetch, live sync, live idempotency all passed) — the main contract
@@ -186,8 +186,24 @@ boundaries live in the called services (different beans, so proxies apply). Keep
   as a display-layer curiosity; it must be re-diagnosed (not assumed fixed) before
   `activityName` is ever promoted to a normalized `Activity` field.
 
-## Intervals.icu — current state
+## Intervals.icu — current state (Phase 5C-3)
 
-No Spring server implementation exists yet. When it comes: `IntervalsClient` (network)
-→ application service (ingestion / workout push), with the same raw-first, external-id
-and secrets rules. Investigate the existing PowerShell workflow before designing it.
+`com.runningai.integration.intervals`: `IntervalsWorkoutRenderer` + `GarminSafeCueFormatter` (text only) and the
+publisher stack `IntervalsWorkoutPublisher` → `IntervalsWorkoutClient` (interface) → `HttpIntervalsWorkoutClient`
+(`RestClient`, bean `intervalsRestClient`), config `IntervalsProperties` (`running-ai.intervals.*`: `base-url`,
+`athlete-id` default `0`, `api-key` from `INTERVALS_API_KEY` only, connect/read timeouts).
+
+- Contract (legacy investigation + official docs): HTTP Basic, user `API_KEY`, key as password; athlete id `0` =
+  key owner; `GET /api/v1/athlete/{id}/events?oldest&newest&category=WORKOUT`, `GET/PUT .../events/{eventId}`,
+  `POST .../events`; fields `category, start_date_local (…T00:00:00), type, name, description, external_id`.
+- Ownership marker = `external_id` `runningai:workout:v1:<athleteId>:<yyyy-MM-dd>` (description stays exactly the
+  rendered text). A legacy `[RunningAI-Control]` description marker with no `external_id` is recognised and the
+  event is updated in place (takes over the new marker). Foreign events are never modified; a date that holds only
+  foreign events is `UNMANAGED_WORKOUT_CONFLICT`; 2+ owned events are `DUPLICATE_OWNED_WORKOUT`.
+- Never retry a write. A POST with unknown outcome (timeout, connection failure, 5xx) is resolved by looking the date
+  up by marker, not by posting again. After CREATE/UPDATE the event is read back (marker, date, text); a difference is
+  `READBACK_MISMATCH`.
+- `INTERVALS_API_KEY` is never logged or put in an exception; tests use synthetic keys, a mock server or the stateful
+  `FakeIntervalsWorkoutClient`, and any Spring test that could publish pins a blank key and an unreachable URL.
+- Not implemented: scheduler / automatic daily publishing, any controller calling the publisher, deletion/cancel,
+  persistence of remote ids, Garmin device validation (Phase 5C-4). Live validation needs a real key and a safe date.

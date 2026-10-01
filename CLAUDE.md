@@ -12,8 +12,9 @@ RunningAI automation (which lives only on the main PC and is NOT in this repo).
   AthleteIntensityProfile), `activity` (Activity, ActivityRaw, services, HTTP API),
   `integration/garmin` (ingestion core, connector HTTP source, incremental sync, sync API,
   scheduler), `integration/intervals` (`IntervalsWorkoutRenderer` + `GarminSafeCueFormatter`:
-  renders a `StructuredWorkout` into Intervals.icu Workout Builder text; render-only, no
-  HTTP/publish yet), `training` (derived training load, workout recommendation/prescription/intensity
+  renders a `StructuredWorkout` into Intervals.icu Workout Builder text; `IntervalsWorkoutPublisher` +
+  `IntervalsWorkoutClient` publish it idempotently with readback verification (Phase 5C-3); no
+  scheduler yet), `training` (derived training load, workout recommendation/prescription/intensity
   targets). Layering: Controller → Service → Entity → Repository.
 - Implemented: Activity API, ActivityRaw JSONB storage, Garmin ingestion + incremental sync via the
   localhost Python connector (`tools/garmin-connector`; Spring never holds Garmin credentials),
@@ -28,10 +29,12 @@ RunningAI automation (which lives only on the main PC and is NOT in this repo).
   `StructuredWorkoutMapper` (`training` package): a provider-neutral, ordered re-shaping of
   `TargetedWorkoutPrescription` with no Intervals.icu/Garmin syntax, HTTP, publishing or
   persistence, and `IntervalsWorkoutRenderer`/`GarminSafeCueFormatter` (render-only:
-  `StructuredWorkout` → deterministic Intervals.icu Workout Builder text; no HTTP, no
-  publish, no idempotency marker yet).
+  `StructuredWorkout` → deterministic Intervals.icu Workout Builder text), and
+  `IntervalsWorkoutPublisher`/`HttpIntervalsWorkoutClient` (Phase 5C-3: Basic-auth HTTP, marker =
+  `external_id`, CREATE/UPDATE/NO_CHANGE, no blind POST retry, readback verification; API key from
+  `INTERVALS_API_KEY` only; not called by any controller or scheduler yet).
 - Planned, not started: interval/repeat workout structure, QUALITY workout structure,
-  Intervals.icu publisher (HTTP client, auth, marker-based idempotency), Garmin device
+  scheduler/automatic publishing, Garmin device
   end-to-end validation, cycling threshold profile, race pace, RPE model, reporting.
 - Skills with the detailed rules: `running-ai-dev` (workflow), `running-ai-database`
   (schema/persistence), `running-ai-integration` (Garmin / external systems).

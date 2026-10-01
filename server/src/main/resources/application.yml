@@ -46,6 +46,15 @@ running-ai:
       fixed-delay: 1h
       initial-delay: 1m
 
+  intervals:
+    # Intervals.icu workout publisher (IntervalsWorkoutPublisher). The API key comes from the environment only.
+    base-url: https://intervals.icu
+    # 0 = the athlete that owns the API key (Intervals.icu shortcut)
+    athlete-id: ${INTERVALS_ATHLETE_ID:0}
+    api-key: ${INTERVALS_API_KEY:}
+    connect-timeout: 3s
+    read-timeout: 15s
+
   training:
     # Training decision context (TrainingDecisionContextService). Heuristics and descriptive labels only.
     classification:
