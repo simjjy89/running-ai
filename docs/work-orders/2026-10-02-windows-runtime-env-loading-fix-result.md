@@ -141,8 +141,8 @@ only possible if `.env` was in fact applied before the Java process started.)
 
 ## 7. Commit
 
-See the commit this result doc is part of (branch `main`); SHA recorded here right after the
-commit is created, same as the Phase 6D work order's convention.
+`b2aae70` on branch `main` — "fix: load repo-root .env into the Windows runtime launcher's own
+process env".
 
 ## Known limitation (not in scope, not fixed here)
 
