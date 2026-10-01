@@ -28,6 +28,33 @@ def synthetic_item(activity_id: int = 188081596, type_key: str = "running") -> d
     }
 
 
+def synthetic_lactate_threshold(heart_rate: int | None = 180, speed: float | None = 0.34444348) -> dict[str, Any]:
+    """Shaped like the live-probed contract (Phase 6D-0); all identifiers are synthetic."""
+    return {
+        "speed_and_heart_rate": {
+            "userProfilePK": 1,
+            "version": 1,
+            "calendarDate": "2026-10-01T00:00:00.0",
+            "sequence": 1,
+            "speed": speed,
+            "heartRate": heart_rate,
+            "heartRateCycling": None,
+        },
+        "power": {
+            "userProfilePk": 1,
+            "calendarDate": "2026-10-01T00:00:00.0",
+            "origin": "power",
+            "sport": "RUNNING",
+            "functionalThresholdPower": 300,
+            "weight": 70.0,
+            "powerToWeight": 4.3,
+            "ftpCreateTime": "2026-10-01T00:00:00.0",
+            "weightCreateTime": "2026-09-17T00:00:00.0",
+            "isStale": False,
+        },
+    }
+
+
 class FakeGarmin:
     """Stands in for garminconnect.Garmin in tests."""
 
@@ -38,9 +65,12 @@ class FakeGarmin:
         self.display_name = "synthetic-user"
         self.login_calls: list[str | None] = []
         self.activities_calls: list[tuple[int, int]] = []
+        self.lactate_threshold_calls: int = 0
         self.login_error: Exception | None = None
         self.activities_error: Exception | None = None
+        self.lactate_threshold_error: Exception | None = None
         self.activities_result: Any = [synthetic_item()]
+        self.lactate_threshold_result: Any = synthetic_lactate_threshold()
 
     def login(self, tokenstore: str | None = None) -> tuple[None, None]:
         self.login_calls.append(tokenstore)
@@ -53,6 +83,12 @@ class FakeGarmin:
         if self.activities_error is not None:
             raise self.activities_error
         return self.activities_result
+
+    def get_lactate_threshold(self, **kwargs: Any) -> Any:
+        self.lactate_threshold_calls += 1
+        if self.lactate_threshold_error is not None:
+            raise self.lactate_threshold_error
+        return self.lactate_threshold_result
 
 
 @pytest.fixture

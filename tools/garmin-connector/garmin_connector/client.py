@@ -81,6 +81,22 @@ class GarminGateway:
         logger.info("Fetched %d Garmin activity item(s) (start=%d, limit=%d)", len(items), start, limit)
         return items
 
+    def lactate_threshold(self) -> dict[str, Any]:
+        """Latest running lactate-threshold snapshot (heart rate, speed, power), raw and unprocessed.
+
+        Field names/units are not documented by Garmin or by python-garminconnect; normalisation
+        and unit conversion are Spring's responsibility (see the Phase 6D work order for the
+        live-probed contract). This wrapper only authenticates, calls through and translates errors.
+        """
+        try:
+            result = self._garmin.get_lactate_threshold()
+        except Exception as exc:  # noqa: BLE001 - translated into the error contract
+            raise translate(exc) from exc
+        if not isinstance(result, dict):
+            raise ConnectorError(GARMIN_UPSTREAM_ERROR, "Unexpected lactate threshold shape from Garmin Connect")
+        logger.info("Fetched Garmin lactate threshold snapshot")
+        return result
+
 
 class CachedGatewayProvider:
     """Creates the gateway lazily and reuses it while the session stays valid.
@@ -111,6 +127,15 @@ class CachedGatewayProvider:
         gateway = self()
         try:
             return gateway.recent_activities(limit, start)
+        except ConnectorError as err:
+            if err.code == "GARMIN_AUTH_REQUIRED":
+                self._gateway = None
+            raise
+
+    def lactate_threshold(self) -> dict[str, Any]:
+        gateway = self()
+        try:
+            return gateway.lactate_threshold()
         except ConnectorError as err:
             if err.code == "GARMIN_AUTH_REQUIRED":
                 self._gateway = None

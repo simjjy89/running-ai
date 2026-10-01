@@ -9,7 +9,7 @@ from garminconnect.exceptions import (
 )
 
 from garmin_connector.api import create_app
-from tests.conftest import synthetic_item
+from tests.conftest import synthetic_item, synthetic_lactate_threshold
 
 
 class FakeFetcher:
@@ -25,14 +25,32 @@ class FakeFetcher:
         return self.items[start:start + limit]
 
 
+class FakeLactateThresholdFetcher:
+    def __init__(self) -> None:
+        self.result: dict = synthetic_lactate_threshold()
+        self.error: Exception | None = None
+        self.calls: int = 0
+
+    def __call__(self):
+        self.calls += 1
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
 @pytest.fixture
 def fetcher() -> FakeFetcher:
     return FakeFetcher()
 
 
 @pytest.fixture
-def client(fetcher: FakeFetcher) -> TestClient:
-    return TestClient(create_app(fetcher), raise_server_exceptions=False)
+def lactate_threshold_fetcher() -> FakeLactateThresholdFetcher:
+    return FakeLactateThresholdFetcher()
+
+
+@pytest.fixture
+def client(fetcher: FakeFetcher, lactate_threshold_fetcher: FakeLactateThresholdFetcher) -> TestClient:
+    return TestClient(create_app(fetcher, lactate_threshold_fetcher), raise_server_exceptions=False)
 
 
 def test_health_is_up_regardless_of_garmin_login(client, fetcher):
@@ -106,6 +124,57 @@ def test_activities_maps_upstream_failures_to_error_contract(client, fetcher, er
     assert set(body) == {"code", "message"}
     assert "xyz" not in body["message"] and "cookie" not in body["message"]
     assert fetcher.calls == [(1, 0)]                   # exactly one upstream attempt, no automatic retry
+
+
+def test_lactate_threshold_returns_raw_body_untouched(client, lactate_threshold_fetcher):
+    response = client.get("/lactate-threshold")
+
+    assert response.status_code == 200
+    assert response.json() == lactate_threshold_fetcher.result
+    assert lactate_threshold_fetcher.calls == 1
+
+
+def test_lactate_threshold_passes_through_a_null_empty_result(client, lactate_threshold_fetcher):
+    lactate_threshold_fetcher.result = {
+        "speed_and_heart_rate": {"speed": None, "heartRate": None, "heartRateCycling": None},
+        "power": {},
+    }
+
+    response = client.get("/lactate-threshold")
+
+    assert response.status_code == 200
+    assert response.json()["speed_and_heart_rate"]["heartRate"] is None
+
+
+@pytest.mark.parametrize(
+    "error, status, code",
+    [
+        (GarminConnectAuthenticationError("Username and password are required"), 401, "GARMIN_AUTH_REQUIRED"),
+        (_forbidden(), 403, "GARMIN_FORBIDDEN"),
+        (GarminConnectTooManyRequestsError("Rate limit exceeded"), 429, "GARMIN_RATE_LIMITED"),
+        (GarminConnectConnectionError("HTTP error"), 502, "GARMIN_UPSTREAM_ERROR"),
+        (RuntimeError("token=xyz"), 500, "GARMIN_CONNECTOR_ERROR"),
+    ],
+)
+def test_lactate_threshold_maps_upstream_failures_to_error_contract(client, lactate_threshold_fetcher, error, status, code):
+    lactate_threshold_fetcher.error = error
+
+    response = client.get("/lactate-threshold")
+
+    assert response.status_code == status
+    body = response.json()
+    assert body["code"] == code
+    assert set(body) == {"code", "message"}
+    assert "xyz" not in body["message"] and "cookie" not in body["message"]
+    assert lactate_threshold_fetcher.calls == 1   # exactly one upstream attempt, no automatic retry
+
+
+def test_activities_endpoint_is_unaffected_by_the_new_lactate_threshold_endpoint(client, fetcher, lactate_threshold_fetcher):
+    response = client.get("/activities?limit=2")
+
+    assert response.status_code == 200
+    assert response.json() == fetcher.items
+    assert lactate_threshold_fetcher.calls == 0   # the two endpoints do not call each other
 
 
 def test_no_login_endpoint_and_no_docs(client):

@@ -70,6 +70,16 @@ running-ai:
       enabled: false
       fixed-delay: 1h
       initial-delay: 1m
+    profile-sync:
+      # Automatic Garmin athlete intensity-profile sync (Phase 6D, GarminProfileSyncScheduler).
+      # No master switch (the manual POST /api/v1/garmin/profile-sync always works); only the
+      # automatic trigger is gated, OFF by default so starting the server never calls Garmin.
+      # Independent of the activity sync scheduler and of workout-publishing: never bypasses
+      # either, and workout publishing never depends on this succeeding.
+      scheduler:
+        enabled: ${GARMIN_PROFILE_SYNC_ENABLED:false}
+        cron: ${GARMIN_PROFILE_SYNC_SCHEDULER_CRON:0 30 4 * * *}
+        zone: ${GARMIN_PROFILE_SYNC_SCHEDULER_ZONE:Asia/Seoul}
 
   intervals:
     # Intervals.icu workout publisher (IntervalsWorkoutPublisher). The API key comes from the environment only.

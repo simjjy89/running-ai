@@ -23,11 +23,13 @@ logger = logging.getLogger(__name__)
 SERVICE_NAME = "garmin-connector"
 
 ActivitiesFetcher = Callable[[int, int], list[dict[str, Any]]]
+LactateThresholdFetcher = Callable[[], dict[str, Any]]
 
 
-def create_app(fetch_activities: ActivitiesFetcher) -> FastAPI:
-    """Build the app around a ``fetch_activities(limit, start) -> list[dict]``
-    callable (production: ``CachedGatewayProvider.recent_activities``; tests: a fake)."""
+def create_app(fetch_activities: ActivitiesFetcher, fetch_lactate_threshold: LactateThresholdFetcher) -> FastAPI:
+    """Build the app around a ``fetch_activities(limit, start) -> list[dict]`` callable and a
+    ``fetch_lactate_threshold() -> dict`` callable (production: ``CachedGatewayProvider``'s
+    ``recent_activities``/``lactate_threshold``; tests: fakes)."""
     app = FastAPI(title=SERVICE_NAME, docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.get("/health")
@@ -48,6 +50,17 @@ def create_app(fetch_activities: ActivitiesFetcher) -> FastAPI:
             raise err from exc
         logger.info("GET /activities start=%d limit=%d -> %d item(s)", start, limit, len(items))
         return JSONResponse(content=items)
+
+    @app.get("/lactate-threshold")
+    def lactate_threshold() -> JSONResponse:
+        try:
+            result = fetch_lactate_threshold()
+        except Exception as exc:  # noqa: BLE001 - everything becomes the error contract
+            err = translate(exc)
+            logger.warning("GET /lactate-threshold failed: code=%s status=%d", err.code, err.http_status)
+            raise err from exc
+        logger.info("GET /lactate-threshold -> ok")
+        return JSONResponse(content=result)
 
     @app.exception_handler(ConnectorError)
     def connector_error(_: Request, err: ConnectorError) -> JSONResponse:

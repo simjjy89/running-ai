@@ -3,7 +3,7 @@ from garminconnect.exceptions import GarminConnectAuthenticationError
 
 from garmin_connector.client import CachedGatewayProvider, GarminGateway, unwrap_activity_list
 from garmin_connector.errors import GARMIN_AUTH_REQUIRED, GARMIN_UPSTREAM_ERROR, ConnectorError
-from tests.conftest import FakeGarmin, synthetic_item
+from tests.conftest import FakeGarmin, synthetic_item, synthetic_lactate_threshold
 
 
 def test_unwrap_accepts_bare_list_and_activity_list_wrapper():
@@ -71,6 +71,55 @@ def test_provider_translates_missing_tokens_and_never_logs_in_with_credentials()
 
     assert info.value.code == GARMIN_AUTH_REQUIRED
     assert fake.login_calls == ["~/.garminconnect"]   # exactly one token-store load, no retry
+
+
+def test_lactate_threshold_returns_raw_dict_untouched(fake_garmin):
+    fake_garmin.lactate_threshold_result = synthetic_lactate_threshold(heart_rate=180, speed=0.34444348)
+    gateway = GarminGateway(fake_garmin)
+
+    result = gateway.lactate_threshold()
+
+    assert result == fake_garmin.lactate_threshold_result
+    assert fake_garmin.lactate_threshold_calls == 1
+
+
+def test_lactate_threshold_translates_upstream_failures(fake_garmin):
+    fake_garmin.lactate_threshold_error = GarminConnectAuthenticationError("expired")
+    gateway = GarminGateway(fake_garmin)
+
+    with pytest.raises(ConnectorError) as info:
+        gateway.lactate_threshold()
+    assert info.value.code == GARMIN_AUTH_REQUIRED
+
+
+def test_lactate_threshold_rejects_unexpected_shape(fake_garmin):
+    fake_garmin.lactate_threshold_result = ["not", "a", "dict"]
+    gateway = GarminGateway(fake_garmin)
+
+    with pytest.raises(ConnectorError) as info:
+        gateway.lactate_threshold()
+    assert info.value.code == GARMIN_UPSTREAM_ERROR
+
+
+def test_provider_lactate_threshold_caches_gateway_and_drops_it_on_auth_failure():
+    fake = FakeGarmin()
+    created = []
+
+    def factory():
+        created.append(fake)
+        return fake
+
+    provider = CachedGatewayProvider("~/.garminconnect", garmin_factory=factory)
+    provider.lactate_threshold()
+    provider.lactate_threshold()
+    assert len(created) == 1
+
+    fake.lactate_threshold_error = GarminConnectAuthenticationError("expired")
+    with pytest.raises(ConnectorError):
+        provider.lactate_threshold()
+    fake.lactate_threshold_error = None
+    provider.lactate_threshold()
+    assert len(created) == 2   # reloaded the token store once, not a credential login
 
 
 def test_provider_caches_gateway_and_drops_it_on_auth_failure():

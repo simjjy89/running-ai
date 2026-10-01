@@ -10,7 +10,6 @@ import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientResponseException;
 
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -52,10 +51,9 @@ public class HttpGarminActivitySource implements GarminActivitySource {
                     .retrieve()
                     .body(JsonNode.class);
         } catch (RestClientResponseException e) {
-            throw toConnectorException(e);
+            throw GarminConnectorErrorMapper.toConnectorException(e, objectMapper);
         } catch (ResourceAccessException e) {
-            throw new GarminConnectorException(Reason.UNAVAILABLE, null,
-                    "Garmin connector not reachable: " + describe(e), e);
+            throw GarminConnectorErrorMapper.unavailable(e);
         }
         if (body == null || !body.isArray()) {
             throw new GarminConnectorException(Reason.INVALID_RESPONSE, 200,
@@ -67,34 +65,4 @@ public class HttpGarminActivitySource implements GarminActivitySource {
         return items;
     }
 
-    private GarminConnectorException toConnectorException(RestClientResponseException e) {
-        int status = e.getStatusCode().value();
-        String code = null;
-        String message = null;
-        try {
-            JsonNode error = objectMapper.readTree(e.getResponseBodyAsString());
-            if (error != null && error.isObject()) {
-                code = error.path("code").asText(null);
-                message = error.path("message").asText(null);
-            }
-        } catch (IOException | RuntimeException ignored) {
-            // non-JSON error body: fall back to the status code alone
-        }
-        Reason reason = switch (status) {
-            case 401 -> Reason.AUTH_REQUIRED;
-            case 403 -> Reason.FORBIDDEN;
-            case 429 -> Reason.RATE_LIMITED;
-            case 502 -> Reason.UPSTREAM_ERROR;
-            default -> Reason.CONNECTOR_ERROR;
-        };
-        String text = "Garmin connector responded " + status
-                + (code != null ? " " + code : "")
-                + (message != null ? ": " + message : "");
-        return new GarminConnectorException(reason, status, text, e);
-    }
-
-    private static String describe(ResourceAccessException e) {
-        Throwable cause = e.getCause() != null ? e.getCause() : e;
-        return cause.getClass().getSimpleName();
-    }
 }

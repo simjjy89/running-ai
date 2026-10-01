@@ -68,6 +68,19 @@ class WorkoutIntensityTargetServiceTest {
     }
 
     @Test
+    void garminProfileSyncIsReflectedOnTheVeryNextCall() {
+        TargetedWorkoutPrescription before = service.targetedPrescribe(AS_OF);
+        assertThat(before.targetAvailability()).isEqualTo(TargetAvailability.QUALITATIVE_ONLY);
+
+        profileService.mergeGarminSnapshot(180, 290);
+
+        TargetedWorkoutPrescription after = service.targetedPrescribe(AS_OF);
+        assertThat(after.targetAvailability()).isEqualTo(TargetAvailability.FULL);
+        assertThat(after.profile().lactateThresholdHeartRateBpm()).isEqualTo(180);
+        assertThat(after.profile().lactateThresholdPaceSecondsPerKm()).isEqualTo(290);
+    }
+
+    @Test
     void historicalDateStillUsesTheCurrentProfileNotAPastOne() {
         LocalDate past = AS_OF.minusDays(10);
         TargetedWorkoutPrescription beforeProfile = service.targetedPrescribe(past);
