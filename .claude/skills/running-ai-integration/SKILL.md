@@ -205,7 +205,7 @@ publisher stack `IntervalsWorkoutPublisher` → `IntervalsWorkoutClient` (interf
   `READBACK_MISMATCH`.
 - `INTERVALS_API_KEY` is never logged or put in an exception; tests use synthetic keys, a mock server or the stateful
   `FakeIntervalsWorkoutClient`, and any Spring test that could publish pins a blank key and an unreachable URL.
-- Not implemented: scheduler / automatic daily publishing, any controller calling the publisher, deletion/cancel,
+- Not implemented: scheduler / automatic daily publishing (the only caller is the manual Phase 6A trigger, off by default), deletion/cancel,
   persistence of remote ids. Garmin 265 device validation (Phase 5C-4): pace target, %LTHR bpm target and treadmill cue (cue before duration/target) all DEVICE_VERIFIED; in-run gauge/alert NOT TESTED. Live validation (Phase 5C-3.5, SERVER_VERIFIED: CREATE → NO_CHANGE → UPDATE same id → NO_CHANGE, external_id round-trips) needs a real key and a safe empty date; on this PC the JVM needs `-Djavax.net.ssl.trustStoreType=Windows-ROOT`.
 
 ## Canonical publishing path and legacy retirement (Phase 5C-5)
@@ -221,3 +221,14 @@ publisher stack `IntervalsWorkoutPublisher` → `IntervalsWorkoutClient` (interf
 - Disabling legacy scheduled tasks is a machine operation for the owner (commands in
   `docs/work-orders/2026-10-01-phase-5c-5-legacy-publishing-retirement-result.md`); never change Scheduled Tasks, env vars or
   credentials from the repo or commit them.
+
+## Operational publish trigger (Phase 6A)
+
+- `WorkoutPublishApplicationService.publish(date)` is the single application entrypoint to publishing:
+  `WorkoutIntensityTargetService` → `StructuredWorkoutMapper` → `IntervalsWorkoutRenderer` → `IntervalsWorkoutPublisher`. It recomputes and
+  formats nothing; controllers, a future scheduler (6B) and a future ChatGPT tool call it and never the publisher/client directly.
+- `running-ai.workout-publishing.enabled` (`WORKOUT_PUBLISHING_ENABLED`) defaults to **false** and must stay false while the legacy
+  main-PC writer is active; disabled → 409 `WORKOUT_PUBLISHING_DISABLED`. A per-date in-memory guard rejects a concurrent same-date publish
+  with 409 `WORKOUT_PUBLISH_ALREADY_RUNNING` and is always released in `finally`; no distributed lock.
+- Any Spring test that could reach the publisher pins `running-ai.intervals.api-key=` blank and an unreachable base URL and mocks the
+  publisher / prescription source, exactly like the 5C wiring test; `POST /api/v1/workout-publish` has no authentication (private network only).

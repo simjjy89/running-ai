@@ -55,6 +55,11 @@ running-ai:
     connect-timeout: 3s
     read-timeout: 15s
 
+  workout-publishing:
+    # Manual workout publish trigger (WorkoutPublishApplicationService, POST /api/v1/workout-publish). OFF by default:
+    # do not enable while the legacy main-PC workout publisher is still active (two writers on one calendar).
+    enabled: ${WORKOUT_PUBLISHING_ENABLED:false}
+
   training:
     # Training decision context (TrainingDecisionContextService). Heuristics and descriptive labels only.
     classification:

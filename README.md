@@ -71,6 +71,7 @@ workout 전송, 주간 / 월간 리포트, scheduler, AI / LLM 분석, 알림.
 | GET    | `/api/v1/activities`       | Activity 목록 조회 (최신순)           |
 | POST   | `/api/v1/garmin/sync`      | Garmin incremental sync를 1회 실행 (200 + 결과). 동시 실행 시 409 `GARMIN_SYNC_ALREADY_RUNNING`; 401/403/429 Garmin 오류, 503 connector 불가, 502 upstream 오류 |
 | GET    | `/api/v1/garmin/sync/status` | 현재 checkpoint(`initialized`, `highWaterStartedAt`, `lastSuccessfulSyncAt`)를 DB에서만 조회 |
+| POST   | `/api/v1/workout-publish`  | 지정 날짜 workout을 Spring 파이프라인으로 Intervals.icu에 publish (기본 비활성 `WORKOUT_PUBLISHING_ENABLED=false` → 409 `WORKOUT_PUBLISHING_DISABLED`; 아래 Workout Publish) |
 | GET    | `/api/v1/athlete/intensity-profile` | 현재 athlete의 LTHR / threshold pace 조회 (아래 Athlete Intensity Profile) |
 | PUT    | `/api/v1/athlete/intensity-profile` | LTHR / threshold pace 전체 교체 |
 | GET    | `/api/v1/workout-intensity-targets[?date=YYYY-MM-DD]` | Workout Prescription + pace/HR/트레드밀 target (아래 Workout Intensity Targets) |
@@ -553,7 +554,7 @@ profile 변경 이력 없음(과거 조회도 현재 profile 사용), race pace 
 
 ### Intervals Workout Publisher
 
-내부 코드(`com.runningai.integration.intervals`)이며 아직 HTTP API, scheduler, 자동 생성에 연결되지 않았다(5C-3).
+내부 코드(`com.runningai.integration.intervals`)이며 scheduler, 자동 생성에는 연결되지 않았다(5C-3). 수동 HTTP trigger는 아래 Workout Publish(6A).
 `RenderedIntervalsWorkout`을 Intervals.icu 캘린더에 **idempotent하게 publish하고 서버 readback으로 검증**한다.
 
 - 인증/설정: `INTERVALS_API_KEY`(환경변수만, 저장소·로그·예외에 남기지 않음), `running-ai.intervals.athlete-id`(기본 `0` = key 소유자), `base-url`, 타임아웃(기본 3s/15s). key가 없으면 앱은 정상 기동하고 publish만 `INTERVALS_NOT_CONFIGURED`로 실패한다.
@@ -561,6 +562,25 @@ profile 변경 이력 없음(과거 조회도 현재 profile 사용), race pace 
 - 결과: `CREATED` / `UPDATED`(같은 event id) / `NO_CHANGE`(쓰기 요청 없음). 소유하지 않은 이벤트는 수정하지 않으며(`INTERVALS_UNMANAGED_WORKOUT_CONFLICT`), 소유 이벤트가 2개 이상이면 아무것도 하지 않고 `INTERVALS_DUPLICATE_OWNED_WORKOUT`.
 - **쓰기 요청은 절대 자동 재시도하지 않는다.** POST가 timeout 등으로 결과를 모르면 같은 POST를 다시 보내지 않고 marker로 재조회해 실제 상태를 따른다. CREATE/UPDATE 후에는 서버에서 다시 읽어 marker·날짜·workout text를 확인하며 다르면 `INTERVALS_READBACK_MISMATCH`.
 - 한계: Intervals 서버 readback까지만 검증한다. Garmin 전달(Intervals→Garmin Connect→기기)은 불투명하며 pace Garmin target은 UNRESOLVED, %LTHR Garmin은 ASSUMED, 새 treadmill cue는 기기 검증 필요(5C-4).
+
+### Workout Publish (수동 운영 trigger, Phase 6A)
+
+검증된 파이프라인 앞에 놓인 **명시적 수동 trigger**다. **기본 비활성**이며 scheduler/ChatGPT와는 연결되어 있지 않다.
+
+```text
+POST /api/v1/workout-publish
+  → WorkoutPublishApplicationService
+      WorkoutIntensityTargetService.targetedPrescribe(date)   (기존 prescription 흐름)
+      → StructuredWorkoutMapper → IntervalsWorkoutRenderer → IntervalsWorkoutPublisher
+```
+
+- 요청: `{"date": "2026-10-02"}` (필수, athlete-local 날짜; "오늘" 자동 선택 없음). GET으로는 publish되지 않는다.
+- 응답 200: `{"date":"2026-10-02","operation":"CREATED","verified":true,"intent":"EASY","stepCount":3}` — `operation`은 `CREATED` / `UPDATED` / `NO_CHANGE`(publisher 의미 그대로, 반복 호출 idempotency도 publisher 담당). remote event id는 응답에 노출하지 않는다.
+- **안전 스위치**: `running-ai.workout-publishing.enabled` = `WORKOUT_PUBLISHING_ENABLED`, **기본 `false`**. 꺼져 있으면 409 `WORKOUT_PUBLISHING_DISABLED`. 메인 PC의 legacy workout publisher를 끄기 전에는 어떤 PC에서도 `true`로 운영하지 않는다(두 writer가 같은 캘린더에 쓰게 된다).
+- **Single-flight**: 같은 날짜의 publish가 JVM 안에서 이미 실행 중이면 즉시 409 `WORKOUT_PUBLISH_ALREADY_RUNNING`(대기/큐 없음). 다른 날짜는 병렬 가능, 성공/실패와 무관하게 guard는 해제된다. 분산 lock은 없다(단일 인스턴스 전제).
+- 오류 코드: 400 `VALIDATION_ERROR`/`INVALID_REQUEST`; 409 `WORKOUT_PUBLISHING_DISABLED`, `WORKOUT_PUBLISH_ALREADY_RUNNING`, `INTERVALS_DUPLICATE_OWNED_WORKOUT`, `INTERVALS_UNMANAGED_WORKOUT_CONFLICT`; 401 `INTERVALS_AUTH_FAILED`; 403 `INTERVALS_FORBIDDEN`; 429 `INTERVALS_RATE_LIMITED`; 503 `INTERVALS_NOT_CONFIGURED`/`INTERVALS_CONNECTION_FAILED`; 504 `INTERVALS_TIMEOUT`; 502 `INTERVALS_UPSTREAM_ERROR`/`INTERVALS_READBACK_MISMATCH`/`INTERVALS_CLIENT_ERROR`/`INTERVALS_INVALID_RESPONSE`; 422 `INTERVALS_EMPTY_WORKOUT`(예: REST day). 그 밖의 prescription/domain 오류는 기존 전역 handler를 따른다.
+- 인증이 없으므로 이 endpoint를 공용 인터넷에 노출하지 않는다(local/private 전제; ChatGPT connector 단계에서 인증 경계를 별도로 설계).
+- **메인 PC 전환 절차**: ① 메인 PC legacy Scheduled Task 조사 → ② legacy writer disable → ③ 수동 shortcut/습관 중단 → ④ legacy가 더 이상 실행되지 않음 확인 → ⑤ Spring 서버 배포/기동 확인 → ⑥ `WORKOUT_PUBLISHING_ENABLED=true` → ⑦ 수동 publish smoke test → ⑧ scheduler는 아직 OFF (Phase 6B).
 
 ## Repository 구조
 
