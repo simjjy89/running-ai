@@ -102,6 +102,26 @@ running-ai:
       cron: ${WORKOUT_PUBLISHING_SCHEDULER_CRON:0 0 5 * * *}
       zone: ${WORKOUT_PUBLISHING_SCHEDULER_ZONE:Asia/Seoul}
 
+  coach:
+    # AI coach (Phase 6E). Designs workout DRAFTS only: nothing in this path can publish to
+    # Intervals or write to Garmin, whatever running-ai.workout-publishing.enabled is set to.
+    # Holds no credential: the Claude provider uses the Claude Code CLI's own login session on
+    # this host (no ANTHROPIC_API_KEY is read, stored or forwarded anywhere).
+    provider: ${RUNNING_AI_COACH_PROVIDER:CLAUDE}
+    claude:
+      command: ${RUNNING_AI_COACH_CLAUDE_COMMAND:claude}
+      model: ${RUNNING_AI_COACH_CLAUDE_MODEL:sonnet}
+      timeout: ${RUNNING_AI_COACH_CLAUDE_TIMEOUT:120s}
+      max-output-bytes: 1048576
+      max-error-bytes: 65536
+    validation:
+      # Hard-safety bounds only (malformed/nonsense output), never coaching policy: they are set
+      # far outside anything a real session would use so they cannot second-guess the coach.
+      max-total-duration-minutes: 300
+      min-total-duration-minutes: 5
+      pace-plausibility-tolerance: 0.5
+      heart-rate-plausibility-tolerance: 0.5
+
   training:
     # Training decision context (TrainingDecisionContextService). Heuristics and descriptive labels only.
     classification:
