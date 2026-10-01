@@ -59,6 +59,13 @@ running-ai:
     # Manual workout publish trigger (WorkoutPublishApplicationService, POST /api/v1/workout-publish). OFF by default:
     # do not enable while the legacy main-PC workout publisher is still active (two writers on one calendar).
     enabled: ${WORKOUT_PUBLISHING_ENABLED:false}
+    scheduler:
+      # Automatic daily trigger (WorkoutPublishingScheduler); calls only WorkoutPublishApplicationService. OFF by default and
+      # independent of the master switch above (which it never bypasses). Enable only after the legacy main-PC writer is
+      # disabled AND a manual POST smoke test passed. No retry, no catch-up of missed runs.
+      enabled: ${WORKOUT_PUBLISHING_SCHEDULER_ENABLED:false}
+      cron: ${WORKOUT_PUBLISHING_SCHEDULER_CRON:0 0 5 * * *}
+      zone: ${WORKOUT_PUBLISHING_SCHEDULER_ZONE:Asia/Seoul}
 
   training:
     # Training decision context (TrainingDecisionContextService). Heuristics and descriptive labels only.

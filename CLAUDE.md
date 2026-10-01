@@ -42,10 +42,13 @@ RunningAI automation (which lives only on the main PC and is NOT in this repo).
 - **Workout publishing is operationally disabled by default** (Phase 6A): `running-ai.workout-publishing.enabled` /
   `WORKOUT_PUBLISHING_ENABLED` = false. Do not enable it on any PC while the legacy main-PC workout writer is active.
   The only trigger is `POST /api/v1/workout-publish` (explicit date) → `WorkoutPublishApplicationService` (per-date
-  in-JVM single-flight); a future scheduler / ChatGPT tool must call that service, never the publisher or Intervals directly.
+  in-JVM single-flight); the scheduler (6B) and a future ChatGPT tool must call that service, never the publisher or Intervals directly.
+- **Automatic workout publishing is disabled by default** (Phase 6B): `WorkoutPublishingScheduler`
+  (`running-ai.workout-publishing.scheduler.enabled` / `WORKOUT_PUBLISHING_SCHEDULER_ENABLED` = false, cron 05:00 Asia/Seoul) only calls
+  `WorkoutPublishApplicationService`, never bypasses the master switch, and has no retry or missed-run catch-up. Do not enable the scheduler
+  until the main-PC legacy workout writer is disabled and manual Spring publishing has passed an operational smoke test.
 - Planned, not started: interval/repeat workout structure, QUALITY workout structure,
-  scheduler/automatic publishing, Garmin device
-  end-to-end validation, cycling threshold profile, race pace, RPE model, reporting.
+  cycling threshold profile, race pace, RPE model, reporting, ChatGPT integration (Phase 6C), missed-run catch-up / retry / notifications for publishing.
 - Skills with the detailed rules: `running-ai-dev` (workflow), `running-ai-database`
   (schema/persistence), `running-ai-integration` (Garmin / external systems).
 

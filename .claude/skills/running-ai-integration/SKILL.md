@@ -232,3 +232,13 @@ publisher stack `IntervalsWorkoutPublisher` → `IntervalsWorkoutClient` (interf
   with 409 `WORKOUT_PUBLISH_ALREADY_RUNNING` and is always released in `finally`; no distributed lock.
 - Any Spring test that could reach the publisher pins `running-ai.intervals.api-key=` blank and an unreachable base URL and mocks the
   publisher / prescription source, exactly like the 5C wiring test; `POST /api/v1/workout-publish` has no authentication (private network only).
+
+## Workout publishing scheduler (Phase 6B)
+
+- `WorkoutPublishingScheduler` (`@ConditionalOnProperty running-ai.workout-publishing.scheduler.enabled=true`, default false; cron default
+  `0 0 5 * * *`, zone default `Asia/Seoul`) calls only `WorkoutPublishApplicationService.publish(today)`; "today" is `LocalDate.now` in the configured
+  zone from the shared `Clock`, never the OS default zone. It adds no lock (6A's per-date single-flight covers overlap with manual POST), no retry and no
+  missed-run catch-up, and every failure is logged (date + error code / exception class only) without escaping the scheduler thread.
+- The scheduler switch is independent of the master switch and never bypasses it. Tests that enable the scheduler mock `WorkoutPublishApplicationService`
+  and pin a blank Intervals key and an unreachable URL; never enable it outside tests until the main-PC legacy writer is disabled and a manual
+  smoke test passed (turn master on first, scheduler last).

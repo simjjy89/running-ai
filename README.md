@@ -582,6 +582,25 @@ POST /api/v1/workout-publish
 - 인증이 없으므로 이 endpoint를 공용 인터넷에 노출하지 않는다(local/private 전제; ChatGPT connector 단계에서 인증 경계를 별도로 설계).
 - **메인 PC 전환 절차**: ① 메인 PC legacy Scheduled Task 조사 → ② legacy writer disable → ③ 수동 shortcut/습관 중단 → ④ legacy가 더 이상 실행되지 않음 확인 → ⑤ Spring 서버 배포/기동 확인 → ⑥ `WORKOUT_PUBLISHING_ENABLED=true` → ⑦ 수동 publish smoke test → ⑧ scheduler는 아직 OFF (Phase 6B).
 
+#### 자동 daily trigger (Phase 6B, `WorkoutPublishingScheduler`)
+
+매일 지정 시각에 **당일** workout publish를 1회 시도한다. **기본 비활성**이며, 오직 `WorkoutPublishApplicationService.publish(today)`만 호출한다(mapper/renderer/publisher/client 직접 호출 없음).
+
+| 환경변수 | property | 기본값 | 의미 |
+|---|---|---|---|
+| `WORKOUT_PUBLISHING_ENABLED` | `running-ai.workout-publishing.enabled` | `false` | **master**: Spring이 Intervals workout을 쓸 수 있는가 (수동 POST + scheduler 공통) |
+| `WORKOUT_PUBLISHING_SCHEDULER_ENABLED` | `...scheduler.enabled` | `false` | 자동 daily trigger를 실행할 것인가 (꺼져 있으면 scheduler bean 자체가 없다) |
+| `WORKOUT_PUBLISHING_SCHEDULER_CRON` | `...scheduler.cron` | `0 0 5 * * *` | Spring 6-field cron (기술적 기본값이며 운영 정책이 아니다) |
+| `WORKOUT_PUBLISHING_SCHEDULER_ZONE` | `...scheduler.zone` | `Asia/Seoul` | cron 실행 시간대이자 "오늘"을 정하는 시간대 (서버 OS timezone에 의존하지 않는다) |
+
+- master=false/scheduler=false → 모든 publish 차단 · master=true/scheduler=false → 수동 POST만 · 둘 다 true → 수동 + 자동. scheduler가 master를 우회하지 않는다(scheduler=true인데 master=false면 tick마다 `WORKOUT_PUBLISHING_DISABLED`로 거부되고 로그만 남는다; 기동은 실패하지 않는다).
+- 날짜 = 설정된 zone 기준 `LocalDate.now`(공용 `Clock`). 예: UTC 2026-10-01 16:30 = Seoul 2026-10-02 01:30 → `publish(2026-10-02)`.
+- 결과 `CREATED` / `UPDATED` / `NO_CHANGE`는 모두 정상(수동 publish 뒤의 05:00 tick이 `NO_CHANGE`여도 오류가 아니다). 같은 날짜가 이미 실행 중이면(6A per-date single-flight 재사용, 별도 lock 없음) 그 tick은 skip 로그 후 종료.
+- **retry 없음**(실패는 로그 후 해당 tick 종료), **missed-run catch-up 없음**(05:00에 서버가 꺼져 있었다면 보충하지 않는다), 실행 이력 DB 저장 없음, 알림 없음.
+- REST day / 빈 workout은 현재 contract(`INTERVALS_EMPTY_WORKOUT`)대로 오류 로그로 남는다(`SKIPPED_REST_DAY` 같은 새 의미를 만들지 않았다).
+- 로그에는 date / operation / verified / error code / exception 종류만 남는다(키, Authorization, workout 본문, 생리 수치 없음).
+- **운영 활성화 순서**: ① legacy Scheduled Task 조회 → ② legacy writer(create-today-workout / command-channel) disable → ③ legacy 수동 실행 중단 → ④ Spring 최신 main 반영 → ⑤ 재기동 → ⑥ `WORKOUT_PUBLISHING_ENABLED=true` → ⑦ `WORKOUT_PUBLISHING_SCHEDULER_ENABLED=false` 유지 → ⑧ 수동 POST smoke test → ⑨ Intervals/Garmin 정상 확인 → ⑩ 그 뒤에만 scheduler=true. 두 스위치를 한 번에 올리지 않는다.
+
 ## Repository 구조
 
 ```text

@@ -63,7 +63,7 @@ class WorkoutPublishApplicationServiceTest {
     private WorkoutPublishApplicationService service(boolean enabled) {
         IntervalsProperties intervals = new IntervalsProperties("https://intervals.test", "test-athlete", "test-api-key",
                 Duration.ofSeconds(3), Duration.ofSeconds(15));
-        return new WorkoutPublishApplicationService(new WorkoutPublishProperties(enabled), targetService, mapper, renderer,
+        return new WorkoutPublishApplicationService(new WorkoutPublishProperties(enabled, WorkoutPublishProperties.Scheduler.defaults()), targetService, mapper, renderer,
                 new IntervalsWorkoutPublisher(client, intervals));
     }
 
@@ -158,7 +158,7 @@ class WorkoutPublishApplicationServiceTest {
         when(mockPublisher.publish(DATE, rendered))
                 .thenReturn(new IntervalsPublishResult(IntervalsPublishOperation.CREATED, "remote", true, DATE));
 
-        WorkoutPublishResponse response = new WorkoutPublishApplicationService(new WorkoutPublishProperties(true),
+        WorkoutPublishResponse response = new WorkoutPublishApplicationService(new WorkoutPublishProperties(true, WorkoutPublishProperties.Scheduler.defaults()),
                 targetService, mockMapper, mockRenderer, mockPublisher).publish(DATE);
 
         assertThat(response.operation()).isEqualTo(IntervalsPublishOperation.CREATED);
