@@ -148,6 +148,143 @@ Check 'runtime artifacts are git-ignored' {
     } finally { Pop-Location }
 }
 
+Check 'Import-DotEnvIntoProcess returns empty result for a missing file' {
+    $r = Import-DotEnvIntoProcess -Path (Join-Path $env:TEMP "selftest-missing-$([guid]::NewGuid().ToString('N')).env")
+    $r.Applied.Count -eq 0 -and $r.SkippedExisting.Count -eq 0 -and $r.MalformedLines -eq 0
+}
+
+Check 'Import-DotEnvIntoProcess ignores blank lines and comments, splits on the first = only' {
+    $k1 = "SELFTEST_A_$([guid]::NewGuid().ToString('N'))"
+    $k2 = "SELFTEST_B_$([guid]::NewGuid().ToString('N'))"
+    $path = Join-Path $env:TEMP "selftest-$([guid]::NewGuid().ToString('N')).env"
+    try {
+        Set-Content -LiteralPath $path -Value @(
+            '# a comment line',
+            '',
+            "$k1=first=second",
+            "   ",
+            "$k2=plain"
+        ) -Encoding UTF8
+        $r = Import-DotEnvIntoProcess -Path $path
+        ($r.Applied -contains $k1) -and ($r.Applied -contains $k2) -and
+        ((Get-Item "Env:$k1").Value -eq 'first=second') -and ((Get-Item "Env:$k2").Value -eq 'plain') -and
+        $r.MalformedLines -eq 0
+    } finally {
+        Remove-Item "Env:$k1", "Env:$k2" -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $path -ErrorAction SilentlyContinue
+    }
+}
+
+Check 'Import-DotEnvIntoProcess preserves internal whitespace in a value (cron expression)' {
+    $k = "SELFTEST_CRON_$([guid]::NewGuid().ToString('N'))"
+    $path = Join-Path $env:TEMP "selftest-$([guid]::NewGuid().ToString('N')).env"
+    try {
+        Set-Content -LiteralPath $path -Value "$k=0 30 4 * * *" -Encoding UTF8
+        Import-DotEnvIntoProcess -Path $path | Out-Null
+        (Get-Item "Env:$k").Value -eq '0 30 4 * * *'
+    } finally {
+        Remove-Item "Env:$k" -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $path -ErrorAction SilentlyContinue
+    }
+}
+
+Check 'Import-DotEnvIntoProcess trims whitespace around the key and the whole value' {
+    $k = "SELFTEST_TRIM_$([guid]::NewGuid().ToString('N'))"
+    $path = Join-Path $env:TEMP "selftest-$([guid]::NewGuid().ToString('N')).env"
+    try {
+        Set-Content -LiteralPath $path -Value "  $k  =  value with inner spaces  " -Encoding UTF8
+        Import-DotEnvIntoProcess -Path $path | Out-Null
+        (Get-Item "Env:$k").Value -eq 'value with inner spaces'
+    } finally {
+        Remove-Item "Env:$k" -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $path -ErrorAction SilentlyContinue
+    }
+}
+
+Check 'Import-DotEnvIntoProcess skips a malformed line (no =) without throwing' {
+    $k = "SELFTEST_OK_$([guid]::NewGuid().ToString('N'))"
+    $path = Join-Path $env:TEMP "selftest-$([guid]::NewGuid().ToString('N')).env"
+    try {
+        Set-Content -LiteralPath $path -Value @('this line has no equals sign', "$k=fine", '=also-malformed-empty-key') -Encoding UTF8
+        $r = Import-DotEnvIntoProcess -Path $path
+        $r.MalformedLines -eq 2 -and ($r.Applied -contains $k) -and ((Get-Item "Env:$k").Value -eq 'fine')
+    } finally {
+        Remove-Item "Env:$k" -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $path -ErrorAction SilentlyContinue
+    }
+}
+
+Check 'Import-DotEnvIntoProcess accepts a UTF-8 file with a leading BOM' {
+    $k = "SELFTEST_BOM_$([guid]::NewGuid().ToString('N'))"
+    $path = Join-Path $env:TEMP "selftest-$([guid]::NewGuid().ToString('N')).env"
+    try {
+        $utf8Bom = New-Object System.Text.UTF8Encoding($true)
+        [System.IO.File]::WriteAllText($path, "$k=bommed`n", $utf8Bom)
+        $bytes = [System.IO.File]::ReadAllBytes($path)
+        $hasBom = $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
+        $r = Import-DotEnvIntoProcess -Path $path
+        $hasBom -and ($r.Applied -contains $k) -and ((Get-Item "Env:$k").Value -eq 'bommed')
+    } finally {
+        Remove-Item "Env:$k" -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $path -ErrorAction SilentlyContinue
+    }
+}
+
+Check 'Import-DotEnvIntoProcess never overwrites a variable already set in the process (existing env wins)' {
+    $k = "SELFTEST_PRECEDENCE_$([guid]::NewGuid().ToString('N'))"
+    $path = Join-Path $env:TEMP "selftest-$([guid]::NewGuid().ToString('N')).env"
+    try {
+        Set-Item "Env:$k" 'from-shell'
+        Set-Content -LiteralPath $path -Value "$k=from-dotenv" -Encoding UTF8
+        $r = Import-DotEnvIntoProcess -Path $path
+        ($r.SkippedExisting -contains $k) -and (-not ($r.Applied -contains $k)) -and ((Get-Item "Env:$k").Value -eq 'from-shell')
+    } finally {
+        Remove-Item "Env:$k" -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $path -ErrorAction SilentlyContinue
+    }
+}
+
+Check 'Initialize-DotEnvForThisProcess logs key names but never a value' {
+    $k = "SELFTEST_SECRET_$([guid]::NewGuid().ToString('N'))"
+    $secretValue = "super-secret-$([guid]::NewGuid().ToString('N'))"
+    $dir = Join-Path $env:TEMP "selftest-root-$([guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Force $dir | Out-Null
+        Set-Content -LiteralPath (Join-Path $dir '.env') -Value "$k=$secretValue" -Encoding UTF8
+        # -join (not Out-String, which wraps at the host's console width and could split a long key
+        # name across two lines) so the full key name is always checked as one unbroken substring.
+        $output = (Initialize-DotEnvForThisProcess -Root $dir *>&1 | ForEach-Object { $_.ToString() }) -join "`n"
+        ($output -match [regex]::Escape($k)) -and (-not ($output -match [regex]::Escape($secretValue)))
+    } finally {
+        Remove-Item "Env:$k" -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Check 'Initialize-DotEnvForThisProcess does nothing when there is no .env file' {
+    $dir = Join-Path $env:TEMP "selftest-root-noenv-$([guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Force $dir | Out-Null
+        $before = @(Get-ChildItem Env:).Count
+        Initialize-DotEnvForThisProcess -Root $dir
+        (@(Get-ChildItem Env:).Count) -eq $before
+    } finally {
+        Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Check 'start-running-ai.ps1 loads .env before any component step and never passes credentials as a java argument' {
+    $text = Get-Content (Join-Path $scripts 'start-running-ai.ps1') -Raw
+    # Anchor on the first real Docker-step action (not the Test-DockerReady function definition,
+    # which textually precedes everything, including the .env call) to prove the .env load really
+    # happens first inside the try block, not just earlier in the file by coincidence.
+    $dotenvIdx = $text.IndexOf('Initialize-DotEnvForThisProcess')
+    $dockerStepIdx = $text.IndexOf("Write-Step 'Docker daemon: RUNNING'")
+    $javaArgsLine = ($text -split "`r?`n" | Where-Object { $_ -match '-ArgumentList "-jar' })
+    ($dotenvIdx -ge 0) -and ($dockerStepIdx -ge 0) -and ($dotenvIdx -lt $dockerStepIdx) -and
+    ($javaArgsLine -notmatch 'PASSWORD|API_KEY|TOKEN')
+}
+
 Check 'stop script never removes volumes' {
     # code only: drop the comment-based help block and # comments (which mention the forbidden command)
     $text = (Get-Content (Join-Path $scripts 'stop-running-ai.ps1') -Raw) -replace '(?s)<#.*?#>', '' -replace '(?m)^\s*#.*$', ''

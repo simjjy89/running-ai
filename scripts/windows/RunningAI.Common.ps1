@@ -50,6 +50,83 @@ function Invoke-NativeText {
 
 function Quote-Argument { param([string]$Value) if ($Value -match '[\s"]') { '"' + ($Value -replace '"', '\"') + '"' } else { $Value } }
 
+# ---- .env loading -----------------------------------------------------------------------------
+# Parses KEY=VALUE lines from a repo-root .env into the CURRENT process's environment, so every
+# child process started afterward (Start-Process inherits the full environment block by default)
+# sees it exactly as if the operator had set $env:KEY themselves. This exists because Spring's own
+# "optional:file:../.env[.properties]" config import is NOT a reliable substitute: Spring Boot's
+# underscore/SCREAMING_SNAKE_CASE relaxed-binding mapper (the thing that lets "SERVER_ADDRESS" bind
+# to the built-in "server.address" property) is restricted to real SystemEnvironmentPropertySource
+# entries and does not apply to a plain file-backed property source, so a built-in Spring property
+# configured only via its env-style name in .env can silently fail to apply even though a literal
+# "${SOME_KEY:default}" placeholder elsewhere in application.yml still resolves fine from the same
+# file. Routing every .env entry through a real process environment variable here removes that
+# distinction entirely, for every current and future key.
+#
+# Precedence: existing process env > .env > whatever default the consumer (Spring, Docker Compose,
+# ...) falls back to on its own. A key already present in the process environment is left alone —
+# .env only fills in what is not already set. Values are never logged, only key names and counts.
+#
+# Format: one KEY=VALUE per line, split on the FIRST '=' only (so a value may itself contain '=');
+# a blank line or one whose first non-whitespace character is '#' is ignored; a line with no '='
+# (or an empty key) is skipped as malformed and counted, never thrown. Leading/trailing whitespace
+# is trimmed from the key and from the whole value, but whitespace INSIDE the value is preserved
+# verbatim (a cron expression like "0 30 4 * * *" must survive with its internal spaces intact).
+# UTF-8 is read and decoded explicitly (bytes, not Get-Content's encoding auto-detection), so a
+# leading byte-order mark is stripped instead of leaking into the first key's name.
+#
+# Returns @{ Applied = [string[]]; SkippedExisting = [string[]]; MalformedLines = [int] }.
+function Import-DotEnvIntoProcess {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $result = [ordered]@{ Applied = @(); SkippedExisting = @(); MalformedLines = 0 }
+    if (-not (Test-Path -LiteralPath $Path)) { return $result }
+
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+        $bytes = $bytes[3..($bytes.Length - 1)]
+    }
+    $text = [System.Text.Encoding]::UTF8.GetString($bytes)
+
+    foreach ($rawLine in ($text -split "`n")) {
+        $line = $rawLine.TrimEnd("`r")
+        $trimmed = $line.Trim()
+        if ($trimmed.Length -eq 0 -or $trimmed.StartsWith('#')) { continue }
+
+        $idx = $line.IndexOf('=')
+        if ($idx -lt 1) { $result.MalformedLines++; continue }   # no '=', or '=' is the first character (empty key)
+        $key = $line.Substring(0, $idx).Trim()
+        if ($key.Length -eq 0) { $result.MalformedLines++; continue }
+        $value = $line.Substring($idx + 1).Trim()
+
+        if (Test-Path "Env:$key") {
+            $result.SkippedExisting += $key
+            continue
+        }
+        Set-Item "Env:$key" $value
+        $result.Applied += $key
+    }
+    return $result
+}
+
+# Calls Import-DotEnvIntoProcess against the repo-root .env and reports the outcome via Write-Step
+# (key names and counts only, never values). Safe to call when the file does not exist.
+function Initialize-DotEnvForThisProcess {
+    param([string]$Root = (Get-RepoRoot))
+    $path = Join-Path $Root '.env'
+    if (-not (Test-Path -LiteralPath $path)) { return }
+    $r = Import-DotEnvIntoProcess -Path $path
+    if ($r.Applied.Count -gt 0) {
+        Write-Step ".env: applied $($r.Applied.Count) variable(s) not already set in the process environment ($($r.Applied -join ', '))"
+    }
+    if ($r.SkippedExisting.Count -gt 0) {
+        Write-Step ".env: $($r.SkippedExisting.Count) variable(s) left unchanged (already set in the process environment: $($r.SkippedExisting -join ', '))"
+    }
+    if ($r.MalformedLines -gt 0) {
+        Write-Warning ".env contained $($r.MalformedLines) malformed line(s) (no '='); they were skipped."
+    }
+}
+
 # ---- HTTP -----------------------------------------------------------------------------
 
 # Returns the HTTP status code, or $null when nothing answered.

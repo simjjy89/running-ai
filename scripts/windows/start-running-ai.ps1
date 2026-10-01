@@ -88,6 +88,13 @@ try {
     New-Item -ItemType Directory -Force $script:LogDir | Out-Null
     Remove-ExpiredLogs -LogDir $script:LogDir | Out-Null
 
+    # ---- 0. repo-root .env -------------------------------------------------------------
+    # Loaded into this process's own environment first (existing process env wins, .env only
+    # fills gaps) so every child started below -- connector and Spring alike -- inherits it the
+    # same way a manually-set $env:... variable would. See RunningAI.Common.ps1 for why Spring's
+    # own ".env[.properties]" config import is not relied on for this.
+    Initialize-DotEnvForThisProcess -Root $root
+
     # ---- 1. Docker -------------------------------------------------------------------
     if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
         Stop-WithError $ExitCode.Docker 'Docker CLI was not found on PATH. Install Docker Desktop.'
