@@ -207,3 +207,17 @@ publisher stack `IntervalsWorkoutPublisher` → `IntervalsWorkoutClient` (interf
   `FakeIntervalsWorkoutClient`, and any Spring test that could publish pins a blank key and an unreachable URL.
 - Not implemented: scheduler / automatic daily publishing, any controller calling the publisher, deletion/cancel,
   persistence of remote ids. Garmin 265 device validation (Phase 5C-4): pace target, %LTHR bpm target and treadmill cue (cue before duration/target) all DEVICE_VERIFIED; in-run gauge/alert NOT TESTED. Live validation (Phase 5C-3.5, SERVER_VERIFIED: CREATE → NO_CHANGE → UPDATE same id → NO_CHANGE, external_id round-trips) needs a real key and a safe empty date; on this PC the JVM needs `-Djavax.net.ssl.trustStoreType=Windows-ROOT`.
+
+## Canonical publishing path and legacy retirement (Phase 5C-5)
+
+- `IntervalsWorkoutPublisher` is the **canonical** workout publishing path; `HttpIntervalsWorkoutClient` is the only code that
+  POST/PUTs Intervals events. Any future trigger (application service, scheduler, API, ChatGPT tool) must call the publisher and
+  must not issue its own Intervals write, and must never run a second writer next to it.
+- Legacy PowerShell (`create-today-workout.ps1`, `intervals-structured-workout.ps1`, Command Channel) is DEPRECATED, lives only on the
+  main PC (not in this repo), and is reference / manual rollback only. **No automatic fallback** to legacy, ever (especially after a
+  create timeout or unknown outcome — resolve it by marker lookup). Rollback is a manual operational decision; never run both writers.
+- Keep legacy marker compatibility (`[RunningAI-Control]` without `external_id` → adopt and update in place) until a separate cleanup
+  phase; do not delete legacy files or remove that compatibility as part of unrelated work.
+- Disabling legacy scheduled tasks is a machine operation for the owner (commands in
+  `docs/work-orders/2026-10-01-phase-5c-5-legacy-publishing-retirement-result.md`); never change Scheduled Tasks, env vars or
+  credentials from the repo or commit them.

@@ -1,5 +1,8 @@
 # 2026-09-30 — Phase 5C-0: Legacy Intervals.icu / Garmin Structured Workout Pipeline Investigation
 
+> **DEPRECATED (Phase 5C-5): historical investigation of the legacy pipeline. Do not use for new workout publishing.**
+> Canonical path: Spring `IntervalsWorkoutPublisher`. The legacy scripts described here are reference / manual-rollback only.
+
 | 항목 | 내용 |
 |------|------|
 | 날짜 | 2026-09-30 |

@@ -33,6 +33,12 @@ RunningAI automation (which lives only on the main PC and is NOT in this repo).
   `IntervalsWorkoutPublisher`/`HttpIntervalsWorkoutClient` (Phase 5C-3: Basic-auth HTTP, marker =
   `external_id`, CREATE/UPDATE/NO_CHANGE, no blind POST retry, readback verification; API key from
   `INTERVALS_API_KEY` only; not called by any controller or scheduler yet; live-validated SERVER_VERIFIED in Phase 5C-3.5; Pace, %LTHR and treadmill-cue Garmin 265 DEVICE_VERIFIED in Phase 5C-4).
+- **Canonical publishing path (Phase 5C-5): `IntervalsWorkoutPublisher` is the canonical workout publishing path.** No other
+  code in this repo may POST/PUT Intervals events (only `HttpIntervalsWorkoutClient`, called by the publisher). The legacy
+  PowerShell publisher/renderer (`create-today-workout.ps1`, `intervals-structured-workout.ps1`, Command Channel; main PC only,
+  not in this repo) is DEPRECATED: not authoritative, never an automatic fallback, kept only as reference/manual rollback; its
+  scheduled tasks must be disabled by the owner on the main PC (machine operation, never committed; status: pending owner action as of Phase 5C-5). Legacy marker compatibility in
+  the publisher stays until a separate cleanup phase.
 - Planned, not started: interval/repeat workout structure, QUALITY workout structure,
   scheduler/automatic publishing, Garmin device
   end-to-end validation, cycling threshold profile, race pace, RPE model, reporting.
