@@ -70,15 +70,15 @@ class SchemaMigrationTest {
 
         assertThat(applied).extracting(MigrationInfo::getVersion)
                 .extracting(Object::toString)
-                .containsExactly("1", "2", "3", "4", "5", "6", "7");
+                .containsExactly("1", "2", "3", "4", "5", "6", "7", "8");
         assertThat(applied).extracting(MigrationInfo::getState)
                 .containsOnly(MigrationState.SUCCESS);
         assertThat(flyway.info().pending()).isEmpty();
 
         Integer historyRows = jdbcTemplate.queryForObject(
-                "select count(*) from flyway_schema_history where success = true and version in ('1', '2', '3', '4', '5', '6', '7')",
+                "select count(*) from flyway_schema_history where success = true and version in ('1', '2', '3', '4', '5', '6', '7', '8')",
                 Integer.class);
-        assertThat(historyRows).isEqualTo(7);
+        assertThat(historyRows).isEqualTo(8);
     }
 
     @Test

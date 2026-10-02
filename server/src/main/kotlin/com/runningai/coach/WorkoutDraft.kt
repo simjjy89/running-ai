@@ -36,7 +36,22 @@ data class WorkoutDraft(
     val model: String?,
     val status: WorkoutDraftStatus = WorkoutDraftStatus.DRAFT,
     val createdAt: Instant? = null,
-)
+) {
+    /**
+     * A rest day prescribed by the coach (Phase 6F.1): a first-class draft with
+     * `totalDurationMinutes = 0` and no segments, never a padded "5 minutes of walking". Whether
+     * to rest is the coach's decision; [WorkoutDraftValidator] only checks the shape. A later
+     * publish step can recognise it here and skip creating any calendar or device workout.
+     */
+    @get:JsonIgnore
+    val isRest: Boolean
+        get() = workoutType == REST_WORKOUT_TYPE
+
+    companion object {
+        /** The workout type the coach uses for a rest day (as listed in the response contract). */
+        const val REST_WORKOUT_TYPE = "REST"
+    }
+}
 
 /**
  * One block of the workout. Reuses the existing Java [SegmentType] and [IntensityClass] rather

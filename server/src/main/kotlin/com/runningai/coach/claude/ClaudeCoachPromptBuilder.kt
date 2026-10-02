@@ -191,6 +191,11 @@ class ClaudeCoachPromptBuilder {
             - "totalDurationMinutes" MUST equal the sum of every segment's contribution computed
               that way. Check this before answering.
             - Use only the enum values listed above, spelled exactly as shown.
+            - REST is a valid choice, not a failure. If you select REST, the workout is a rest day:
+              "totalDurationMinutes" must be 0 and "segments" must be an empty array []. Do not
+              invent walking, mobility, recovery or warm-up segments to fill it; put any optional
+              advice (for example light mobility) in the rationale or warnings instead.
+              Every other workout type needs at least one segment and a positive total.
         """.trimIndent()
     }
 }

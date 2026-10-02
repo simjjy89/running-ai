@@ -46,11 +46,22 @@ class WorkoutDraftValidator(private val properties: CoachProperties) {
         if (draft.assessment.selectedWorkoutType.isBlank()) {
             v += "assessment selectedWorkoutType is blank"
         }
-        if (draft.segments.isEmpty()) {
-            v += "workout has no segments"
-        }
-        if (draft.totalDurationMinutes <= 0) {
-            v += "totalDurationMinutes must be > 0 but was ${draft.totalDurationMinutes}"
+        // Shape only, never the decision: a REST draft is a rest day (0 minutes, no segments); any
+        // other type is a session with segments. Whether today should be a rest day is the coach's call.
+        if (draft.isRest) {
+            if (draft.totalDurationMinutes != 0) {
+                v += "a REST workout must have totalDurationMinutes 0 but was ${draft.totalDurationMinutes}"
+            }
+            if (draft.segments.isNotEmpty()) {
+                v += "a REST workout must have no segments but has ${draft.segments.size}"
+            }
+        } else {
+            if (draft.segments.isEmpty()) {
+                v += "workout has no segments"
+            }
+            if (draft.totalDurationMinutes <= 0) {
+                v += "totalDurationMinutes must be > 0 but was ${draft.totalDurationMinutes}"
+            }
         }
         if (draft.totalDurationMinutes > limits.maxTotalDurationMinutes) {
             v += "totalDurationMinutes ${draft.totalDurationMinutes} exceeds the safety ceiling " +
