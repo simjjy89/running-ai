@@ -18,7 +18,7 @@ committed file. Real ids stay in the git-ignored `.runtime/live-contract/activit
 | Repository / branch | `C:\running-ai-github`, `main` |
 | Baseline | `b3862f1` — clean, already level with `origin/main`, confirmed an ancestor |
 | Pull | nothing to fast-forward; no reset, no clean, no rebase, no force |
-| Final | see §12 |
+| Final | `8031036` plus one follow-up commit recording the SHAs below |
 | Legacy repo `C:\running-ai` | not touched |
 
 ## 2. Java 21 (§3–§10)
@@ -300,10 +300,10 @@ Not used this phase. **`INTERVALS_API_KEY_ROTATION = USER_ACTION_REQUIRED`** —
 
 | | |
 |---|---|
-| `feat: promote Garmin lap workout structure` | V15, lap model/entity/mapper, mapper tests |
-| `feat: add detailed running analysis engine` | V16, `analysis` package, calculators, store, service, API |
-| `test: cover running analysis metrics` | calculator, interval, persistence and API tests; schema test for V15/V16 |
-| `docs: define running analysis evidence model` | architecture doc, CLAUDE.md, integration skill, this work order |
+| `e62cd1e` `feat: promote Garmin lap workout structure` | V15, lap model/entity/mapper, mapper tests |
+| `e9d04c9` `feat: add detailed running analysis engine` | V16, `analysis` package, calculators, store, service, API |
+| `b47ad59` `test: cover running analysis metrics` | calculator, interval, persistence and API tests; schema test for V15/V16 |
+| `8031036` `docs: define running analysis evidence model` | architecture doc, CLAUDE.md, integration skill, this work order |
 
 The instruction's suggested `ops: normalize main PC Java 21 environment` has no git content: nothing was
 changed this phase, and Windows environment variables are not committed anyway (§2, §47).
