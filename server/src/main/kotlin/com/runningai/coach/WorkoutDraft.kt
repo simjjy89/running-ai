@@ -6,13 +6,24 @@ import com.runningai.training.SegmentType
 import java.time.Instant
 import java.time.LocalDate
 
-/** Lifecycle of a draft. Approve/publish transitions deliberately do not exist in Phase 6E. */
+/**
+ * Lifecycle of a draft: `DRAFT -> SUPERSEDED` (revised) or `DRAFT -> APPROVED` (explicit athlete
+ * approval, Phase 6G). Publishing is deliberately NOT a status: whether and how an approved draft
+ * reached Intervals.icu is recorded separately (`workout_draft_publication`), so this enum only ever
+ * says which workout the athlete accepted.
+ */
 enum class WorkoutDraftStatus {
     /** The current version of this draft group. */
     DRAFT,
 
     /** Replaced by a newer version after a revision; kept for audit, never mutated again. */
     SUPERSEDED,
+
+    /**
+     * Explicitly approved by the athlete. Immutable from here on: it cannot be revised (a changed
+     * workout needs a new draft), and at most one draft per athlete and date is ever APPROVED.
+     */
+    APPROVED,
 }
 
 /**

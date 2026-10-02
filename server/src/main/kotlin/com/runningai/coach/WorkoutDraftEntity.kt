@@ -16,6 +16,9 @@ import org.springframework.data.annotation.CreatedDate
 import org.springframework.data.annotation.LastModifiedDate
 import org.springframework.data.jpa.domain.support.AuditingEntityListener
 import org.springframework.data.jpa.repository.JpaRepository
+import org.springframework.data.jpa.repository.Modifying
+import org.springframework.data.jpa.repository.Query
+import org.springframework.data.repository.query.Param
 import java.time.Instant
 import java.time.LocalDate
 
@@ -24,7 +27,7 @@ import java.time.LocalDate
  * model or a DTO, following the project's entity-is-not-an-API rule.
  *
  * Only [status] is ever mutated after insert (DRAFT -> SUPERSEDED when a newer version replaces
- * it); everything else is write-once, which is what makes the version history an audit trail.
+ * it, DRAFT -> APPROVED on explicit approval); everything else is write-once, which is what makes the version history an audit trail.
  */
 @Entity
 @Table(name = "workout_draft")
@@ -103,6 +106,23 @@ class WorkoutDraftEntity(
 interface WorkoutDraftRepository : JpaRepository<WorkoutDraftEntity, Long> {
 
     fun findByDraftGroupIdOrderByVersionDesc(draftGroupId: String): List<WorkoutDraftEntity>
+
+    /**
+     * Compare-and-set status transition: changes the row only if it is still in [from] and returns
+     * the number of rows changed (0 or 1). A concurrent approve and revise of the same draft both
+     * want to leave `DRAFT`; the row lock makes exactly one of them win and the other see 0.
+     */
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query(
+        "update WorkoutDraftEntity d set d.status = :to, d.updatedAt = :now " +
+            "where d.id = :id and d.status = :from",
+    )
+    fun transitionStatus(
+        @Param("id") id: Long,
+        @Param("from") from: WorkoutDraftStatus,
+        @Param("to") to: WorkoutDraftStatus,
+        @Param("now") now: Instant,
+    ): Int
 
     fun findFirstByAthleteIdAndWorkoutDateAndStatusOrderByVersionDesc(
         athleteId: Long,

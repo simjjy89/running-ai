@@ -24,15 +24,18 @@ import java.time.Instant
 import java.time.LocalDate
 
 /**
- * AI-coach workout drafts: generate, preview, revise. **Draft only** — there is deliberately no
- * approve and no publish endpoint in this phase, and nothing reachable from here writes to
- * Intervals or Garmin.
+ * AI-coach workout drafts: generate, preview, revise, approve. Nothing reachable from here writes
+ * to Intervals or Garmin: approval is a database lifecycle step, and publishing an approved draft
+ * lives in a separate controller (`com.runningai.draftpublish`) behind its own switch.
  *
  * No authentication, same convention as the other RunningAI operational APIs: private network only.
  */
 @RestController
 @RequestMapping("/api/v1/workout-drafts")
-class WorkoutDraftController(private val service: WorkoutDraftService) {
+class WorkoutDraftController(
+    private val service: WorkoutDraftService,
+    private val approvalService: WorkoutDraftApprovalService,
+) {
 
     /** Designs today's (or the requested date's) session and stores it as version 1. */
     @PostMapping
@@ -51,6 +54,14 @@ class WorkoutDraftController(private val service: WorkoutDraftService) {
         @Valid @RequestBody request: ReviseWorkoutDraftRequest,
     ): WorkoutDraftResponse =
         WorkoutDraftResponse.of(service.revise(id, request.request, request.toConstraints()))
+
+    /**
+     * The athlete's explicit approval (Phase 6G). A database lifecycle step only: it never publishes.
+     * Approving the same draft again returns the existing approval unchanged.
+     */
+    @PostMapping("/{id}/approve")
+    fun approve(@PathVariable id: Long): WorkoutDraftApprovalResponse =
+        WorkoutDraftApprovalResponse.of(approvalService.approve(id))
 }
 
 data class GenerateWorkoutDraftRequest(
@@ -125,6 +136,31 @@ data class WorkoutDraftResponse(
 }
 
 @JsonInclude(JsonInclude.Include.ALWAYS)
+data class WorkoutDraftApprovalResponse(
+    val draftId: Long,
+    val draftGroupId: String?,
+    val version: Int,
+    val date: LocalDate,
+    val workoutType: String,
+    val status: WorkoutDraftStatus,
+    val approvalId: Long,
+    val approvedAt: Instant,
+) {
+    companion object {
+        fun of(a: ApprovedWorkoutDraft) = WorkoutDraftApprovalResponse(
+            draftId = a.approval.draftId,
+            draftGroupId = a.draft.draftGroupId,
+            version = a.draft.version,
+            date = a.draft.date,
+            workoutType = a.draft.workoutType,
+            status = a.draft.status,
+            approvalId = a.approval.id,
+            approvedAt = a.approval.approvedAt,
+        )
+    }
+}
+
+@JsonInclude(JsonInclude.Include.ALWAYS)
 data class SegmentResponse(
     val type: SegmentType,
     val durationMinutes: Int,
@@ -168,6 +204,14 @@ class WorkoutDraftExceptionHandler {
     @ExceptionHandler(WorkoutDraftSupersededException::class)
     fun superseded(e: WorkoutDraftSupersededException): ResponseEntity<ErrorResponse> =
         body(HttpStatus.CONFLICT, "WORKOUT_DRAFT_SUPERSEDED", e.message)
+
+    @ExceptionHandler(WorkoutDraftApprovedImmutableException::class)
+    fun approvedImmutable(e: WorkoutDraftApprovedImmutableException): ResponseEntity<ErrorResponse> =
+        body(HttpStatus.CONFLICT, "WORKOUT_DRAFT_APPROVED_IMMUTABLE", e.message)
+
+    @ExceptionHandler(WorkoutDateAlreadyApprovedException::class)
+    fun dateAlreadyApproved(e: WorkoutDateAlreadyApprovedException): ResponseEntity<ErrorResponse> =
+        body(HttpStatus.CONFLICT, "WORKOUT_DATE_ALREADY_APPROVED", e.message)
 
     @ExceptionHandler(AiCoachException::class)
     fun coach(e: AiCoachException): ResponseEntity<ErrorResponse> {

@@ -84,7 +84,8 @@ class CoachArchitectureTest {
                 val line = it.trim()
                 line.startsWith("import com.runningai.integration.intervals") ||
                     line.startsWith("import com.runningai.integration.garmin") ||
-                    line.startsWith("import com.runningai.integration.mcp")
+                    line.startsWith("import com.runningai.integration.mcp") ||
+                    line.startsWith("import com.runningai.draftpublish")
             }
         }
 
@@ -117,6 +118,7 @@ class CoachArchitectureTest {
             WorkoutDraftService::class.java,
             WorkoutDraftStore::class.java,
             WorkoutDraftController::class.java,
+            WorkoutDraftApprovalService::class.java,
             TrainingContextBuilder::class.java,
             RecoveryContextBuilder::class.java,
             RecoveryContextController::class.java,
@@ -129,7 +131,8 @@ class CoachArchitectureTest {
 
         assertThat(dependencyNames).noneMatch { name ->
             name.startsWith("com.runningai.integration.intervals") ||
-                name.startsWith("com.runningai.integration.mcp")
+                name.startsWith("com.runningai.integration.mcp") ||
+                name.startsWith("com.runningai.draftpublish")
         }
         // The coach reads Garmin-derived data only through athlete/training/recovery services, never
         // through a Garmin transport type that could also write.

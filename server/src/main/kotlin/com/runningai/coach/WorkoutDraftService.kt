@@ -6,6 +6,7 @@ import com.runningai.athlete.AthleteService
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
+import java.time.Instant
 import java.time.LocalDate
 import java.util.UUID
 
@@ -15,6 +16,13 @@ class WorkoutDraftNotFoundException(id: Long) : RuntimeException("Workout draft 
 /** A revision was requested against a draft that has already been superseded by a newer version. */
 class WorkoutDraftSupersededException(id: Long, val currentVersion: Int) :
     RuntimeException("Workout draft $id has been superseded by version $currentVersion; revise the latest version")
+
+/**
+ * A revision was requested against an APPROVED draft. Approved drafts are immutable: revising one
+ * would make what gets published differ from what the athlete approved.
+ */
+class WorkoutDraftApprovedImmutableException(id: Long) :
+    RuntimeException("Workout draft $id is approved and can no longer be revised; create a new draft instead")
 
 /**
  * Transaction boundary for draft persistence.
@@ -40,7 +48,15 @@ class WorkoutDraftStore(
     @Transactional
     fun save(draft: WorkoutDraft, draftGroupId: String, supersede: Long?): WorkoutDraft {
         supersede?.let { previousId ->
-            repository.findById(previousId).ifPresent { it.status = WorkoutDraftStatus.SUPERSEDED }
+            // Compare-and-set, not read-modify-write: the AI call between loadForRevision and here
+            // takes seconds, and the draft may have been approved (or revised) meanwhile. An
+            // approved draft must never be silently superseded by a revision started before it.
+            val changed = repository.transitionStatus(
+                previousId, WorkoutDraftStatus.DRAFT, WorkoutDraftStatus.SUPERSEDED, Instant.now(),
+            )
+            if (changed == 0) {
+                rejectNonCurrent(repository.findById(previousId).orElseThrow { WorkoutDraftNotFoundException(previousId) })
+            }
         }
         val entity = WorkoutDraftEntity(
             athleteId = athleteService.getDefaultAthlete().id,
@@ -74,19 +90,29 @@ class WorkoutDraftStore(
 
     /**
      * Loads a draft for revision, refusing an already-superseded version rather than forking the
-     * history: a draft group always has exactly one current version.
+     * history (a draft group always has exactly one current version) and refusing an approved one
+     * (what the athlete approved is never silently replaced: a changed workout needs a new draft).
      */
     @Transactional(readOnly = true)
     fun loadForRevision(id: Long): WorkoutDraft {
         val existing = repository.findById(id).orElseThrow { WorkoutDraftNotFoundException(id) }
-        if (existing.status == WorkoutDraftStatus.SUPERSEDED) {
-            val latest = repository.findByDraftGroupIdOrderByVersionDesc(existing.draftGroupId).first()
-            throw WorkoutDraftSupersededException(id, latest.version)
-        }
+        rejectNonCurrent(existing)
         return toDomain(existing)
     }
 
-    private fun toDomain(e: WorkoutDraftEntity): WorkoutDraft = WorkoutDraft(
+    /** Throws the matching lifecycle error unless [e] is a current, unapproved DRAFT. */
+    private fun rejectNonCurrent(e: WorkoutDraftEntity) {
+        when (e.status) {
+            WorkoutDraftStatus.DRAFT -> return
+            WorkoutDraftStatus.APPROVED -> throw WorkoutDraftApprovedImmutableException(requireNotNull(e.id))
+            WorkoutDraftStatus.SUPERSEDED -> {
+                val latest = repository.findByDraftGroupIdOrderByVersionDesc(e.draftGroupId).first()
+                throw WorkoutDraftSupersededException(requireNotNull(e.id), latest.version)
+            }
+        }
+    }
+
+    internal fun toDomain(e: WorkoutDraftEntity): WorkoutDraft = WorkoutDraft(
         id = e.id,
         draftGroupId = e.draftGroupId,
         version = e.version,
