@@ -87,7 +87,14 @@ RunningAI automation (which lives only on the main PC and is NOT in this repo).
   1-based and carries `intensityType` (WARMUP/ACTIVE/RECOVERY/COOLDOWN) + `wktStepIndex` in `extra_metrics`, and a lap is
   **not** 1:1 with a workout step; zones are always 5 with no upper bound; power zones of a no-power activity are `[]` → `EMPTY`,
   not a failure; `/samples` default **down-samples** above ~2000 native samples (`totalMetricsCount` reports the native count) and
-  `samples-max-chart-size` is deliberately left unset. FIT decision: **A — API detail suffices**, FIT archival-only, not implemented.
+  FIT decision: **A — API detail suffices**, FIT archival-only, not implemented.
+  **Sample fidelity (Phase 6H-1C):** `running-ai.garmin.detail.samples-max-chart-size` (`GARMIN_DETAIL_SAMPLES_MAX_CHART_SIZE`)
+  defaults to **20000** and is always sent for `/samples` only (range 1..100000 = the connector limit; outside it startup fails).
+  Asking for it never implies completeness: every collection records `requested_max_chart_size`, `source_metrics_count`,
+  `source_total_metrics_count` and `sample_completeness` (FULL / DOWNSAMPLED / UNKNOWN) in `activity_detail_collection` (V14),
+  judged from the response (`totalMetricsCount` is the authority), with UNKNOWN for a missing count or a self-contradicting
+  payload. A DOWNSAMPLED answer is never re-requested at another size; `reprocess` recomputes completeness from stored raw
+  with no Garmin call. Live-verified: the long run went 1399/2784 DOWNSAMPLED -> 2784/2784 FULL.
   No scheduler, no historical backfill, no FIT storage, TrainingContext unchanged. `activity` identity unchanged (an
   `activity_source` link table is planned for Intervals enrichment).
 - **Legacy publishing XOR AI Draft publishing** (Phase 6G.1, `draftpublish.PublishingModeGuard`): `WORKOUT_PUBLISHING_ENABLED` and

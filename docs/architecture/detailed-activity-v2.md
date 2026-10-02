@@ -12,7 +12,7 @@ Garmin per-activity parts (connector, one request each, no retry)
         ──► activity_raw_payload (V11, raw first, own commit)
         ──► pure Garmin mappers (field names end here)
         ──► activity_lap · activity_zone · activity_sample (V12, replace per part)
-        ──► activity_detail_collection (V13, per-part status)
+        ──► activity_detail_collection (V13 per-part status, V14 sample fidelity)
                      │
                      ▼
         feature extraction (RunningAI analysis engine)          [later]
@@ -61,13 +61,40 @@ depends on: `directTimestamp` arrives as a **JSON float** holding whole epoch mi
 `unit.factor` is **not** a conversion divisor (values already carry the stated unit), which is why nothing is
 scaled on the way in. Details in `garmin-detailed-activity-contract-static.md` §L4.
 
-### Sampling resolution (live)
+## Sample fidelity policy (Phase 6H-1C)
 
-The library default `maxchart=2000` **down-samples**: a 2783 s run returned 1399 of its 2784 native (1 Hz) samples,
-with irregular spacing, while `maxChart=20000` returned all 2784 with the same first and last timestamp. Each
-payload reports its native count in `totalMetricsCount`, so a down-sampled stream is always recognisable after the
-fact. `running-ai.garmin.detail.samples-max-chart-size` is still unset — raising it is an ingestion-policy decision
-for a later phase, not part of contract verification (§L5).
+**Default `maxChartSize` = 20000.** `running-ai.garmin.detail.samples-max-chart-size`
+(`GARMIN_DETAIL_SAMPLES_MAX_CHART_SIZE`) is always sent with the sample request and never with any other part.
+The library default of 2000 down-samples: a live 2783 s run returned 1399 of its 2784 native (1 Hz) points at
+2000, and all 2784 at 20000, same first and last timestamp. The accepted range is 1…100000 — the connector's own
+limit — and a value outside it fails startup rather than every sample request.
+
+**Asking for 20000 is not a claim of completeness.** Completeness is read back out of the response and stored per
+collection in `activity_detail_collection` (V14): `requested_max_chart_size`, `source_metrics_count`
+(`payload.metricsCount`), `source_total_metrics_count` (`payload.totalMetricsCount`) and `sample_completeness`.
+`item_count` continues to be the number of normalised rows; no second count column was added.
+
+```text
+FULL          stored rows == totalMetricsCount, and the payload agrees with itself
+DOWNSAMPLED   stored rows <  totalMetricsCount, and the payload agrees with itself
+UNKNOWN       no usable totalMetricsCount, or metricsCount disagrees with the entries present,
+              or more stored rows than the source says the activity has
+```
+
+The source's `totalMetricsCount` is the authority. The rule is one-directional on purpose: FULL has to be earned,
+everything else degrades to UNKNOWN rather than to an optimistic guess, and nothing is ever repaired or estimated
+to make a payload classifiable.
+
+A DOWNSAMPLED answer is recorded and left alone — there is no automatic re-request at another size, and a 429 is
+never answered by lowering `maxChartSize` and retrying.
+
+`reprocess` recomputes completeness from the stored raw payload with no Garmin call, because both counts live in
+the payload. `requested_max_chart_size` does not: it is carried over from what the previous collection recorded
+(a fact, not a guess) and stays NULL for payloads stored before it was recorded. Existing rows were not
+back-filled.
+
+The collect/reprocess API response carries the same four values additively (`sampleCompleteness`,
+`requestedMaxChartSize`, `sourceMetricsCount`, `sourceTotalMetricsCount`), null for every part but the stream.
 
 ## Partial collection
 
@@ -132,11 +159,11 @@ separate decision) and nothing was implemented here.
 |---|---|
 | Garmin detailed contract | **LIVE_VERIFIED** (Phase 6H-1B; live section of `garmin-detailed-activity-contract-static.md`) |
 | Connector endpoints | implemented; all five **live-verified** against four real activities |
-| Storage (V11–V13) | implemented; H2 + PostgreSQL 17 migration validated; live ingestion + idempotent re-collection verified |
+| Storage (V11–V14) | implemented; H2 + PostgreSQL 17 migration validated; live ingestion + idempotent re-collection verified |
 | Mappers | activity detail, laps, zones, samples: **CONFIRMED_LIVE, no key needed correcting**; fixtures now carry live shapes with synthetic values |
 | `get_activity` body | shape confirmed live; deliberately still `RAW_STORED` (adds only extras the list item lacks) |
 | Trigger | manual `POST /api/v1/garmin/activities/{garminActivityId}/details` (+ `/reprocess`); no scheduler, no backfill |
-| Sample resolution | default is down-sampled above ~2000 native samples; `samples-max-chart-size` left unset on purpose |
+| Sample resolution | **full resolution by default** (`samples-max-chart-size` = 20000, Phase 6H-1C); completeness recorded per collection as FULL / DOWNSAMPLED / UNKNOWN (V14) |
 | FIT / ORIGINAL download | capability live-probed (ZIP + 1 FIT); decision A — not implemented |
 | Typed splits / split summaries | not needed (`intensityType` + `wktStepIndex` + embedded `splitSummaries`); not implemented |
 | Feature extraction, Intervals enrichment, TrainingContext V2 | not started |

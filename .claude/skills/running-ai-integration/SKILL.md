@@ -89,9 +89,15 @@ from the stored raw payloads, never by re-fetching. Live rules that must not be 
 (values already carry the stated unit — never scale them); lap `lapIndex` is **1-based** and the interval
 structure lives in `intensityType` + `wktStepIndex` (a lap is **not** 1:1 with a workout step — group by
 `wktStepIndex`); zones always arrive as 5 entries with **no upper bound** (never derive one); power zones of an
-activity without a power meter are `[]` → part status `EMPTY`, never a failure; `/samples` **down-samples**
-above ~2000 native samples unless `running-ai.garmin.detail.samples-max-chart-size` is raised
-(`totalMetricsCount` reports the native count). FIT decision: **A — API detail suffices**; `download_activity`
+activity without a power meter are `[]` → part status `EMPTY`, never a failure; `/samples` **down-samples** to the requested
+`maxChartSize`, so Phase 6H-1C made `running-ai.garmin.detail.samples-max-chart-size` default to **20000** and always
+send it (sample part only; range 1..100000, outside it startup fails). That request is never treated as proof: each
+collection records `requested_max_chart_size` / `source_metrics_count` / `source_total_metrics_count` /
+`sample_completeness` (FULL / DOWNSAMPLED / UNKNOWN) in `activity_detail_collection` (V14), judged from the response
+(`totalMetricsCount` is the authority; a missing count, or a payload whose `metricsCount` disagrees with its entries,
+is UNKNOWN and never FULL). Never re-request a DOWNSAMPLED stream at another size and never lower `maxChartSize` to
+retry a 429; `reprocess` recomputes completeness from stored raw with no Garmin call and carries
+`requested_max_chart_size` forward only when it was actually recorded. FIT decision: **A — API detail suffices**; `download_activity`
 returns a ZIP holding one `.fit`, archival-only, not implemented.
 Contract: `docs/architecture/garmin-detailed-activity-contract-static.md` (live facts in its §L1–§L7);
 run record: `docs/work-orders/2026-10-02-phase-6h-1b-garmin-detailed-live-contract-result.md`. Phase 3B-3

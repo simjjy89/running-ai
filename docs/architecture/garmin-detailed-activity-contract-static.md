@@ -261,9 +261,13 @@ no cadence is extrapolated to other devices or activity types.
 
 Shorter activities are unaffected: the treadmill run (1801 s) returned 1801 of 1801 and the indoor cycle 788 of 788.
 
-> **Operational consequence, deliberately NOT changed in 6H-1B:** `running-ai.garmin.detail.samples-max-chart-size`
-> is still unset, so detail collection stores the down-sampled stream for any activity longer than ~2000 native
-> samples (~33 min at 1 Hz). Raising it is an ingestion-policy decision for a later phase, not a contract fix.
+> **Operational consequence, acted on in Phase 6H-1C:** `running-ai.garmin.detail.samples-max-chart-size` now
+> defaults to **20000** and is always sent, so a stream is collected at full resolution unless the operator lowers
+> it. Because asking for 20000 is not a guarantee, every collection also records what the response itself said —
+> `requested_max_chart_size`, `source_metrics_count`, `source_total_metrics_count` and
+> `sample_completeness` (FULL / DOWNSAMPLED / UNKNOWN) in `activity_detail_collection` (V14). The rule and its
+> UNKNOWN cases are in `detailed-activity-v2.md`, "Sample fidelity policy". Re-collecting the long outdoor run
+> under that policy turned 1399 of 2784 (DOWNSAMPLED) into 2784 of 2784 (FULL).
 
 ## L6. `download_activity(ORIGINAL)` — RAW FILE
 
