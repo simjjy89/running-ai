@@ -71,7 +71,10 @@ RunningAI automation (which lives only on the main PC and is NOT in this repo).
   incline, MODERATE/HARD without pace or speed, CROSS_TRAINING/unknown types. Separate switch `RUNNING_AI_DRAFT_PUBLISHING_ENABLED`
   (`running-ai.draft-publishing.enabled`) = false; approve/preview work while off. No scheduler, no startup trigger, no MCP tool;
   per-draft in-JVM single-flight. `POST /api/v1/workout-publish` stays the separate legacy deterministic date-based path (both use
-  the same per-date Intervals marker: never enable both). Real external publish: NOT_RUN (fake/mock only so far).
+  the same per-date Intervals marker). Real external publish: NOT_RUN (fake/mock only so far).
+- **Legacy publishing XOR AI Draft publishing** (Phase 6G.1, `draftpublish.PublishingModeGuard`): `WORKOUT_PUBLISHING_ENABLED` and
+  `RUNNING_AI_DRAFT_PUBLISHING_ENABLED` both true → application startup fails ("Legacy workout publishing and AI draft publishing
+  cannot be enabled at the same time"). Both off or exactly one on starts normally. Never weaken or bypass this guard.
 - Planned, not started: interval/repeat workout structure, QUALITY workout structure,
   cycling threshold profile, race pace, RPE model, reporting, remote ChatGPT ↔ MCP transport + authentication, missed-run catch-up / retry / notifications for publishing.
 - Skills with the detailed rules: `running-ai-dev` (workflow), `running-ai-database`
