@@ -58,6 +58,7 @@ class WorkoutDraftApiTest {
     @Autowired private lateinit var mockMvc: MockMvc
     @Autowired private lateinit var objectMapper: ObjectMapper
     @Autowired private lateinit var repository: WorkoutDraftRepository
+    @Autowired private lateinit var approvalRepository: WorkoutDraftApprovalRepository
     @Autowired private lateinit var coach: FakeAiCoach
     @Autowired private lateinit var validator: WorkoutDraftValidator
     @Autowired private lateinit var recoverySnapshots: RecoverySnapshotService
@@ -74,6 +75,7 @@ class WorkoutDraftApiTest {
 
     @AfterEach
     fun cleanUp() {
+        approvalRepository.deleteAll()
         repository.deleteAll()
         recoveryRepository.deleteAll()
         verifyNoInteractions(publishService, publisher, intervalsClient)
@@ -292,16 +294,23 @@ class WorkoutDraftApiTest {
             .andExpect(jsonPath("$.code").value("AI_COACH_INVALID_RESPONSE"))
     }
 
+    /**
+     * Phase 6G added approve and publish. Approving (with the legacy publish switch ON) still never
+     * reaches a publisher, and publish stays refused while the separate draft-publishing switch is
+     * off (its default, which this test does not change). cleanUp() verifies no publisher interaction.
+     */
     @Test
-    fun `there is no approve or publish endpoint on the draft API`() {
+    fun `approving never publishes and publishing stays behind its own switch`() {
         val id = objectMapper.readTree(
             generate("""{"date":"2026-10-02"}""").andReturn().response.contentAsString,
         ).get("id").asLong()
 
         mockMvc.perform(post("/api/v1/workout-drafts/$id/approve"))
-            .andExpect { assertThat(it.response.status).isIn(404, 405) }
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.status").value("APPROVED"))
         mockMvc.perform(post("/api/v1/workout-drafts/$id/publish"))
-            .andExpect { assertThat(it.response.status).isIn(404, 405) }
+            .andExpect(status().isConflict)
+            .andExpect(jsonPath("$.code").value("DRAFT_PUBLISHING_DISABLED"))
     }
 
     @Test

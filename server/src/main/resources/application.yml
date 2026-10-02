@@ -109,6 +109,13 @@ running-ai:
       cron: ${WORKOUT_PUBLISHING_SCHEDULER_CRON:0 0 5 * * *}
       zone: ${WORKOUT_PUBLISHING_SCHEDULER_ZONE:Asia/Seoul}
 
+  draft-publishing:
+    # Publishing APPROVED AI-coach drafts (Phase 6G, POST /api/v1/workout-drafts/{id}/publish). OFF by default and
+    # independent of workout-publishing above (the legacy date-based deterministic path): neither switch implies the
+    # other. With it off, drafts can still be generated, revised, approved and previewed. There is no scheduler and no
+    # MCP tool for it; an approved REST day is recorded as SKIPPED_REST_DAY and never sent anywhere.
+    enabled: ${RUNNING_AI_DRAFT_PUBLISHING_ENABLED:false}
+
   coach:
     # AI coach (Phase 6E). Designs workout DRAFTS only: nothing in this path can publish to
     # Intervals or write to Garmin, whatever running-ai.workout-publishing.enabled is set to.

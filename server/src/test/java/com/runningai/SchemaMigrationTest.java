@@ -70,15 +70,15 @@ class SchemaMigrationTest {
 
         assertThat(applied).extracting(MigrationInfo::getVersion)
                 .extracting(Object::toString)
-                .containsExactly("1", "2", "3", "4", "5", "6", "7", "8");
+                .containsExactly("1", "2", "3", "4", "5", "6", "7", "8", "9", "10");
         assertThat(applied).extracting(MigrationInfo::getState)
                 .containsOnly(MigrationState.SUCCESS);
         assertThat(flyway.info().pending()).isEmpty();
 
         Integer historyRows = jdbcTemplate.queryForObject(
-                "select count(*) from flyway_schema_history where success = true and version in ('1', '2', '3', '4', '5', '6', '7', '8')",
+                "select count(*) from flyway_schema_history where success = true and version in ('1', '2', '3', '4', '5', '6', '7', '8', '9', '10')",
                 Integer.class);
-        assertThat(historyRows).isEqualTo(8);
+        assertThat(historyRows).isEqualTo(10);
     }
 
     @Test
@@ -87,12 +87,14 @@ class SchemaMigrationTest {
                 "select lower(table_name) from information_schema.tables "
                         + "where lower(table_name) in "
                         + "('athlete', 'activity', 'activity_raw', 'garmin_sync_state', 'athlete_intensity_profile', "
-                        + "'workout_draft', 'garmin_recovery_daily', 'flyway_schema_history')",
+                        + "'workout_draft', 'garmin_recovery_daily', 'workout_draft_approval', 'workout_draft_publication', "
+                        + "'flyway_schema_history')",
                 String.class);
 
         assertThat(tables).containsExactlyInAnyOrder(
                 "athlete", "activity", "activity_raw", "garmin_sync_state", "athlete_intensity_profile",
-                "workout_draft", "garmin_recovery_daily", "flyway_schema_history");
+                "workout_draft", "garmin_recovery_daily", "workout_draft_approval", "workout_draft_publication",
+                "flyway_schema_history");
     }
 
     @Test
