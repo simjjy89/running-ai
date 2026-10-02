@@ -7,16 +7,11 @@ import com.runningai.integration.intervals.IntervalsException.Reason;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
-import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClient;
-import org.springframework.web.client.RestClientResponseException;
 
-import java.net.SocketTimeoutException;
-import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.List;
 
 /**
@@ -107,12 +102,7 @@ public class HttpIntervalsWorkoutClient implements IntervalsWorkoutClient {
     }
 
     private String authorization() {
-        if (!properties.hasApiKey()) {
-            throw new IntervalsException(Reason.NOT_CONFIGURED, null,
-                    "Intervals.icu API key is not configured (running-ai.intervals.api-key / INTERVALS_API_KEY)");
-        }
-        String credentials = "API_KEY:" + properties.apiKey();
-        return "Basic " + Base64.getEncoder().encodeToString(credentials.getBytes(StandardCharsets.UTF_8));
+        return IntervalsHttp.authorization(properties);
     }
 
     private static ObjectNode payload(IntervalsEventDraft draft) {
@@ -155,33 +145,6 @@ public class HttpIntervalsWorkoutClient implements IntervalsWorkoutClient {
     }
 
     private static JsonNode execute(Call call) {
-        try {
-            return call.run();
-        } catch (RestClientResponseException e) {
-            throw toException(e);
-        } catch (ResourceAccessException e) {
-            boolean timeout = e.getCause() instanceof SocketTimeoutException
-                    || (e.getMessage() != null && e.getMessage().toLowerCase().contains("timed out"));
-            Throwable cause = e.getCause() != null ? e.getCause() : e;
-            throw new IntervalsException(timeout ? Reason.TIMEOUT : Reason.CONNECTION_FAILED, null,
-                    "Intervals.icu " + (timeout ? "request timed out" : "not reachable") + " (" + cause.getClass().getSimpleName() + ")", e);
-        }
-    }
-
-    private static IntervalsException toException(RestClientResponseException e) {
-        int status = e.getStatusCode().value();
-        Reason reason;
-        if (status == 401) {
-            reason = Reason.AUTH_FAILED;
-        } else if (status == 403) {
-            reason = Reason.FORBIDDEN;
-        } else if (status == 429) {
-            reason = Reason.RATE_LIMITED;
-        } else if (status >= 500) {
-            reason = Reason.UPSTREAM_ERROR;
-        } else {
-            reason = Reason.CLIENT_ERROR;
-        }
-        return new IntervalsException(reason, status, "Intervals.icu responded " + status, e);
+        return IntervalsHttp.execute(call::run);
     }
 }
