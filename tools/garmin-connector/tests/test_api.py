@@ -38,6 +38,19 @@ class FakeLactateThresholdFetcher:
         return self.result
 
 
+class FakeRecoveryFetcher:
+    def __init__(self) -> None:
+        self.result: dict = {"date": "2026-10-02", "metrics": {"hrv": {"status": "NO_DATA", "data": None}}}
+        self.error: Exception | None = None
+        self.calls: list[str] = []
+
+    def __call__(self, day: str):
+        self.calls.append(day)
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
 @pytest.fixture
 def fetcher() -> FakeFetcher:
     return FakeFetcher()
@@ -49,8 +62,17 @@ def lactate_threshold_fetcher() -> FakeLactateThresholdFetcher:
 
 
 @pytest.fixture
-def client(fetcher: FakeFetcher, lactate_threshold_fetcher: FakeLactateThresholdFetcher) -> TestClient:
-    return TestClient(create_app(fetcher, lactate_threshold_fetcher), raise_server_exceptions=False)
+def recovery_fetcher() -> FakeRecoveryFetcher:
+    return FakeRecoveryFetcher()
+
+
+@pytest.fixture
+def client(
+    fetcher: FakeFetcher,
+    lactate_threshold_fetcher: FakeLactateThresholdFetcher,
+    recovery_fetcher: FakeRecoveryFetcher,
+) -> TestClient:
+    return TestClient(create_app(fetcher, lactate_threshold_fetcher, recovery_fetcher), raise_server_exceptions=False)
 
 
 def test_health_is_up_regardless_of_garmin_login(client, fetcher):
@@ -181,3 +203,43 @@ def test_no_login_endpoint_and_no_docs(client):
     assert client.post("/login").status_code in (404, 405)
     assert client.get("/docs").status_code == 404
     assert client.get("/openapi.json").status_code == 404
+
+
+def test_recovery_returns_the_fetcher_result_for_the_requested_date(client, recovery_fetcher):
+    response = client.get("/recovery", params={"date": "2026-10-02"})
+
+    assert response.status_code == 200
+    assert response.json() == recovery_fetcher.result
+    assert recovery_fetcher.calls == ["2026-10-02"]
+
+
+@pytest.mark.parametrize("bad", ["", "2026-13-01", "2026-02-30", "02-10-2026", "2026-10-2"])
+def test_recovery_rejects_an_invalid_date_without_calling_garmin(client, recovery_fetcher, bad):
+    response = client.get("/recovery", params={"date": bad})
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "INVALID_REQUEST"
+    assert recovery_fetcher.calls == []
+
+
+def test_recovery_requires_a_date(client, recovery_fetcher):
+    assert client.get("/recovery").status_code == 400
+    assert recovery_fetcher.calls == []
+
+
+@pytest.mark.parametrize(
+    ("error", "status", "code"),
+    [
+        (GarminConnectAuthenticationError("no tokens"), 401, "GARMIN_AUTH_REQUIRED"),
+        (GarminConnectTooManyRequestsError("slow down"), 429, "GARMIN_RATE_LIMITED"),
+        (RuntimeError("boom"), 500, "GARMIN_CONNECTOR_ERROR"),
+    ],
+)
+def test_recovery_maps_failures_to_the_error_contract(client, recovery_fetcher, error, status, code):
+    recovery_fetcher.error = error
+
+    response = client.get("/recovery", params={"date": "2026-10-02"})
+
+    assert response.status_code == status
+    assert response.json()["code"] == code
+    assert "boom" not in response.text

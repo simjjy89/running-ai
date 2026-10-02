@@ -13,6 +13,7 @@ from typing import Any
 from garminconnect import Garmin
 
 from .errors import GARMIN_UPSTREAM_ERROR, ConnectorError, translate
+from .recovery import fetch_recovery
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +98,11 @@ class GarminGateway:
         logger.info("Fetched Garmin lactate threshold snapshot")
         return result
 
+    def recovery(self, day: str) -> dict[str, Any]:
+        """One day's recovery metrics (HRV, sleep, resting HR, Body Battery, stress), projected to
+        the documented fields only; see :mod:`garmin_connector.recovery` for the contract."""
+        return fetch_recovery(self._garmin, day)
+
 
 class CachedGatewayProvider:
     """Creates the gateway lazily and reuses it while the session stays valid.
@@ -136,6 +142,15 @@ class CachedGatewayProvider:
         gateway = self()
         try:
             return gateway.lactate_threshold()
+        except ConnectorError as err:
+            if err.code == "GARMIN_AUTH_REQUIRED":
+                self._gateway = None
+            raise
+
+    def recovery(self, day: str) -> dict[str, Any]:
+        gateway = self()
+        try:
+            return gateway.recovery(day)
         except ConnectorError as err:
             if err.code == "GARMIN_AUTH_REQUIRED":
                 self._gateway = None

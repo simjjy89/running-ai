@@ -141,3 +141,30 @@ def test_provider_caches_gateway_and_drops_it_on_auth_failure():
     fake.activities_error = None
     provider.recent_activities(1)
     assert len(created) == 2   # reloaded the token store once, not a credential login
+
+
+def test_gateway_recovery_projects_the_documented_fields(fake_garmin):
+    result = GarminGateway(fake_garmin).recovery("2026-10-02")
+
+    assert result["date"] == "2026-10-02"
+    assert result["metrics"]["restingHeartRate"] == {"status": "OK", "data": {"value": 52}}
+
+
+def test_provider_recovery_drops_the_gateway_on_auth_failure():
+    garmins: list[FakeGarmin] = []
+
+    def factory() -> FakeGarmin:
+        garmin = FakeGarmin()
+        garmins.append(garmin)
+        return garmin
+
+    provider = CachedGatewayProvider("~/.garminconnect", garmin_factory=factory)
+    provider.recovery("2026-10-02")
+    garmins[0].recovery_errors["get_hrv_data"] = GarminConnectAuthenticationError("expired")
+
+    with pytest.raises(ConnectorError) as info:
+        provider.recovery("2026-10-02")
+    assert info.value.code == GARMIN_AUTH_REQUIRED
+
+    provider.recovery("2026-10-02")
+    assert len(garmins) == 2

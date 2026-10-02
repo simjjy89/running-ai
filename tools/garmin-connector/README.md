@@ -73,13 +73,35 @@ other interfaces is intentionally not supported. Swagger / ReDoc / OpenAPI are d
 |----------|----------|
 | `GET /health` | `{"status": "UP", "service": "garmin-connector"}` — process liveness only; Garmin login state never makes it DOWN |
 | `GET /activities?limit=N` (1–100, default 20) | JSON **array** of Garmin activity-list items, newest first, exactly as returned by Garmin (`activityList` wrapper removed, nothing renamed) |
+| `GET /lactate-threshold` | Garmin's latest running lactate-threshold snapshot, raw (Phase 6D) |
+| `GET /recovery?date=YYYY-MM-DD` | One day of recovery metrics (Phase 6F), projected to documented fields only — see below |
+
+### `/recovery` contract
+
+```json
+{"date": "2026-10-02",
+ "metrics": {
+   "hrv":              {"status": "OK", "data": {"lastNightAvg": 52.0, "weeklyAvg": 48.5, "status": "BALANCED"}},
+   "sleep":            {"status": "OK", "data": {"sleepTimeSeconds": 25200, "sleepScore": 84}},
+   "restingHeartRate": {"status": "NO_DATA", "data": null},
+   "bodyBattery":      {"status": "OK", "data": {"highest": 81, "lowest": 40, "charged": 58, "drained": 32}},
+   "stress":           {"status": "ERROR", "data": null, "error": "GARMIN_UPSTREAM_ERROR"}}}
+```
+
+Five sequential Garmin calls per day — `get_hrv_data`, `get_sleep_data`, `get_rhr_daily(date, date)`,
+`get_body_battery`, `get_all_day_stress` (python-garminconnect 0.3.16; field names taken from the
+library's own source and tests, see `garmin_connector/recovery.py`). Garmin's units are kept; no
+time series, profile id or raw body is returned. Per metric: `OK`, `NO_DATA` (Garmin has nothing for
+that day), `MALFORMED` (unexpected shape or a different date) or `ERROR` (that one call failed). An
+authentication failure or a rate limit (429) aborts the whole request with the error contract below,
+without making the remaining calls.
 
 Errors are always `{"code": "...", "message": "..."}` and never contain tokens,
 cookies or payloads:
 
 | HTTP | code | meaning |
 |------|------|---------|
-| 400 | `INVALID_REQUEST` | bad `limit` |
+| 400 | `INVALID_REQUEST` | bad `limit` / `date` |
 | 401 | `GARMIN_AUTH_REQUIRED` | no valid token store — run `login` on this host |
 | 403 | `GARMIN_FORBIDDEN` | Garmin refused the request |
 | 429 | `GARMIN_RATE_LIMITED` | Garmin rate limit — the server must stop, not retry |

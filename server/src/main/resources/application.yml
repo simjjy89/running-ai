@@ -80,6 +80,13 @@ running-ai:
         enabled: ${GARMIN_PROFILE_SYNC_ENABLED:false}
         cron: ${GARMIN_PROFILE_SYNC_SCHEDULER_CRON:0 30 4 * * *}
         zone: ${GARMIN_PROFILE_SYNC_SCHEDULER_ZONE:Asia/Seoul}
+    recovery-sync:
+      # Garmin recovery metrics (Phase 6F: HRV, sleep, resting HR, Body Battery, stress). Manual only
+      # (POST /api/v1/garmin/recovery-sync[/backfill]); there is no scheduler. A backfill is strictly
+      # sequential (5 Garmin calls per day), pauses between days, never retries and stops at the first
+      # connector failure (e.g. 429).
+      backfill-delay: ${GARMIN_RECOVERY_BACKFILL_DELAY:2s}
+      max-backfill-days: 28
 
   intervals:
     # Intervals.icu workout publisher (IntervalsWorkoutPublisher). The API key comes from the environment only.

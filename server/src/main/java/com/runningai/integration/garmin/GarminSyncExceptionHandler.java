@@ -12,13 +12,19 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
  * Maps Garmin sync failures to HTTP errors. Ordered ahead of the global handler so its
  * catch-all does not turn these into 500s. Messages carry no credentials or payloads.
  */
-@RestControllerAdvice(assignableTypes = {GarminSyncController.class, GarminProfileSyncController.class})
+@RestControllerAdvice(assignableTypes = {GarminSyncController.class, GarminProfileSyncController.class,
+        GarminRecoverySyncController.class})
 @Order(Ordered.HIGHEST_PRECEDENCE)
 public class GarminSyncExceptionHandler {
 
     @ExceptionHandler(GarminSyncAlreadyRunningException.class)
     public ResponseEntity<ErrorResponse> alreadyRunning(GarminSyncAlreadyRunningException e) {
         return body(HttpStatus.CONFLICT, "GARMIN_SYNC_ALREADY_RUNNING", e.getMessage());
+    }
+
+    @ExceptionHandler(GarminRecoverySyncAlreadyRunningException.class)
+    public ResponseEntity<ErrorResponse> recoveryAlreadyRunning(GarminRecoverySyncAlreadyRunningException e) {
+        return body(HttpStatus.CONFLICT, "GARMIN_RECOVERY_SYNC_ALREADY_RUNNING", e.getMessage());
     }
 
     @ExceptionHandler(GarminIncrementalSyncException.class)

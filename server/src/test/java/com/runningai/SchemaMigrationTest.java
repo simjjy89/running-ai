@@ -9,6 +9,8 @@ import com.runningai.athlete.AthleteIntensityProfileRepository;
 import com.runningai.athlete.AthleteService;
 import com.runningai.integration.garmin.GarminSyncState;
 import com.runningai.integration.garmin.GarminSyncStateRepository;
+import com.runningai.recovery.RecoveryRepository;
+import com.runningai.recovery.RecoverySnapshot;
 import jakarta.persistence.EntityManager;
 import org.flywaydb.core.Flyway;
 import org.flywaydb.core.api.MigrationInfo;
@@ -22,6 +24,7 @@ import org.springframework.test.context.ActiveProfiles;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -56,6 +59,9 @@ class SchemaMigrationTest {
     private AthleteIntensityProfileRepository athleteIntensityProfileRepository;
 
     @Autowired
+    private RecoveryRepository recoveryRepository;
+
+    @Autowired
     private EntityManager entityManager;
 
     @Test
@@ -64,15 +70,15 @@ class SchemaMigrationTest {
 
         assertThat(applied).extracting(MigrationInfo::getVersion)
                 .extracting(Object::toString)
-                .containsExactly("1", "2", "3", "4", "5", "6");
+                .containsExactly("1", "2", "3", "4", "5", "6", "7");
         assertThat(applied).extracting(MigrationInfo::getState)
                 .containsOnly(MigrationState.SUCCESS);
         assertThat(flyway.info().pending()).isEmpty();
 
         Integer historyRows = jdbcTemplate.queryForObject(
-                "select count(*) from flyway_schema_history where success = true and version in ('1', '2', '3', '4', '5', '6')",
+                "select count(*) from flyway_schema_history where success = true and version in ('1', '2', '3', '4', '5', '6', '7')",
                 Integer.class);
-        assertThat(historyRows).isEqualTo(6);
+        assertThat(historyRows).isEqualTo(7);
     }
 
     @Test
@@ -81,12 +87,12 @@ class SchemaMigrationTest {
                 "select lower(table_name) from information_schema.tables "
                         + "where lower(table_name) in "
                         + "('athlete', 'activity', 'activity_raw', 'garmin_sync_state', 'athlete_intensity_profile', "
-                        + "'workout_draft', 'flyway_schema_history')",
+                        + "'workout_draft', 'garmin_recovery_daily', 'flyway_schema_history')",
                 String.class);
 
         assertThat(tables).containsExactlyInAnyOrder(
                 "athlete", "activity", "activity_raw", "garmin_sync_state", "athlete_intensity_profile",
-                "workout_draft", "flyway_schema_history");
+                "workout_draft", "garmin_recovery_daily", "flyway_schema_history");
     }
 
     @Test
@@ -145,5 +151,37 @@ class SchemaMigrationTest {
             athleteIntensityProfileRepository.save(new AthleteIntensityProfile(athleteId, 172, 305));
             entityManager.flush();
         }).isInstanceOfAny(DataIntegrityViolationException.class, jakarta.persistence.PersistenceException.class);
+    }
+
+    @Test
+    @Transactional
+    void uniqueConstraintOnRecoveryAthleteAndDateIsEnforcedByTheDatabase() {
+        Long athleteId = athleteService.getDefaultAthlete().getId();
+        LocalDate day = LocalDate.of(2026, 10, 2);
+
+        recoveryRepository.save(new RecoverySnapshot(athleteId, day));
+        entityManager.flush();
+
+        assertThatThrownBy(() -> {
+            recoveryRepository.save(new RecoverySnapshot(athleteId, day));
+            entityManager.flush();
+        }).isInstanceOfAny(DataIntegrityViolationException.class, jakarta.persistence.PersistenceException.class);
+    }
+
+    @Test
+    void recoveryCheckConstraintsRejectNegativeValues() {
+        // no test transaction: on PostgreSQL the first failed insert would abort it for the second
+        Long athleteId = athleteService.getDefaultAthlete().getId();
+
+        assertThatThrownBy(() -> jdbcTemplate.update(
+                "insert into garmin_recovery_daily (athlete_id, recovery_date, resting_heart_rate_bpm, created_at, updated_at) "
+                        + "values (?, ?, ?, current_timestamp, current_timestamp)",
+                athleteId, LocalDate.of(2026, 10, 1), 0))
+                .isInstanceOf(DataIntegrityViolationException.class);
+        assertThatThrownBy(() -> jdbcTemplate.update(
+                "insert into garmin_recovery_daily (athlete_id, recovery_date, stress_average, created_at, updated_at) "
+                        + "values (?, ?, ?, current_timestamp, current_timestamp)",
+                athleteId, LocalDate.of(2026, 10, 1), -1))
+                .isInstanceOf(DataIntegrityViolationException.class);
     }
 }
