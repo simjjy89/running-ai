@@ -1,7 +1,11 @@
 # Phase 6H-4 — Running Analysis Engine + Java 21 Runtime Normalization (result)
 
-**Outcome: `PHASE_6H_4_RUNNING_ANALYSIS_ENGINE_READY`**, with one item left to the owner:
-**`JAVA21_MACHINE_PATH_USER_ACTION_REQUIRED`** (§2.3).
+**Outcome: `PHASE_6H_4_RUNNING_ANALYSIS_ENGINE_READY`.**
+
+**Follow-up, completed 2026-10-03: `JAVA21_SYSTEM_NORMALIZED`** — see the addendum at the end. The
+`JAVA21_MACHINE_PATH_USER_ACTION_REQUIRED` item recorded below in §2 has since been resolved with the
+owner's explicit permission to use administrator rights; §2 is kept as the record of what was true
+during the phase itself.
 
 Instruction kept verbatim in
 `docs/work-orders/2026-10-02-phase-6h-4-running-analysis-engine-instruction.md`.
@@ -334,3 +338,94 @@ Push: fast-forward to `origin/main`, no force. Working tree clean.
    the engine deliberately emits more than a prompt should carry.
 4. Historical backfill policy, now that both full-resolution collection and analysis are operational.
 5. The machine `PATH` decision (§2.3), if a bare `java` of 21 is wanted.
+
+---
+
+# Addendum (2026-10-03) — `JAVA21_SYSTEM_NORMALIZED`
+
+The owner explicitly permitted administrator rights, so the machine-level item left open in §2.3 was
+completed. Windows environment variables are not committed; the full before/after and the rollback
+commands are in the git-ignored `.runtime/java-env-backup-6h4/system-normalization/ROLLBACK.md`, with raw
+pre-change values in `env-backup-before.json`, `machine-path-before.txt` and `user-path-before.txt`.
+
+## A.1 What was found
+
+**No system-wide JDK 21 existed.** `C:\Program Files\Java` held 8, 11, 15 and 17 (plus two JREs), and the
+installed-programs registry agreed. The only JDK 21 on the machine was the user-profile
+`C:\Users\simjy\.jdks\openjdk-21.0.2` — Oracle OpenJDK `21.0.2+13-58`, a complete and relocatable
+distribution (`bin`, `lib`, `conf`, `jmods`, `include`, 321 MB).
+
+## A.2 What was done
+
+| Step | Change |
+|---|---|
+| system JDK 21 | the existing Oracle OpenJDK 21.0.2 **copied** to `C:\Program Files\Java\jdk-21.0.2` (robocopy), matching the neighbouring `jdk-17` naming |
+| machine `JAVA_HOME` | `C:\Program Files\Java\jdk1.8.0_301` → `C:\Program Files\Java\jdk-21.0.2` (no `bin`) |
+| machine `PATH` | `%JAVA_HOME%\bin` **moved** from position 17 to position 3, ahead of both Oracle `javapath` entries — 23 entries before and after, nothing deleted, no unrelated entry edited, relative order preserved |
+| user `JAVA_HOME` | **removed**, so the machine value governs |
+| user `PATH` | the `%JAVA_HOME%\bin` entry added in 6H-1C **removed** — it was the workaround for exactly the problem now fixed properly |
+
+**Copied rather than installed**, deliberately: it adds no new JDK vendor (the work order asked to avoid
+that, and the machine's other Java installations are Oracle), it needed no download and no licence
+decision taken on the owner's behalf, and it is byte-identical to the build Gradle and Spring were
+already green on — so normalising the environment could not quietly change a test result.
+
+The trade-off is recorded in `ROLLBACK.md`: a plain copy is not update-managed. Swapping it later for a
+winget-installed Temurin or Microsoft OpenJDK needs nothing but repointing machine `JAVA_HOME`.
+
+Nothing was uninstalled; Java 8/11/15/17 remain, the Oracle `javapath` files were not touched (only
+out-ranked on `PATH`), and the original user-profile JDK was left in place for IntelliJ.
+
+## A.3 Verification (new process, no override)
+
+| Check | Before | After |
+|---|---|---|
+| `JAVA_HOME` | `C:\Users\simjy\.jdks\openjdk-21.0.2` (user) | **`C:\Program Files\Java\jdk-21.0.2`** (machine) |
+| `where java` first | `...\Oracle\Java\javapath\java.exe` | **`C:\Program Files\Java\jdk-21.0.2\bin\java.exe`** |
+| `where javac` first | `...\Oracle\Java\javapath\javac.exe` | **`C:\Program Files\Java\jdk-21.0.2\bin\javac.exe`** |
+| `java -version` | 17.0.10 | **21.0.2** |
+| `javac -version` | 17.0.10 | **21.0.2** |
+| `gradlew -version` | Launcher 21.0.2, daemon = user-profile JDK | **Launcher 21.0.2, daemon `C:\Program Files\Java\jdk-21.0.2`** |
+| canonical stop → start → status | PASS (via user `JAVA_HOME`) | **PASS**, all layers UP, actuator UP |
+| running Spring process | user-profile `java.exe` | **`C:\Program Files\Java\jdk-21.0.2\bin\java.exe`** |
+
+The start was run through the `RunningAI-Startup` scheduled task — a genuinely new process with the real
+logon environment, not a reconstruction — so the Spring process path above is independent evidence that
+the system environment resolves JDK 21. No temporary `$env:JAVA_HOME` was set anywhere, and no Java path
+hack was added to any script or task. `RunningAI-Startup` still runs only
+`powershell.exe -File scripts\windows\start-running-ai.ps1`; the `$env:JAVA_HOME = $java.Home` line inside
+that script is the discovered JDK being handed to Gradle, not a hardcoded path.
+
+## A.4 Regression after the change
+
+| Suite | Baseline | Result |
+|---|---|---|
+| Spring `gradlew clean test`, fresh-shell environment, **no override** | 1011 | **1011 passed, 0 failed, 0 skipped** (103 suites) |
+| Python connector | 134 | unchanged — no connector code was touched |
+
+## A.5 Two mistakes made and corrected on the way
+
+- The first elevated run failed at its own version check: under `$ErrorActionPreference = 'Stop'`,
+  `java -version 2>&1` turns the JVM's stderr banner into a terminating `NativeCommandError` in
+  PowerShell 5.1. The copy had already succeeded; `JAVA_HOME` and `PATH` were untouched by the abort.
+  Fixed by relaxing the preference around that one call, then re-run.
+- The fresh-shell probe helper initially reported `java` as 17 **after** the change. The environment was
+  correct; the helper was wrong — it expanded `%JAVA_HOME%` through `[regex]::Escape`, which mangles a
+  Windows path into `C:\Program\ Files\...`. Replaced with a `MatchEvaluator`, which neither `$` nor `\`
+  can disturb. Worth noting because the same helper produced the "bare java is 17" readings in §2: those
+  were nonetheless correct, since `%JAVA_HOME%\bin` sat behind the javapath shims at the time either way.
+
+## A.6 Untouched, as required
+
+```text
+Java 8 / 11 / 15 / 17 uninstalled        = no
+Oracle javapath files deleted            = no
+unrelated machine PATH entries changed   = no
+.env or any secret printed               = no
+publishing switches changed              = no (all four still false)
+Garmin / Intervals API calls             = 0
+external workout writes                  = 0
+repository files changed by this addendum = only this work order
+```
+
+**`JAVA21_SYSTEM_NORMALIZED`**
