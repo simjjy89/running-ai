@@ -25,15 +25,19 @@ class GarminDetailMappingException(val code: String, message: String) : RuntimeE
 // Garmin field names end in this file: everything returned from here is provider-neutral.
 //
 // Provenance of the keys (see docs/architecture/garmin-detailed-activity-contract-static.md):
-//  - activity-list keys: STATIC_SOURCE_CONFIRMED by python-garminconnect 0.3.16 typed.Activity aliases
-//    (several also CONFIRMED_LIVE in Phase 3B-3);
-//  - sample envelope (metricDescriptors[].metricsIndex/key + activityDetailMetrics[].metrics) and the
-//    sumDuration / sumElapsedDuration / sumMovingDuration keys: STATIC_SOURCE_CONFIRMED by
-//    garminconnect/activity_details.py;
-//  - every other key (lap, zone, sample "direct*" metrics): PROVISIONAL, from SYNTHETIC_NOT_LIVE_GARMIN
-//    fixtures, to be confirmed or corrected against live payloads in Main-PC Phase 6H-1B. A wrong
-//    provisional key loses nothing: the raw payload is stored first and unknown keys go to extraMetrics,
-//    so a corrected mapper is applied with `reprocess` without contacting Garmin again.
+//  - activity-list keys: STATIC_SOURCE_CONFIRMED by python-garminconnect 0.3.16 typed.Activity aliases,
+//    then CONFIRMED_LIVE (Phase 3B-3 and, for every key read below, Phase 6H-1B);
+//  - lap, zone and sample keys: CONFIRMED_LIVE in Main-PC Phase 6H-1B against four real activities
+//    (outdoor run, track interval run, treadmill run, indoor cycling). No key below needed correcting.
+//
+// Two live facts the mapping depends on:
+//  - a metric's index is meaningful only inside its own payload (the four live activities produced four
+//    different layouts), so descriptors are resolved per payload and never by position;
+//  - the descriptors' `unit.factor` is not a conversion divisor - live values already carry the stated
+//    unit - so values are stored exactly as reported.
+//
+// A key that is nonetheless wrong loses nothing: the raw payload is stored first and unknown keys go to
+// extraMetrics, so a corrected mapper is applied with `reprocess` without contacting Garmin again.
 
 private fun JsonNode.numberOrNull(key: String, where: String): Double? {
     val v = get(key) ?: return null
@@ -81,7 +85,7 @@ class GarminActivityDetailMapper {
     }
 }
 
-/** Laps from the splits payload. PROVISIONAL shape: `{"lapDTOs": [ {...}, ... ]}`. */
+/** Laps from the splits payload. CONFIRMED_LIVE shape: `{"activityId", "lapDTOs": [...], "eventDTOs": [...]}`. */
 @Component
 class GarminLapMapper(private val objectMapper: ObjectMapper) {
 
@@ -100,8 +104,9 @@ class GarminLapMapper(private val objectMapper: ObjectMapper) {
     private fun mapLap(position: Int, lap: JsonNode): LapData {
         if (!lap.isObject) throw GarminDetailMappingException("NOT_AN_OBJECT", "lap $position is not an object")
         val w = "lap $position"
-        // The source's own index when present; otherwise the lap's position in the source's ordered list
-        // (structural, not a metric).
+        // The source's own index when present (live Garmin numbers laps from 1; the 0-based messageIndex
+        // stays an extra metric); otherwise the lap's position in the source's ordered list (structural,
+        // not a metric).
         val index = lap.get("lapIndex")?.takeUnless { it.isNull }?.let {
             if (!it.canConvertToExactIntegral() || !it.canConvertToInt()) {
                 throw GarminDetailMappingException("INVALID_LAP_INDEX", "$w: lapIndex is not an integer")
@@ -147,7 +152,7 @@ class GarminLapMapper(private val objectMapper: ObjectMapper) {
     }
 }
 
-/** Time in zones. PROVISIONAL shape: `[{"zoneNumber", "secsInZone", "zoneLowBoundary"}, ...]`. */
+/** Time in zones. CONFIRMED_LIVE shape: `[{"zoneNumber", "secsInZone", "zoneLowBoundary"}, ...]`, no upper bound. */
 @Component
 class GarminZoneMapper {
 
@@ -178,10 +183,11 @@ class GarminZoneMapper {
 /**
  * Samples from the activity-details stream, resolved **by descriptor, per payload**.
  *
- * STATIC_SOURCE_CONFIRMED envelope (garminconnect/activity_details.py): every sample's `metrics` is a
- * positional array whose meaning is given by that response's `metricDescriptors[].metricsIndex/key`,
- * and the mapping "varies by device and activity type". So the index of a metric is looked up in the
- * descriptors of the very payload being mapped; no position is ever assumed. Descriptor rules follow the
+ * CONFIRMED_LIVE envelope (Phase 6H-1B; statically from garminconnect/activity_details.py): every sample's
+ * `metrics` is a positional array whose meaning is given by that response's `metricDescriptors[].metricsIndex/key`.
+ * Four live activities from one device produced four different layouts - `directTimestamp` sat at index 7, 5,
+ * 9 and 2 - so the index of a metric is looked up in the descriptors of the very payload being mapped; no
+ * position is ever assumed. Live timestamps arrive as JSON floats holding whole epoch milliseconds. Descriptor rules follow the
  * library: a non-string key or a missing/non-integer/negative index is skipped; an index beyond a
  * sample's array means "not reported" for that sample. Two descriptors claiming one index, or one key at
  * two indexes, is ambiguous and fails the mapping (raw kept).

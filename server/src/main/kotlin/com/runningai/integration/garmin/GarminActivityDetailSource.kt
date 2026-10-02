@@ -14,7 +14,7 @@ import org.springframework.web.client.RestClientResponseException
 
 /**
  * One per-activity detail part served by the localhost connector (Phase 6H-1A), with the
- * python-garminconnect 0.3.16 method behind it (STATIC_SOURCE_CONFIRMED, not live-verified).
+ * python-garminconnect 0.3.16 method behind it. All five are CONFIRMED_LIVE (Main-PC Phase 6H-1B).
  */
 enum class GarminActivityPart(val path: String, val payloadType: DetailPayloadType, val libraryMethod: String) {
     DETAIL("detail", DetailPayloadType.ACTIVITY_DETAIL, "get_activity"),
@@ -45,8 +45,11 @@ interface GarminActivityDetailSource {
 @ConfigurationProperties(prefix = "running-ai.garmin.detail")
 data class GarminActivityDetailProperties(
     /**
-     * Garmin `maxChartSize` for the sample stream. Null = the library default (2000). Garmin may
-     * down-sample to this many points; the stored samples are whatever Garmin returns, never resampled.
+     * Garmin `maxChartSize` for the sample stream. Null = the library default (2000). Garmin down-samples
+     * to this many points: Phase 6H-1B measured a 2783 s run returning 1399 of its 2784 native (1 Hz)
+     * samples by default and all 2784 with `maxChart=20000`, same first and last timestamp. The payload's
+     * own `totalMetricsCount` reports the native count, so a stored stream can always be told apart from a
+     * complete one. The stored samples are whatever Garmin returns, never resampled.
      */
     val samplesMaxChartSize: Int? = null,
 )

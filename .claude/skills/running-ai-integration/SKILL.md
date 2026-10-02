@@ -76,14 +76,25 @@ nothing escapes the scheduler thread, logs carry counts/reason codes only. Tests
 connector process supervision, FIT/TCX download/storage, typed splits / split summaries / weather / gear /
 exercise sets, any scheduled or batch detail collection, historical backfill beyond `max-pages`.
 
-**Detailed activity (Phase 6H-1A, STATIC_SOURCE_CONFIRMED, not live-verified):** connector
+**Detailed activity (Phase 6H-1A, contract LIVE_VERIFIED in Phase 6H-1B):** connector
 `GET /activities/{id}/detail|splits|hr-zones|power-zones|samples` → `GarminActivityDetailSource` →
 `GarminActivityDetailIngestionService` (raw `activity_raw_payload` first, then `GarminLapMapper` /
 `GarminZoneMapper` / `GarminSampleMapper`, per-part status in `activity_detail_collection`). The connector
-creates `Garmin(retry_attempts=0)` — python-garminconnect 0.3.16 otherwise retries 5xx 3× by itself. Samples
-are resolved through each payload's `metricDescriptors`; never hard-code a metric index. Lap/zone/sample metric
-keys are PROVISIONAL until Main-PC 6H-1B; correct a mapper and run `/reprocess` rather than re-fetching.
-Contract: `docs/architecture/garmin-detailed-activity-contract-static.md`. Phase 3B-3
+creates `Garmin(retry_attempts=0)` — python-garminconnect 0.3.16 otherwise retries 5xx 3× by itself.
+Every mapper key was confirmed against four real activities; a mapper change is applied with `/reprocess`
+from the stored raw payloads, never by re-fetching. Live rules that must not be broken:
+**`metricsIndex` is valid only inside its own payload** (one device produced four different layouts —
+`directTimestamp` at index 7/5/9/2), so samples are always resolved through that payload's `metricDescriptors`;
+`directTimestamp` is a JSON **float** of epoch milliseconds; descriptor `unit.factor` is **not** a divisor
+(values already carry the stated unit — never scale them); lap `lapIndex` is **1-based** and the interval
+structure lives in `intensityType` + `wktStepIndex` (a lap is **not** 1:1 with a workout step — group by
+`wktStepIndex`); zones always arrive as 5 entries with **no upper bound** (never derive one); power zones of an
+activity without a power meter are `[]` → part status `EMPTY`, never a failure; `/samples` **down-samples**
+above ~2000 native samples unless `running-ai.garmin.detail.samples-max-chart-size` is raised
+(`totalMetricsCount` reports the native count). FIT decision: **A — API detail suffices**; `download_activity`
+returns a ZIP holding one `.fit`, archival-only, not implemented.
+Contract: `docs/architecture/garmin-detailed-activity-contract-static.md` (live facts in its §L1–§L7);
+run record: `docs/work-orders/2026-10-02-phase-6h-1b-garmin-detailed-live-contract-result.md`. Phase 3B-3
 (`docs/work-orders/2026-09-29-garmin-live-e2e-validation.md`) ran the full
 Connector → Spring → PostgreSQL path against one real Garmin activity twice (live
 login, live fetch, live sync, live idempotency all passed) — the main contract

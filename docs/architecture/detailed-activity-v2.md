@@ -54,6 +54,21 @@ sample mapper builds `index → key` from **the payload being mapped** and looks
 hard-coded. Ambiguous descriptors (two keys on one index, one key on two indexes) fail the mapping instead of
 picking one.
 
+**Live evidence (6H-1B) that this is not over-engineering:** four activities from one device on one account
+produced four different layouts — `directTimestamp` sat at index 7 (outdoor run), 5 (track interval run), 9
+(treadmill) and 2 (indoor cycling), and even the two outdoor runs disagreed. Two further live facts the mapper
+depends on: `directTimestamp` arrives as a **JSON float** holding whole epoch milliseconds, and the descriptors'
+`unit.factor` is **not** a conversion divisor (values already carry the stated unit), which is why nothing is
+scaled on the way in. Details in `garmin-detailed-activity-contract-static.md` §L4.
+
+### Sampling resolution (live)
+
+The library default `maxchart=2000` **down-samples**: a 2783 s run returned 1399 of its 2784 native (1 Hz) samples,
+with irregular spacing, while `maxChart=20000` returned all 2784 with the same first and last timestamp. Each
+payload reports its native count in `totalMetricsCount`, so a down-sampled stream is always recognisable after the
+fact. `running-ai.garmin.detail.samples-max-chart-size` is still unset — raising it is an ingestion-policy decision
+for a later phase, not part of contract verification (§L5).
+
 ## Partial collection
 
 Per activity, `activity_detail_collection` holds one row per part with `NORMALIZED`, `RAW_STORED`, `EMPTY`,
@@ -61,6 +76,11 @@ Per activity, `activity_detail_collection` holds one row per part with `NORMALIZ
 or `FAILED`. A per-part failure (404, 5xx, odd body, mapping error) lets the other parts continue; an account-level
 failure (auth, forbidden, rate limit, connector down) stops the run immediately and propagates, so nothing keeps
 calling Garmin. A failure is never hidden behind the already stored summary activity.
+
+**Live check (6H-1B): a normal absence is not a failure.** An activity recorded without a power meter answers the
+power-zone endpoint with an empty array `[]`, which the ingestion records as `EMPTY` with `item_count = 0` — the
+indoor-cycling session came back `EMPTY` while the run still reported `COMPLETE`. `ACTIVITY_DETAIL` is recorded as
+`RAW_STORED` by design (see Status below).
 
 ## Activity identity (decision)
 
@@ -77,16 +97,48 @@ activity; an Intervals.icu activity is linked to it (by its Garmin id where Inte
 duration tolerance), never inserted as a second activity. `activity.external_source/external_id` stays as the
 primary-source key for backward compatibility. Existing rows are preserved.
 
+## Lap semantics (live, 6H-1B)
+
+Garmin marks work and rest on the lap itself: `lapDTOs[].intensityType` is one of `WARMUP`, `ACTIVE`, `RECOVERY`,
+`COOLDOWN`, and `wktIndex` / `wktStepIndex` tie a lap back to the structured workout it was run against. All three
+are preserved in `activity_lap.extra_metrics`; RunningAI never re-derives interval structure from pace or HR while
+the device already states it.
+
+**A lap is not a workout step.** On a live interval run, one step spanned nine laps, two steps alternated as a
+repeat block, one step index never appeared, and the final lap carried no step at all. Any future analysis must
+group laps by `wktStepIndex`, never assume a 1:1 mapping.
+
+`lapIndex` is 1-based in Garmin payloads (the 0-based counter is `messageIndex`), so `activity_lap.lap_index`
+starts at 1.
+
+## FIT decision (6H-1B): **A — API detail is sufficient; FIT stays archival/optional**
+
+`download_activity(ORIGINAL)` was probed read-only once: a 101 KB ZIP holding one 237 KB `.fit`. It is not needed
+for the analysis this pipeline is being built for:
+
+- sample resolution is not a reason — `maxChartSize` already returns the full native 1 Hz stream (§L5);
+- running dynamics are not a reason — ground contact time, vertical oscillation, vertical ratio, stride length and
+  running power all arrive as ordinary sample metrics;
+- interval structure is not a reason — `intensityType` / `wktStepIndex` carry it on each lap.
+
+What FIT would still add is per-record device-native precision, lap/session message fields Garmin does not expose
+over the API, and an archival original that survives any Garmin-side edit. That is a *preservation* argument, not a
+capability gap, so FIT ingestion is recorded as a **next-phase candidate** (binary storage + a decoder are a
+separate decision) and nothing was implemented here.
+
 ## Status
 
 | Piece | State |
 |---|---|
-| Static contract | STATIC_SOURCE_CONFIRMED (`garmin-detailed-activity-contract-static.md`) |
-| Connector endpoints | implemented, fake-tested; **not live-verified** |
-| Storage (V11–V13) | implemented; H2 + PostgreSQL 17 migration validated |
-| Mappers | activity detail: library-confirmed keys; samples: confirmed envelope + PROVISIONAL metric keys; laps/zones: PROVISIONAL (synthetic fixtures) |
+| Garmin detailed contract | **LIVE_VERIFIED** (Phase 6H-1B; live section of `garmin-detailed-activity-contract-static.md`) |
+| Connector endpoints | implemented; all five **live-verified** against four real activities |
+| Storage (V11–V13) | implemented; H2 + PostgreSQL 17 migration validated; live ingestion + idempotent re-collection verified |
+| Mappers | activity detail, laps, zones, samples: **CONFIRMED_LIVE, no key needed correcting**; fixtures now carry live shapes with synthetic values |
+| `get_activity` body | shape confirmed live; deliberately still `RAW_STORED` (adds only extras the list item lacks) |
 | Trigger | manual `POST /api/v1/garmin/activities/{garminActivityId}/details` (+ `/reprocess`); no scheduler, no backfill |
-| FIT / ORIGINAL download | capability confirmed in the library; not implemented |
+| Sample resolution | default is down-sampled above ~2000 native samples; `samples-max-chart-size` left unset on purpose |
+| FIT / ORIGINAL download | capability live-probed (ZIP + 1 FIT); decision A — not implemented |
+| Typed splits / split summaries | not needed (`intensityType` + `wktStepIndex` + embedded `splitSummaries`); not implemented |
 | Feature extraction, Intervals enrichment, TrainingContext V2 | not started |
 
-Nothing in this layer is `LIVE_VERIFIED` until Main-PC Phase 6H-1B.
+Historical backfill is still `NOT_RUN`: 6H-1B touched exactly four activities.

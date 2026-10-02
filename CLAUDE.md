@@ -80,8 +80,14 @@ RunningAI automation (which lives only on the main PC and is NOT in this repo).
   replaced per part, `extra_metrics` keeps unknown keys) → per-part status `activity_detail_collection` (V13; COMPLETE/PARTIAL/FAILED,
   account-level failures stop the run). `activity_detail` comes from the list item already in `activity_raw`; `get_activity` is raw-only.
   Samples are parsed by each payload's `metricDescriptors` (never a fixed index), native sampling kept, nothing fabricated.
-  Manual only: `POST /api/v1/garmin/activities/{garminActivityId}/details` and `/reprocess` (no Garmin call). Contract is
-  STATIC_SOURCE_CONFIRMED; lap/zone/sample metric keys are PROVISIONAL (synthetic fixtures) — **not LIVE_VERIFIED until Main-PC 6H-1B**.
+  Manual only: `POST /api/v1/garmin/activities/{garminActivityId}/details` and `/reprocess` (no Garmin call).
+  **Contract is LIVE_VERIFIED (Phase 6H-1B, Main PC, 4 real activities): no mapper key needed correcting.** Live facts that
+  constrain future work: `metricsIndex` differs per payload (one device gave 4 layouts — never hard-code an index);
+  `directTimestamp` is a JSON float of epoch ms; descriptor `unit.factor` is **not** a conversion divisor; lap `lapIndex` is
+  1-based and carries `intensityType` (WARMUP/ACTIVE/RECOVERY/COOLDOWN) + `wktStepIndex` in `extra_metrics`, and a lap is
+  **not** 1:1 with a workout step; zones are always 5 with no upper bound; power zones of a no-power activity are `[]` → `EMPTY`,
+  not a failure; `/samples` default **down-samples** above ~2000 native samples (`totalMetricsCount` reports the native count) and
+  `samples-max-chart-size` is deliberately left unset. FIT decision: **A — API detail suffices**, FIT archival-only, not implemented.
   No scheduler, no historical backfill, no FIT storage, TrainingContext unchanged. `activity` identity unchanged (an
   `activity_source` link table is planned for Intervals enrichment).
 - **Legacy publishing XOR AI Draft publishing** (Phase 6G.1, `draftpublish.PublishingModeGuard`): `WORKOUT_PUBLISHING_ENABLED` and
