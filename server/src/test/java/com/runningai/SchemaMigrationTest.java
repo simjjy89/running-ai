@@ -70,15 +70,15 @@ class SchemaMigrationTest {
 
         assertThat(applied).extracting(MigrationInfo::getVersion)
                 .extracting(Object::toString)
-                .containsExactly("1", "2", "3", "4", "5", "6", "7", "8", "9", "10");
+                .containsExactly("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13");
         assertThat(applied).extracting(MigrationInfo::getState)
                 .containsOnly(MigrationState.SUCCESS);
         assertThat(flyway.info().pending()).isEmpty();
 
         Integer historyRows = jdbcTemplate.queryForObject(
-                "select count(*) from flyway_schema_history where success = true and version in ('1', '2', '3', '4', '5', '6', '7', '8', '9', '10')",
+                "select count(*) from flyway_schema_history where success = true and version in ('1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13')",
                 Integer.class);
-        assertThat(historyRows).isEqualTo(10);
+        assertThat(historyRows).isEqualTo(13);
     }
 
     @Test
@@ -88,12 +88,16 @@ class SchemaMigrationTest {
                         + "where lower(table_name) in "
                         + "('athlete', 'activity', 'activity_raw', 'garmin_sync_state', 'athlete_intensity_profile', "
                         + "'workout_draft', 'garmin_recovery_daily', 'workout_draft_approval', 'workout_draft_publication', "
+                        + "'activity_raw_payload', 'activity_detail', 'activity_lap', 'activity_zone', 'activity_sample', "
+                        + "'activity_detail_collection', "
                         + "'flyway_schema_history')",
                 String.class);
 
         assertThat(tables).containsExactlyInAnyOrder(
                 "athlete", "activity", "activity_raw", "garmin_sync_state", "athlete_intensity_profile",
                 "workout_draft", "garmin_recovery_daily", "workout_draft_approval", "workout_draft_publication",
+                "activity_raw_payload", "activity_detail", "activity_lap", "activity_zone", "activity_sample",
+                "activity_detail_collection",
                 "flyway_schema_history");
     }
 
