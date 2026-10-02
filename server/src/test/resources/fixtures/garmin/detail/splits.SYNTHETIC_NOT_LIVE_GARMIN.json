@@ -1,0 +1,15 @@
+{
+  "activityId": 1000000001,
+  "lapDTOs": [
+    {
+      "lapIndex": 1, "startTimeGMT": "2026-09-28T21:30:00.0", "duration": 300.0, "elapsedDuration": 302.0,
+      "movingDuration": 299.0, "distance": 1000.0, "averageSpeed": 3.33, "maxSpeed": 3.9, "averageHR": 148.0,
+      "maxHR": 160.0, "averageRunCadence": 170.0, "maxRunCadence": 178.0, "elevationGain": 4.0,
+      "elevationLoss": 3.0, "calories": 70.0, "intensityType": "ACTIVE", "groundContactTime": 245.0
+    },
+    {
+      "lapIndex": 2, "startTimeGMT": "2026-09-28T21:35:00.0", "duration": 120.0, "distance": 300.0,
+      "averageHR": 130.0, "intensityType": "RECOVERY"
+    }
+  ]
+}

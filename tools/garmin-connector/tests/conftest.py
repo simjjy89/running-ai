@@ -187,3 +187,55 @@ class FakeGarmin:
 @pytest.fixture
 def fake_garmin() -> FakeGarmin:
     return FakeGarmin()
+
+
+# ---- Phase 6H-1A activity detail parts --------------------------------------------------------
+# SYNTHETIC_NOT_LIVE_GARMIN: these bodies only exercise the connector's call-through; the connector
+# never interprets them. Only the samples shape (metricDescriptors[].metricsIndex/key +
+# activityDetailMetrics[].metrics) is confirmed by the installed library's own
+# garminconnect/activity_details.py; every other shape is a placeholder until Main-PC Phase 6H-1B.
+
+
+def synthetic_activity_part(method: str) -> Any:
+    if method == "get_activity_details":
+        return {
+            "activityId": 188081596,
+            "metricDescriptors": [{"metricsIndex": 0, "key": "sumElapsedDuration"}],
+            "activityDetailMetrics": [{"metrics": [0.0]}, {"metrics": [1.0]}],
+        }
+    if method in ("get_activity_hr_in_timezones", "get_activity_power_in_timezones"):
+        return [{"zoneNumber": 1, "secsInZone": 60.0}]
+    return {"activityId": 188081596, "synthetic": method}
+
+
+class FakeDetailGarmin(FakeGarmin):
+    """FakeGarmin plus the five per-activity detail methods, recording (method, args, kwargs)."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.part_calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
+        self.part_errors: dict[str, Exception] = {}
+        self.part_results: dict[str, Any] = {}
+
+    def _part(self, method: str, *args: Any, **kwargs: Any) -> Any:
+        self.part_calls.append((method, args, kwargs))
+        if method in self.part_errors:
+            raise self.part_errors[method]
+        return self.part_results.get(method, synthetic_activity_part(method))
+
+    def get_activity(self, activity_id: str) -> Any:
+        return self._part("get_activity", activity_id)
+
+    def get_activity_splits(self, activity_id: str) -> Any:
+        return self._part("get_activity_splits", activity_id)
+
+    def get_activity_hr_in_timezones(self, activity_id: str) -> Any:
+        return self._part("get_activity_hr_in_timezones", activity_id)
+
+    def get_activity_power_in_timezones(self, activity_id: str) -> Any:
+        return self._part("get_activity_power_in_timezones", activity_id)
+
+    def get_activity_details(self, activity_id: str, maxchart: int = 2000, maxpoly: int = 4000) -> Any:
+        if maxchart != 2000:
+            return self._part("get_activity_details", activity_id, maxchart=maxchart)
+        return self._part("get_activity_details", activity_id)
