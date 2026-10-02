@@ -13,7 +13,7 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
  * catch-all does not turn these into 500s. Messages carry no credentials or payloads.
  */
 @RestControllerAdvice(assignableTypes = {GarminSyncController.class, GarminProfileSyncController.class,
-        GarminRecoverySyncController.class})
+        GarminRecoverySyncController.class, GarminActivityDetailController.class})
 @Order(Ordered.HIGHEST_PRECEDENCE)
 public class GarminSyncExceptionHandler {
 
@@ -39,6 +39,7 @@ public class GarminSyncExceptionHandler {
             case FORBIDDEN -> body(HttpStatus.FORBIDDEN, "GARMIN_FORBIDDEN", e.getMessage());
             case RATE_LIMITED -> body(HttpStatus.TOO_MANY_REQUESTS, "GARMIN_RATE_LIMITED", e.getMessage());
             case UNAVAILABLE -> body(HttpStatus.SERVICE_UNAVAILABLE, "GARMIN_CONNECTOR_UNAVAILABLE", e.getMessage());
+            case NOT_FOUND -> body(HttpStatus.NOT_FOUND, "GARMIN_NOT_FOUND", e.getMessage());
             case UPSTREAM_ERROR, CONNECTOR_ERROR, INVALID_RESPONSE ->
                     body(HttpStatus.BAD_GATEWAY, "GARMIN_UPSTREAM_ERROR", e.getMessage());
         };

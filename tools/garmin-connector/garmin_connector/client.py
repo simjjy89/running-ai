@@ -6,6 +6,7 @@ password. Interactive login lives in :mod:`garmin_connector.auth`.
 
 from __future__ import annotations
 
+import functools
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -21,6 +22,31 @@ logger = logging.getLogger(__name__)
 DEFAULT_TOKENSTORE = "~/.garminconnect"
 
 MAX_LIMIT = 100
+
+# Never let the library retry on its own: python-garminconnect 0.3.16 defaults to `retry_attempts=3`
+# (5xx / network failures, exponential backoff). The connector contract is "one attempt, the caller
+# decides"; a token-store session is created with retries disabled.
+no_retry_garmin: Callable[[], Any] = functools.partial(Garmin, retry_attempts=0)
+
+# Per-activity detail parts (Phase 6H-1A) -> the python-garminconnect 0.3.16 method that serves each one.
+# STATIC_SOURCE_CONFIRMED against the installed library source; response shapes are NOT live-verified yet.
+ACTIVITY_PARTS: dict[str, str] = {
+    "detail": "get_activity",
+    "splits": "get_activity_splits",
+    "hr-zones": "get_activity_hr_in_timezones",
+    "power-zones": "get_activity_power_in_timezones",
+    "samples": "get_activity_details",
+}
+MAX_ACTIVITY_ID = 2**63 - 1
+# Bounds for the samples request's `maxChartSize` (library default 2000).
+MAX_CHART_SIZE = 100_000
+
+
+def validate_activity_id(activity_id: int) -> int:
+    """A Garmin activity id is a positive 64-bit integer (python-garminconnect validates `> 0` too)."""
+    if isinstance(activity_id, bool) or not isinstance(activity_id, int) or not 1 <= activity_id <= MAX_ACTIVITY_ID:
+        raise ValueError("activity_id must be a positive integer")
+    return activity_id
 
 
 def unwrap_activity_list(result: Any) -> list[dict[str, Any]]:
@@ -50,7 +76,7 @@ class GarminGateway:
     def from_tokens(
         cls,
         tokenstore: str = DEFAULT_TOKENSTORE,
-        garmin_factory: Callable[[], Any] = Garmin,
+        garmin_factory: Callable[[], Any] = no_retry_garmin,
     ) -> "GarminGateway":
         """Resume a session from the local token store only.
 
@@ -98,6 +124,31 @@ class GarminGateway:
         logger.info("Fetched Garmin lactate threshold snapshot")
         return result
 
+    def activity_part(self, part: str, activity_id: int, max_chart: int | None = None) -> Any:
+        """One detail part of one activity (see ``ACTIVITY_PARTS``), raw and unprocessed.
+
+        Exactly one library call (one Garmin request). The JSON is passed through untouched: an
+        object, a list, or ``{}`` (the library turns an HTTP 204 into ``{}``); normalisation is Spring's job.
+        ``max_chart`` only applies to ``samples`` (Garmin's ``maxChartSize``); omitted = library default.
+        """
+        method_name = ACTIVITY_PARTS.get(part)
+        if method_name is None:
+            raise ValueError(f"unknown activity part: {part}")
+        validate_activity_id(activity_id)
+        if max_chart is not None and part != "samples":
+            raise ValueError("max_chart only applies to samples")
+        if max_chart is not None and not 1 <= max_chart <= MAX_CHART_SIZE:
+            raise ValueError(f"max_chart must be between 1 and {MAX_CHART_SIZE}")
+        method = getattr(self._garmin, method_name)
+        try:
+            result = method(str(activity_id)) if max_chart is None else method(str(activity_id), maxchart=max_chart)
+        except Exception as exc:  # noqa: BLE001 - translated into the error contract
+            raise translate(exc) from exc
+        if result is not None and not isinstance(result, (dict, list)):
+            raise ConnectorError(GARMIN_UPSTREAM_ERROR, f"Unexpected {part} shape from Garmin Connect")
+        logger.info("Fetched Garmin activity part %s", part)
+        return result
+
     def recovery(self, day: str) -> dict[str, Any]:
         """One day's recovery metrics (HRV, sleep, resting HR, Body Battery, stress), projected to
         the documented fields only; see :mod:`garmin_connector.recovery` for the contract."""
@@ -115,7 +166,7 @@ class CachedGatewayProvider:
     def __init__(
         self,
         tokenstore: str = DEFAULT_TOKENSTORE,
-        garmin_factory: Callable[[], Any] = Garmin,
+        garmin_factory: Callable[[], Any] = no_retry_garmin,
     ) -> None:
         self._tokenstore = tokenstore
         self._garmin_factory = garmin_factory
@@ -151,6 +202,15 @@ class CachedGatewayProvider:
         gateway = self()
         try:
             return gateway.recovery(day)
+        except ConnectorError as err:
+            if err.code == "GARMIN_AUTH_REQUIRED":
+                self._gateway = None
+            raise
+
+    def activity_part(self, part: str, activity_id: int, max_chart: int | None = None) -> Any:
+        gateway = self()
+        try:
+            return gateway.activity_part(part, activity_id, max_chart)
         except ConnectorError as err:
             if err.code == "GARMIN_AUTH_REQUIRED":
                 self._gateway = None

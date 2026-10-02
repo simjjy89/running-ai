@@ -1,6 +1,7 @@
 """Localhost-only HTTP surface consumed by the Spring server.
 
-A handful of read-only endpoints, no login endpoint, no docs UI. ``/activities`` returns the Garmin
+A handful of read-only endpoints, no login endpoint, no docs UI. The per-activity detail endpoints
+(`/activities/{id}/detail|splits|hr-zones|power-zones|samples`) also return Garmin's JSON untouched. ``/activities`` returns the Garmin
 activity-list items exactly as received (a JSON array), so all normalisation stays
 in the Spring ``GarminActivityMapper``.
 """
@@ -11,11 +12,11 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, Path, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from .client import MAX_LIMIT
+from .client import MAX_ACTIVITY_ID, MAX_CHART_SIZE, MAX_LIMIT
 from .errors import GARMIN_CONNECTOR_ERROR, INVALID_REQUEST, ConnectorError, translate
 from .recovery import validate_date
 
@@ -26,16 +27,20 @@ SERVICE_NAME = "garmin-connector"
 ActivitiesFetcher = Callable[[int, int], list[dict[str, Any]]]
 LactateThresholdFetcher = Callable[[], dict[str, Any]]
 RecoveryFetcher = Callable[[str], dict[str, Any]]
+# (part, activity_id, max_chart) -> raw JSON of one activity detail part (Phase 6H-1A)
+ActivityPartFetcher = Callable[[str, int, int | None], Any]
 
 
 def create_app(
     fetch_activities: ActivitiesFetcher,
     fetch_lactate_threshold: LactateThresholdFetcher,
     fetch_recovery: RecoveryFetcher,
+    fetch_activity_part: ActivityPartFetcher,
 ) -> FastAPI:
     """Build the app around a ``fetch_activities(limit, start) -> list[dict]`` callable, a
     ``fetch_lactate_threshold() -> dict`` callable and a ``fetch_recovery(date) -> dict`` callable
-    (production: ``CachedGatewayProvider``'s ``recent_activities``/``lactate_threshold``/``recovery``;
+    (production: ``CachedGatewayProvider``'s ``recent_activities``/``lactate_threshold``/``recovery``/
+    ``activity_part``;
     tests: fakes)."""
     app = FastAPI(title=SERVICE_NAME, docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -83,6 +88,41 @@ def create_app(
             raise err from exc
         logger.info("GET /recovery date=%s -> ok", day)
         return JSONResponse(content=result)
+
+    def activity_part(part: str, activity_id: int, max_chart: int | None = None) -> JSONResponse:
+        try:
+            result = fetch_activity_part(part, activity_id, max_chart)
+        except Exception as exc:  # noqa: BLE001 - everything becomes the error contract
+            err = translate(exc)
+            logger.warning("GET /activities/{id}/%s failed: code=%s status=%d", part, err.code, err.http_status)
+            raise err from exc
+        # The activity id is not logged (personal identifier); the part name and outcome are enough.
+        logger.info("GET /activities/{id}/%s -> ok", part)
+        return JSONResponse(content=result)
+
+    # Per-activity detail parts (Phase 6H-1A). Each is exactly one Garmin request, returned raw.
+    @app.get("/activities/{activity_id}/detail")
+    def activity_detail(activity_id: int = Path(..., ge=1, le=MAX_ACTIVITY_ID)) -> JSONResponse:
+        return activity_part("detail", activity_id)
+
+    @app.get("/activities/{activity_id}/splits")
+    def activity_splits(activity_id: int = Path(..., ge=1, le=MAX_ACTIVITY_ID)) -> JSONResponse:
+        return activity_part("splits", activity_id)
+
+    @app.get("/activities/{activity_id}/hr-zones")
+    def activity_hr_zones(activity_id: int = Path(..., ge=1, le=MAX_ACTIVITY_ID)) -> JSONResponse:
+        return activity_part("hr-zones", activity_id)
+
+    @app.get("/activities/{activity_id}/power-zones")
+    def activity_power_zones(activity_id: int = Path(..., ge=1, le=MAX_ACTIVITY_ID)) -> JSONResponse:
+        return activity_part("power-zones", activity_id)
+
+    @app.get("/activities/{activity_id}/samples")
+    def activity_samples(
+        activity_id: int = Path(..., ge=1, le=MAX_ACTIVITY_ID),
+        max_chart: int | None = Query(None, alias="maxChart", ge=1, le=MAX_CHART_SIZE),
+    ) -> JSONResponse:
+        return activity_part("samples", activity_id, max_chart)
 
     @app.exception_handler(ConnectorError)
     def connector_error(_: Request, err: ConnectorError) -> JSONResponse:

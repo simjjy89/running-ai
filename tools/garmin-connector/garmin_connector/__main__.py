@@ -80,7 +80,9 @@ def main(argv: list[str] | None = None) -> int:
             from .api import create_app
 
             provider = CachedGatewayProvider(args.tokenstore)
-            app = create_app(provider.recent_activities, provider.lactate_threshold, provider.recovery)
+            app = create_app(
+                provider.recent_activities, provider.lactate_threshold, provider.recovery, provider.activity_part
+            )
             print(f"garmin-connector {__version__} listening on http://{BIND_HOST}:{args.port} (localhost only)")
             uvicorn.run(app, host=BIND_HOST, port=args.port, log_level="info")
             return 0

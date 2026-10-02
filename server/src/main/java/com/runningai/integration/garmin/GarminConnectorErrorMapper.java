@@ -35,6 +35,7 @@ final class GarminConnectorErrorMapper {
             case 401 -> Reason.AUTH_REQUIRED;
             case 403 -> Reason.FORBIDDEN;
             case 429 -> Reason.RATE_LIMITED;
+            case 404 -> Reason.NOT_FOUND;
             case 502 -> Reason.UPSTREAM_ERROR;
             default -> Reason.CONNECTOR_ERROR;
         };

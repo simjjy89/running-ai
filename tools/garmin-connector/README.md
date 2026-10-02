@@ -75,6 +75,20 @@ other interfaces is intentionally not supported. Swagger / ReDoc / OpenAPI are d
 | `GET /activities?limit=N` (1–100, default 20) | JSON **array** of Garmin activity-list items, newest first, exactly as returned by Garmin (`activityList` wrapper removed, nothing renamed) |
 | `GET /lactate-threshold` | Garmin's latest running lactate-threshold snapshot, raw (Phase 6D) |
 | `GET /recovery?date=YYYY-MM-DD` | One day of recovery metrics (Phase 6F), projected to documented fields only — see below |
+| `GET /activities/{id}/detail` | `get_activity` body, raw (Phase 6H-1A) |
+| `GET /activities/{id}/splits` | `get_activity_splits` body, raw |
+| `GET /activities/{id}/hr-zones` | `get_activity_hr_in_timezones` body, raw |
+| `GET /activities/{id}/power-zones` | `get_activity_power_in_timezones` body, raw |
+| `GET /activities/{id}/samples[?maxChart=N]` | `get_activity_details` body, raw (`maxChart` 1–100000, default = library 2000) |
+
+### Per-activity detail endpoints (Phase 6H-1A)
+
+`{id}` must be a positive 64-bit integer (else 400 `INVALID_REQUEST`, no Garmin call). Each request is exactly one
+library call = one Garmin request, and the body is returned untouched (object, array, or `{}` — the library turns an
+HTTP 204 into `{}`). The connector does not interpret any field; Spring stores the raw payload first and normalises it.
+These shapes are STATIC_SOURCE_CONFIRMED only (see `docs/architecture/garmin-detailed-activity-contract-static.md`);
+live verification is Main-PC Phase 6H-1B. The connector's own log lines carry the part name and outcome, never the
+activity id (uvicorn's localhost access log does show request paths).
 
 ### `/recovery` contract
 
@@ -104,13 +118,15 @@ cookies or payloads:
 | 400 | `INVALID_REQUEST` | bad `limit` / `date` |
 | 401 | `GARMIN_AUTH_REQUIRED` | no valid token store — run `login` on this host |
 | 403 | `GARMIN_FORBIDDEN` | Garmin refused the request |
+| 404 | `GARMIN_NOT_FOUND` | Garmin has no such resource (e.g. unknown activity id) |
 | 429 | `GARMIN_RATE_LIMITED` | Garmin rate limit — the server must stop, not retry |
 | 502 | `GARMIN_UPSTREAM_ERROR` | Garmin Connect unavailable / unexpected response shape |
 | 500 | `GARMIN_CONNECTOR_ERROR` | connector bug |
 
-The connector performs exactly one Garmin request per `/activities` call and never
+The connector performs exactly one Garmin request per `/activities` (and per-activity detail) call and never
 retries 401 / 403 / 429 or re-logs-in on its own. Only the library's built-in DI token
-refresh happens automatically.
+refresh happens automatically. python-garminconnect 0.3.16 would otherwise retry 5xx / network failures up to
+3 times with backoff (`retry_attempts=3` default); the connector creates its session with `retry_attempts=0`.
 
 ## Token storage and security
 

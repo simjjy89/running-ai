@@ -13,6 +13,8 @@ public class GarminConnectorException extends RuntimeException {
         FORBIDDEN,
         /** Connector answered 429 GARMIN_RATE_LIMITED: stop, do not retry automatically. */
         RATE_LIMITED,
+        /** Connector answered 404 GARMIN_NOT_FOUND: Garmin has no such resource (e.g. an unknown activity id). */
+        NOT_FOUND,
         /** Connector answered 502 GARMIN_UPSTREAM_ERROR. */
         UPSTREAM_ERROR,
         /** Connector answered 500 or another unexpected status. */

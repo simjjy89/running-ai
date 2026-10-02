@@ -9,12 +9,14 @@ from __future__ import annotations
 from garminconnect.exceptions import (
     GarminConnectAuthenticationError,
     GarminConnectConnectionError,
+    GarminConnectNotFoundError,
     GarminConnectTooManyRequestsError,
 )
 
 GARMIN_AUTH_REQUIRED = "GARMIN_AUTH_REQUIRED"
 GARMIN_FORBIDDEN = "GARMIN_FORBIDDEN"
 GARMIN_RATE_LIMITED = "GARMIN_RATE_LIMITED"
+GARMIN_NOT_FOUND = "GARMIN_NOT_FOUND"
 GARMIN_UPSTREAM_ERROR = "GARMIN_UPSTREAM_ERROR"
 GARMIN_CONNECTOR_ERROR = "GARMIN_CONNECTOR_ERROR"
 INVALID_REQUEST = "INVALID_REQUEST"
@@ -23,6 +25,7 @@ HTTP_STATUS = {
     GARMIN_AUTH_REQUIRED: 401,
     GARMIN_FORBIDDEN: 403,
     GARMIN_RATE_LIMITED: 429,
+    GARMIN_NOT_FOUND: 404,
     GARMIN_UPSTREAM_ERROR: 502,
     GARMIN_CONNECTOR_ERROR: 500,
     INVALID_REQUEST: 400,
@@ -63,6 +66,9 @@ def translate(exc: BaseException) -> ConnectorError:
         )
     if isinstance(exc, GarminConnectTooManyRequestsError):
         return ConnectorError(GARMIN_RATE_LIMITED, "Garmin request was rate limited; do not retry automatically")
+    # Before the generic connection error: the not-found error subclasses it (python-garminconnect 0.3.16).
+    if isinstance(exc, GarminConnectNotFoundError):
+        return ConnectorError(GARMIN_NOT_FOUND, "Garmin has no such resource (404)")
     if isinstance(exc, GarminConnectConnectionError):
         status = _upstream_status(exc)
         if status == 403:
@@ -71,6 +77,8 @@ def translate(exc: BaseException) -> ConnectorError:
             return ConnectorError(GARMIN_AUTH_REQUIRED, "Garmin rejected the session (401); log in again on this host")
         if status == 429:
             return ConnectorError(GARMIN_RATE_LIMITED, "Garmin request was rate limited; do not retry automatically")
+        if status == 404:
+            return ConnectorError(GARMIN_NOT_FOUND, "Garmin has no such resource (404)")
         suffix = f" (upstream status {status})" if status else ""
         return ConnectorError(GARMIN_UPSTREAM_ERROR, f"Garmin Connect request failed{suffix}")
     return ConnectorError(GARMIN_CONNECTOR_ERROR, f"Unexpected connector error: {type(exc).__name__}")
