@@ -70,15 +70,15 @@ class SchemaMigrationTest {
 
         assertThat(applied).extracting(MigrationInfo::getVersion)
                 .extracting(Object::toString)
-                .containsExactly("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13");
+                .containsExactly("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14");
         assertThat(applied).extracting(MigrationInfo::getState)
                 .containsOnly(MigrationState.SUCCESS);
         assertThat(flyway.info().pending()).isEmpty();
 
         Integer historyRows = jdbcTemplate.queryForObject(
-                "select count(*) from flyway_schema_history where success = true and version in ('1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13')",
+                "select count(*) from flyway_schema_history where success = true and version in ('1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14')",
                 Integer.class);
-        assertThat(historyRows).isEqualTo(13);
+        assertThat(historyRows).isEqualTo(14);
     }
 
     @Test
@@ -99,6 +99,39 @@ class SchemaMigrationTest {
                 "activity_raw_payload", "activity_detail", "activity_lap", "activity_zone", "activity_sample",
                 "activity_detail_collection",
                 "flyway_schema_history");
+    }
+
+    /**
+     * V14: sample fidelity is recorded, not inferred. The columns only carry meaning for the sample
+     * stream, so every one of them has to be nullable — a part that has no stream records nothing.
+     */
+    @Test
+    void sampleFidelityColumnsExistAndAreNullable() {
+        List<String> nullableColumns = jdbcTemplate.queryForList(
+                "select lower(column_name) from information_schema.columns "
+                        + "where lower(table_name) = 'activity_detail_collection' and is_nullable = 'YES' "
+                        + "and lower(column_name) in ('requested_max_chart_size', 'source_metrics_count', "
+                        + "'source_total_metrics_count', 'sample_completeness')",
+                String.class);
+
+        assertThat(nullableColumns).containsExactlyInAnyOrder(
+                "requested_max_chart_size", "source_metrics_count", "source_total_metrics_count",
+                "sample_completeness");
+    }
+
+    @Test
+    @Transactional
+    void sampleCompletenessIsConstrainedToTheKnownValuesByTheDatabase() {
+        Long activityId = activityRepository.save(new Activity(
+                athleteService.getDefaultAthlete().getId(), ExternalSource.GARMIN, "9900000001",
+                ActivityType.RUN, Instant.parse("2026-09-30T00:00:00Z"), 1800, null, null, null)).getId();
+
+        assertThatThrownBy(() -> jdbcTemplate.update(
+                "insert into activity_detail_collection "
+                        + "(activity_id, payload_type, status, attempted_at, sample_completeness) "
+                        + "values (?, 'ACTIVITY_DETAILS_STREAM', 'NORMALIZED', ?, 'PROBABLY_FULL')",
+                activityId, java.sql.Timestamp.from(Instant.parse("2026-09-30T00:00:00Z"))))
+                .isInstanceOfAny(DataIntegrityViolationException.class, jakarta.persistence.PersistenceException.class);
     }
 
     @Test

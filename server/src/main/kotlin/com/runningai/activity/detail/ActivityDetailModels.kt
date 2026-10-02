@@ -137,11 +137,70 @@ data class SampleData(
     val extraMetrics: ObjectNode? = null,
 )
 
-/** The recorded status of one part. */
+/**
+ * How complete a stored sample stream is, relative to the source's own native point count.
+ * Decided from the response, never from the size RunningAI asked for.
+ */
+enum class SampleCompleteness {
+    /** Every point the source says the activity has was stored. */
+    FULL,
+
+    /** The source returned fewer points than the activity has; the stream is a down-sampled view. */
+    DOWNSAMPLED,
+
+    /** The source did not report a usable native count, or contradicted itself. Never treated as FULL. */
+    UNKNOWN,
+}
+
+/**
+ * Fidelity of one collected sample stream, provider-neutral. Only meaningful for
+ * [DetailPayloadType.ACTIVITY_DETAILS_STREAM]; every other part records none.
+ *
+ * [requestedMaxChartSize] is what RunningAI asked for and is null when that is not known (a reprocess
+ * of a payload fetched before it was recorded) — it is never reconstructed from the payload.
+ */
+data class SampleStreamFidelity(
+    val completeness: SampleCompleteness,
+    val requestedMaxChartSize: Int? = null,
+    val sourceMetricsCount: Int? = null,
+    val sourceTotalMetricsCount: Int? = null,
+) {
+    companion object {
+        /**
+         * Classifies a stored stream. [storedSampleCount] is the number of normalised rows,
+         * [payloadSampleCount] the number of sample entries the payload actually carried.
+         *
+         * UNKNOWN whenever the source leaves the question open or contradicts itself: no usable
+         * native count, a `metricsCount` that disagrees with the entries actually present, or more
+         * stored rows than the source claims the activity has. The one case that yields FULL is an
+         * internally consistent payload whose stored rows reach the native count.
+         */
+        fun of(
+            storedSampleCount: Int,
+            payloadSampleCount: Int,
+            sourceMetricsCount: Int?,
+            sourceTotalMetricsCount: Int?,
+            requestedMaxChartSize: Int?,
+        ): SampleStreamFidelity {
+            val consistent = sourceMetricsCount == null || sourceMetricsCount == payloadSampleCount
+            val total = sourceTotalMetricsCount?.takeIf { it >= 0 }
+            val completeness = when {
+                total == null || !consistent -> SampleCompleteness.UNKNOWN
+                storedSampleCount == total -> SampleCompleteness.FULL
+                storedSampleCount < total -> SampleCompleteness.DOWNSAMPLED
+                else -> SampleCompleteness.UNKNOWN
+            }
+            return SampleStreamFidelity(completeness, requestedMaxChartSize, sourceMetricsCount, sourceTotalMetricsCount)
+        }
+    }
+}
+
+/** The recorded status of one part. [sampleFidelity] is null for every part but the sample stream. */
 data class DetailPartRecord(
     val payloadType: DetailPayloadType,
     val status: DetailPartStatus,
     val errorCode: String?,
     val itemCount: Int?,
     val attemptedAt: Instant,
+    val sampleFidelity: SampleStreamFidelity? = null,
 )

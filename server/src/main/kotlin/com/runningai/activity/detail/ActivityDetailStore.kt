@@ -90,17 +90,20 @@ class ActivityDetailStore(
 
     /** Records (or overwrites) the outcome of one part for one activity. */
     @Transactional
-    fun recordPart(activityId: Long, type: DetailPayloadType, status: DetailPartStatus, errorCode: String?, itemCount: Int?, at: Instant) {
-        val row = collections.findByActivityIdAndPayloadType(activityId, type)
+    fun recordPart(activityId: Long, record: DetailPartRecord) {
+        val row = collections.findByActivityIdAndPayloadType(activityId, record.payloadType)
         if (row == null) {
-            collections.save(ActivityDetailCollectionEntity(activityId, type, status, errorCode, itemCount, at))
+            collections.save(ActivityDetailCollectionEntity(activityId, record.payloadType, record.status, null, null, record.attemptedAt)
+                .apply { apply(record) })
         } else {
-            row.status = status
-            row.errorCode = errorCode
-            row.itemCount = itemCount
-            row.attemptedAt = at
+            row.apply(record)
         }
     }
+
+    /** What the last collection of [type] recorded, or null if that part was never attempted. */
+    @Transactional(readOnly = true)
+    fun part(activityId: Long, type: DetailPayloadType): DetailPartRecord? =
+        collections.findByActivityIdAndPayloadType(activityId, type)?.toRecord()
 
     @Transactional(readOnly = true)
     fun detail(activityId: Long): ActivityDetailData? = details.findByActivityId(activityId)?.toData()

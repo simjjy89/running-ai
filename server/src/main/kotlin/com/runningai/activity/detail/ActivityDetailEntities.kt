@@ -304,13 +304,37 @@ class ActivityDetailCollectionEntity(
     @Column(name = "error_code", length = 64) var errorCode: String?,
     @Column(name = "item_count") var itemCount: Int?,
     @Column(name = "attempted_at", nullable = false) var attemptedAt: Instant,
+    // Sample-stream fidelity (V14); null for every other part and whenever the stream was not stored.
+    @Column(name = "requested_max_chart_size") var requestedMaxChartSize: Int? = null,
+    @Column(name = "source_metrics_count") var sourceMetricsCount: Int? = null,
+    @Column(name = "source_total_metrics_count") var sourceTotalMetricsCount: Int? = null,
+    @Enumerated(EnumType.STRING)
+    @Column(name = "sample_completeness", length = 16)
+    var sampleCompleteness: SampleCompleteness? = null,
 ) {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     var id: Long? = null
         private set
 
-    fun toRecord() = DetailPartRecord(payloadType, status, errorCode, itemCount, attemptedAt)
+    /** Overwrites every recorded field, so a part never keeps fidelity from an earlier collection. */
+    fun apply(record: DetailPartRecord) {
+        status = record.status
+        errorCode = record.errorCode
+        itemCount = record.itemCount
+        attemptedAt = record.attemptedAt
+        requestedMaxChartSize = record.sampleFidelity?.requestedMaxChartSize
+        sourceMetricsCount = record.sampleFidelity?.sourceMetricsCount
+        sourceTotalMetricsCount = record.sampleFidelity?.sourceTotalMetricsCount
+        sampleCompleteness = record.sampleFidelity?.completeness
+    }
+
+    fun toRecord() = DetailPartRecord(
+        payloadType, status, errorCode, itemCount, attemptedAt,
+        sampleCompleteness?.let {
+            SampleStreamFidelity(it, requestedMaxChartSize, sourceMetricsCount, sourceTotalMetricsCount)
+        },
+    )
 }
 
 interface ActivityDetailCollectionRepository : JpaRepository<ActivityDetailCollectionEntity, Long> {

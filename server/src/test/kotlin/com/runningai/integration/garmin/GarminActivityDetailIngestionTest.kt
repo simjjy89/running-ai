@@ -9,6 +9,7 @@ import com.runningai.activity.detail.ActivityRawPayloadStore
 import com.runningai.activity.detail.DetailCollectionOutcome
 import com.runningai.activity.detail.DetailPartStatus
 import com.runningai.activity.detail.DetailPayloadType
+import com.runningai.activity.detail.SampleCompleteness
 import com.runningai.activity.detail.ZoneType
 import com.runningai.common.exception.ResourceNotFoundException
 import org.assertj.core.api.Assertions.assertThat
@@ -264,6 +265,150 @@ class GarminActivityDetailIngestionTest {
         assertThat(result.outcome).isEqualTo(DetailCollectionOutcome.COMPLETE)
         assertThat(store.samples(activityId)).hasSize(3)
         assertThat(store.laps(activityId)).hasSize(4)
+    }
+
+
+    /** A sample payload with scripted counts; [rows] entries of one descriptor. */
+    private fun samplePayload(rows: Int, metricsCount: Int?, totalMetricsCount: Int?): JsonNode {
+        val entries = (0 until rows).joinToString(",") { """{"metrics":[${100 + it}.0]}""" }
+        val counts = listOfNotNull(
+            metricsCount?.let { """"metricsCount":$it""" },
+            totalMetricsCount?.let { """"totalMetricsCount":$it""" },
+        ).joinToString(",")
+        val prefix = if (counts.isEmpty()) "" else "$counts,"
+        return json.readTree(
+            """{$prefix"metricDescriptors":[{"metricsIndex":0,"key":"directHeartRate"}],
+               "activityDetailMetrics":[$entries]}""",
+        )
+    }
+
+    private fun sampleRecord() = statusOf(DetailPayloadType.ACTIVITY_DETAILS_STREAM)
+
+    // ---- sample fidelity (Phase 6H-1C) ------------------------------------------------------------------
+
+    @Test
+    fun `a stream that reaches the activity's native count is recorded FULL, with the size that was asked for`() {
+        source.responses[GarminActivityPart.SAMPLES] = { samplePayload(rows = 4, metricsCount = 4, totalMetricsCount = 4) }
+
+        val result = service.collect(garminId)
+
+        val part = result.parts.single { it.payloadType == DetailPayloadType.ACTIVITY_DETAILS_STREAM }
+        assertThat(part.sampleCompleteness).isEqualTo(SampleCompleteness.FULL)
+        assertThat(part.itemCount).isEqualTo(4)
+        assertThat(part.sourceMetricsCount).isEqualTo(4)
+        assertThat(part.sourceTotalMetricsCount).isEqualTo(4)
+        assertThat(part.requestedMaxChartSize).isEqualTo(20000)
+        // and the same thing is readable from the database afterwards
+        val stored = sampleRecord().sampleFidelity!!
+        assertThat(stored.completeness).isEqualTo(SampleCompleteness.FULL)
+        assertThat(stored.requestedMaxChartSize).isEqualTo(20000)
+        assertThat(stored.sourceTotalMetricsCount).isEqualTo(4)
+    }
+
+    @Test
+    fun `a stream Garmin cut short is recorded DOWNSAMPLED and is not re-requested`() {
+        source.responses[GarminActivityPart.SAMPLES] = { samplePayload(rows = 3, metricsCount = 3, totalMetricsCount = 10) }
+
+        service.collect(garminId)
+
+        val stored = sampleRecord()
+        assertThat(stored.status).isEqualTo(DetailPartStatus.NORMALIZED)
+        assertThat(stored.itemCount).isEqualTo(3)
+        assertThat(stored.sampleFidelity!!.completeness).isEqualTo(SampleCompleteness.DOWNSAMPLED)
+        assertThat(stored.sampleFidelity!!.sourceTotalMetricsCount).isEqualTo(10)
+        // one request, no second attempt at a different size
+        assertThat(source.calls.count { it == GarminActivityPart.SAMPLES }).isEqualTo(1)
+    }
+
+    @Test
+    fun `a payload without a native count is UNKNOWN rather than assumed complete`() {
+        source.responses[GarminActivityPart.SAMPLES] = { samplePayload(rows = 3, metricsCount = 3, totalMetricsCount = null) }
+
+        service.collect(garminId)
+
+        assertThat(sampleRecord().sampleFidelity!!.completeness).isEqualTo(SampleCompleteness.UNKNOWN)
+        assertThat(sampleRecord().sampleFidelity!!.sourceTotalMetricsCount).isNull()
+    }
+
+    @Test
+    fun `a payload that contradicts its own count is UNKNOWN even when the rows reach the total`() {
+        source.responses[GarminActivityPart.SAMPLES] = { samplePayload(rows = 4, metricsCount = 9, totalMetricsCount = 4) }
+
+        service.collect(garminId)
+
+        assertThat(sampleRecord().sampleFidelity!!.completeness).isEqualTo(SampleCompleteness.UNKNOWN)
+        assertThat(sampleRecord().itemCount).isEqualTo(4)
+    }
+
+    @Test
+    fun `fidelity is only recorded for the sample stream`() {
+        service.collect(garminId)
+
+        val others = store.collection(activityId).filter { it.payloadType != DetailPayloadType.ACTIVITY_DETAILS_STREAM }
+        assertThat(others).isNotEmpty
+        assertThat(others).allMatch { it.sampleFidelity == null }
+    }
+
+    @Test
+    fun `a sample fetch that fails leaves no stale fidelity behind`() {
+        source.responses[GarminActivityPart.SAMPLES] = { samplePayload(rows = 4, metricsCount = 4, totalMetricsCount = 4) }
+        service.collect(garminId)
+        assertThat(sampleRecord().sampleFidelity!!.completeness).isEqualTo(SampleCompleteness.FULL)
+
+        scriptAllParts()
+        failWith(GarminActivityPart.SAMPLES, GarminConnectorException.Reason.NOT_FOUND)
+        service.collect(garminId)
+
+        assertThat(sampleRecord().status).isEqualTo(DetailPartStatus.FETCH_FAILED)
+        assertThat(sampleRecord().sampleFidelity).isNull()
+    }
+
+    @Test
+    fun `collecting twice records the same fidelity and no duplicate rows`() {
+        source.responses[GarminActivityPart.SAMPLES] = { samplePayload(rows = 3, metricsCount = 3, totalMetricsCount = 10) }
+        service.collect(garminId)
+        val first = counts()
+        val firstRecord = sampleRecord()
+
+        scriptAllParts()
+        source.responses[GarminActivityPart.SAMPLES] = { samplePayload(rows = 3, metricsCount = 3, totalMetricsCount = 10) }
+        service.collect(garminId)
+
+        assertThat(counts()).isEqualTo(first)
+        assertThat(sampleRecord().itemCount).isEqualTo(firstRecord.itemCount)
+        assertThat(sampleRecord().sampleFidelity).isEqualTo(firstRecord.sampleFidelity)
+    }
+
+    @Test
+    fun `reprocess recomputes completeness from the stored payload and keeps the recorded request size`() {
+        source.responses[GarminActivityPart.SAMPLES] = { samplePayload(rows = 3, metricsCount = 3, totalMetricsCount = 10) }
+        service.collect(garminId)
+        jdbc.update("delete from activity_sample")
+        source.calls.clear()
+
+        service.reprocess(garminId)
+
+        assertThat(source.calls).isEmpty()
+        val stored = sampleRecord()
+        assertThat(stored.itemCount).isEqualTo(3)
+        assertThat(stored.sampleFidelity!!.completeness).isEqualTo(SampleCompleteness.DOWNSAMPLED)
+        assertThat(stored.sampleFidelity!!.sourceTotalMetricsCount).isEqualTo(10)
+        // the requested size is not in the payload: it is carried over from what the fetch recorded
+        assertThat(stored.sampleFidelity!!.requestedMaxChartSize).isEqualTo(20000)
+    }
+
+    @Test
+    fun `a payload stored before the request size was recorded reprocesses without inventing one`() {
+        service.collect(garminId)
+        jdbc.update("update activity_detail_collection set requested_max_chart_size = null")
+        source.calls.clear()
+
+        service.reprocess(garminId)
+
+        assertThat(source.calls).isEmpty()
+        assertThat(sampleRecord().sampleFidelity!!.requestedMaxChartSize).isNull()
+        // completeness is still decided, because it comes from the payload itself
+        assertThat(sampleRecord().sampleFidelity!!.completeness).isNotNull()
     }
 
     // ---- HTTP -------------------------------------------------------------------------------------------

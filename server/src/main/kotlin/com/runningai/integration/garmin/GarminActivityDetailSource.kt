@@ -45,14 +45,34 @@ interface GarminActivityDetailSource {
 @ConfigurationProperties(prefix = "running-ai.garmin.detail")
 data class GarminActivityDetailProperties(
     /**
-     * Garmin `maxChartSize` for the sample stream. Null = the library default (2000). Garmin down-samples
-     * to this many points: Phase 6H-1B measured a 2783 s run returning 1399 of its 2784 native (1 Hz)
-     * samples by default and all 2784 with `maxChart=20000`, same first and last timestamp. The payload's
-     * own `totalMetricsCount` reports the native count, so a stored stream can always be told apart from a
-     * complete one. The stored samples are whatever Garmin returns, never resampled.
+     * Garmin `maxChartSize` for the sample stream, always sent (Phase 6H-1C). Garmin down-samples to this
+     * many points: Phase 6H-1B measured a 2783 s run returning 1399 of its 2784 native (1 Hz) samples at
+     * the library default of 2000, and all 2784 at 20000, with the same first and last timestamp. 20000 is
+     * therefore the default so a stream is collected at full resolution unless the operator says otherwise.
+     *
+     * Asking for 20000 is **not** a guarantee of completeness: the payload's own `totalMetricsCount` is what
+     * decides that (see `SampleStreamFidelity`). The stored samples are whatever Garmin returns, never
+     * resampled, and a down-sampled answer is never retried at a different size.
+     *
+     * The bounds are the connector's own contract (`garmin_connector.client.MAX_CHART_SIZE`), which refuses
+     * anything outside 1…100000; a value outside it would fail every sample request, so it fails startup instead.
      */
-    val samplesMaxChartSize: Int? = null,
-)
+    val samplesMaxChartSize: Int = DEFAULT_SAMPLES_MAX_CHART_SIZE,
+) {
+    init {
+        require(samplesMaxChartSize in 1..MAX_SAMPLES_MAX_CHART_SIZE) {
+            "running-ai.garmin.detail.samples-max-chart-size must be between 1 and " +
+                "$MAX_SAMPLES_MAX_CHART_SIZE (the Garmin connector's accepted range), but was $samplesMaxChartSize"
+        }
+    }
+
+    companion object {
+        const val DEFAULT_SAMPLES_MAX_CHART_SIZE = 20_000
+
+        /** Mirrors `MAX_CHART_SIZE` in tools/garmin-connector/garmin_connector/client.py. */
+        const val MAX_SAMPLES_MAX_CHART_SIZE = 100_000
+    }
+}
 
 /** Exactly one connector request per call, no retry; connector errors use the shared translation. */
 @Component
@@ -70,7 +90,8 @@ class HttpGarminActivityDetailSource(
             garminConnectorRestClient.get()
                 .uri { uri ->
                     uri.path("/activities/{id}/{part}")
-                    if (part == GarminActivityPart.SAMPLES && properties.samplesMaxChartSize != null) {
+                    // Only the sample stream is size-capped; the connector refuses maxChart on any other part.
+                    if (part == GarminActivityPart.SAMPLES) {
                         uri.queryParam("maxChart", properties.samplesMaxChartSize)
                     }
                     uri.build(garminActivityId, part.path)

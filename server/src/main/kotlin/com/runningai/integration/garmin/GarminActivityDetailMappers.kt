@@ -282,6 +282,41 @@ class GarminSampleMapper(private val objectMapper: ObjectMapper) {
     }
 }
 
+/**
+ * The counts a sample payload reports about itself (Phase 6H-1C). Separate from [GarminSampleMapper] so
+ * that mapper keeps the single job of turning entries into rows.
+ *
+ * `metricsCount` (points this response returned) and `totalMetricsCount` (the activity's native point
+ * count) are CONFIRMED_LIVE in Phase 6H-1B. Both are read only when they are non-negative integers;
+ * anything else is reported as absent rather than repaired, so the caller classifies the stream UNKNOWN
+ * instead of trusting a value it cannot interpret.
+ */
+data class GarminSampleCounts(
+    val metricsCount: Int?,
+    val totalMetricsCount: Int?,
+    val payloadSampleCount: Int,
+)
+
+@Component
+class GarminSampleMetadataMapper {
+
+    fun read(payload: JsonNode): GarminSampleCounts {
+        if (!payload.isObject) return GarminSampleCounts(null, null, 0)
+        val rows = payload.get("activityDetailMetrics")
+        return GarminSampleCounts(
+            metricsCount = payload.countOrNull("metricsCount"),
+            totalMetricsCount = payload.countOrNull("totalMetricsCount"),
+            payloadSampleCount = if (rows != null && rows.isArray) rows.size() else 0,
+        )
+    }
+
+    private fun JsonNode.countOrNull(key: String): Int? {
+        val v = get(key) ?: return null
+        if (!v.isIntegralNumber || !v.canConvertToInt()) return null
+        return v.intValue().takeIf { it >= 0 }
+    }
+}
+
 private val GMT_SPACE: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
 
 /**

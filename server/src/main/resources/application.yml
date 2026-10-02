@@ -56,6 +56,15 @@ running-ai:
       base-url: ${GARMIN_CONNECTOR_URL:http://127.0.0.1:8765}
       connect-timeout: 2s
       read-timeout: 30s
+    detail:
+      # Per-activity detail collection (Phase 6H-1A/6H-1C). Garmin caps its sample stream at the
+      # requested maxChartSize and down-samples beyond it: a live 2783 s run returned 1399 of its 2784
+      # native points at the library default of 2000, and all 2784 at 20000. 20000 is therefore the
+      # default so streams are collected at full resolution; raise or lower it only deliberately
+      # (the connector accepts 1..100000 and startup fails outside that range).
+      # Asking for 20000 does NOT make a stream complete: completeness is read back out of the
+      # response (totalMetricsCount) and recorded per collection as FULL / DOWNSAMPLED / UNKNOWN.
+      samples-max-chart-size: ${GARMIN_DETAIL_SAMPLES_MAX_CHART_SIZE:20000}
     sync:
       # Incremental sync (GarminIncrementalSyncService): page size per connector call,
       # overlap re-fetched behind the high-water mark (late Garmin edits/uploads), and

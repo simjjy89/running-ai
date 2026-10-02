@@ -27,7 +27,9 @@ class HttpGarminActivityDetailSourceTest {
     private val baseUrl = "http://127.0.0.1:8765"
     private val id = "188081596"
 
-    private fun client(maxChart: Int? = null): Pair<MockRestServiceServer, HttpGarminActivityDetailSource> {
+    private fun client(
+        maxChart: Int = GarminActivityDetailProperties.DEFAULT_SAMPLES_MAX_CHART_SIZE,
+    ): Pair<MockRestServiceServer, HttpGarminActivityDetailSource> {
         val builder = RestClient.builder().baseUrl(baseUrl)
         val server = MockRestServiceServer.bindTo(builder).build()
         return server to HttpGarminActivityDetailSource(builder.build(), ObjectMapper(), GarminActivityDetailProperties(maxChart))
@@ -37,7 +39,9 @@ class HttpGarminActivityDetailSourceTest {
     @EnumSource(GarminActivityPart::class)
     fun `each part is exactly one GET of its connector path, body returned untouched`(part: GarminActivityPart) {
         val (server, source) = client()
-        server.expect(once(), requestTo("$baseUrl/activities/$id/${part.path}")).andExpect(method(GET))
+        // only the sample stream is size-capped; every other part is the bare path
+        val query = if (part == GarminActivityPart.SAMPLES) "?maxChart=20000" else ""
+        server.expect(once(), requestTo("$baseUrl/activities/$id/${part.path}$query")).andExpect(method(GET))
             .andRespond(withSuccess("""{"anything":[1,{"x":null}]}""", MediaType.APPLICATION_JSON))
 
         val body = source.fetch(part, id)
@@ -58,6 +62,30 @@ class HttpGarminActivityDetailSourceTest {
         source.fetch(GarminActivityPart.SPLITS, id)
 
         server.verify()
+    }
+
+    @Test
+    fun `samples are requested at full resolution unless configured otherwise`() {
+        val (server, source) = client()
+        server.expect(once(), requestTo("$baseUrl/activities/$id/samples?maxChart=20000"))
+            .andRespond(withSuccess("{}", MediaType.APPLICATION_JSON))
+
+        source.fetch(GarminActivityPart.SAMPLES, id)
+
+        assertThat(GarminActivityDetailProperties().samplesMaxChartSize).isEqualTo(20000)
+        server.verify()
+    }
+
+    @Test
+    fun `a request size the connector would refuse fails fast instead of failing every fetch`() {
+        // the connector accepts 1..100000 (garmin_connector.client.MAX_CHART_SIZE)
+        listOf(0, -1, 100_001).forEach { bad ->
+            assertThatThrownBy { GarminActivityDetailProperties(bad) }
+                .isInstanceOf(IllegalArgumentException::class.java)
+                .hasMessageContaining("samples-max-chart-size")
+        }
+        assertThat(GarminActivityDetailProperties(1).samplesMaxChartSize).isEqualTo(1)
+        assertThat(GarminActivityDetailProperties(100_000).samplesMaxChartSize).isEqualTo(100_000)
     }
 
     @Test
@@ -98,7 +126,8 @@ class HttpGarminActivityDetailSourceTest {
     @Test
     fun `an unreachable connector is UNAVAILABLE`() {
         val (server, source) = client()
-        server.expect(once(), requestTo("$baseUrl/activities/$id/samples")).andRespond(withException(ConnectException("refused")))
+        server.expect(once(), requestTo("$baseUrl/activities/$id/samples?maxChart=20000"))
+            .andRespond(withException(ConnectException("refused")))
 
         assertThatThrownBy { source.fetch(GarminActivityPart.SAMPLES, id) }
             .isInstanceOfSatisfying(GarminConnectorException::class.java) {

@@ -7,8 +7,11 @@ import com.runningai.activity.ExternalSource
 import com.runningai.activity.detail.ActivityDetailStore
 import com.runningai.activity.detail.ActivityRawPayloadStore
 import com.runningai.activity.detail.DetailCollectionOutcome
+import com.runningai.activity.detail.DetailPartRecord
 import com.runningai.activity.detail.DetailPartStatus
 import com.runningai.activity.detail.DetailPayloadType
+import com.runningai.activity.detail.SampleCompleteness
+import com.runningai.activity.detail.SampleStreamFidelity
 import com.runningai.activity.detail.ZoneType
 import com.runningai.common.exception.ResourceNotFoundException
 import org.slf4j.LoggerFactory
@@ -21,12 +24,21 @@ import java.util.concurrent.ConcurrentHashMap
 class GarminDetailCollectionAlreadyRunningException(garminActivityId: String) :
     RuntimeException("A detail collection of Garmin activity $garminActivityId is already running")
 
-/** One part's outcome in a collection run; [status] null = not attempted (the run stopped before it). */
+/**
+ * One part's outcome in a collection run; [status] null = not attempted (the run stopped before it).
+ *
+ * The `sample*` fields (Phase 6H-1C) are additive and only ever set for the sample stream; every other
+ * part leaves them null, so existing clients see the response they already saw.
+ */
 data class DetailPartResult(
     val payloadType: DetailPayloadType,
     val status: DetailPartStatus?,
     val errorCode: String?,
     val itemCount: Int?,
+    val sampleCompleteness: SampleCompleteness? = null,
+    val requestedMaxChartSize: Int? = null,
+    val sourceMetricsCount: Int? = null,
+    val sourceTotalMetricsCount: Int? = null,
 )
 
 data class DetailCollectionResult(
@@ -68,6 +80,8 @@ class GarminActivityDetailIngestionService(
     private val lapMapper: GarminLapMapper,
     private val zoneMapper: GarminZoneMapper,
     private val sampleMapper: GarminSampleMapper,
+    private val sampleMetadataMapper: GarminSampleMetadataMapper,
+    private val detailProperties: GarminActivityDetailProperties,
     private val clock: Clock,
 ) {
 
@@ -92,7 +106,8 @@ class GarminActivityDetailIngestionService(
                 continue
             }
             rawPayloads.saveOrReplace(athleteId, ExternalSource.GARMIN, garminActivityId, part.payloadType, payload, now())
-            results += normalize(activityId, part.payloadType, payload)
+            // This fetch asked for a known size; a reprocess cannot know it and keeps whatever was recorded.
+            results += normalize(activityId, part.payloadType, payload, detailProperties.samplesMaxChartSize)
         }
         finish(garminActivityId, activityId, results)
     }
@@ -103,7 +118,10 @@ class GarminActivityDetailIngestionService(
         val stored = rawPayloads.storedTypes(ExternalSource.GARMIN, garminActivityId)
         GarminActivityPart.entries.map { it.payloadType }.filter { it in stored }.forEach { type ->
             val payload = requireNotNull(rawPayloads.find(ExternalSource.GARMIN, garminActivityId, type))
-            results += normalize(activityId, type, payload)
+            // The requested size is not part of the payload. It is carried over from what the last
+            // collection recorded (a fact, not a guess) and stays null for payloads stored before it was
+            // recorded; completeness itself is always recomputed from the payload.
+            results += normalize(activityId, type, payload, requestedMaxChartSizeOf(activityId, type))
         }
         finish(garminActivityId, activityId, results)
     }
@@ -135,7 +153,12 @@ class GarminActivityDetailIngestionService(
         }
     }
 
-    private fun normalize(activityId: Long, type: DetailPayloadType, payload: JsonNode): DetailPartResult = try {
+    private fun normalize(
+        activityId: Long,
+        type: DetailPayloadType,
+        payload: JsonNode,
+        requestedMaxChartSize: Int?,
+    ): DetailPartResult = try {
         when (type) {
             DetailPayloadType.ACTIVITY_DETAIL -> record(activityId, type, DetailPartStatus.RAW_STORED, null, null)
             DetailPayloadType.SPLITS -> counted(activityId, type, store.replaceLaps(activityId, lapMapper.map(payload)))
@@ -143,13 +166,36 @@ class GarminActivityDetailIngestionService(
                 counted(activityId, type, store.replaceZones(activityId, ZoneType.HEART_RATE, zoneMapper.map(payload, ZoneType.HEART_RATE)))
             DetailPayloadType.POWER_ZONES ->
                 counted(activityId, type, store.replaceZones(activityId, ZoneType.POWER, zoneMapper.map(payload, ZoneType.POWER)))
-            DetailPayloadType.ACTIVITY_DETAILS_STREAM ->
-                counted(activityId, type, store.replaceSamples(activityId, sampleMapper.map(payload)))
+            DetailPayloadType.ACTIVITY_DETAILS_STREAM -> normalizeSamples(activityId, payload, requestedMaxChartSize)
             DetailPayloadType.ACTIVITY_LIST -> error("the activity-list item is normalised separately")
         }
     } catch (e: GarminDetailMappingException) {
         mappingFailed(activityId, type, e)
     }
+
+    /**
+     * Samples additionally record how complete the stored stream is. The counts come from the payload, so
+     * the classification holds for a reprocess exactly as for a fetch; a down-sampled answer is recorded as
+     * such and is never re-requested at another size.
+     */
+    private fun normalizeSamples(activityId: Long, payload: JsonNode, requestedMaxChartSize: Int?): DetailPartResult {
+        val counts = sampleMetadataMapper.read(payload)
+        val stored = store.replaceSamples(activityId, sampleMapper.map(payload))
+        val fidelity = SampleStreamFidelity.of(
+            storedSampleCount = stored,
+            payloadSampleCount = counts.payloadSampleCount,
+            sourceMetricsCount = counts.metricsCount,
+            sourceTotalMetricsCount = counts.totalMetricsCount,
+            requestedMaxChartSize = requestedMaxChartSize,
+        )
+        return record(
+            activityId, DetailPayloadType.ACTIVITY_DETAILS_STREAM,
+            if (stored == 0) DetailPartStatus.EMPTY else DetailPartStatus.NORMALIZED, null, stored, fidelity,
+        )
+    }
+
+    private fun requestedMaxChartSizeOf(activityId: Long, type: DetailPayloadType): Int? =
+        store.part(activityId, type)?.sampleFidelity?.requestedMaxChartSize
 
     private fun counted(activityId: Long, type: DetailPayloadType, count: Int) =
         record(activityId, type, if (count == 0) DetailPartStatus.EMPTY else DetailPartStatus.NORMALIZED, null, count)
@@ -159,9 +205,20 @@ class GarminActivityDetailIngestionService(
         return record(activityId, type, DetailPartStatus.MAPPING_FAILED, e.code, null)
     }
 
-    private fun record(activityId: Long, type: DetailPayloadType, status: DetailPartStatus, errorCode: String?, count: Int?): DetailPartResult {
-        store.recordPart(activityId, type, status, errorCode, count, now())
-        return DetailPartResult(type, status, errorCode, count)
+    private fun record(
+        activityId: Long,
+        type: DetailPayloadType,
+        status: DetailPartStatus,
+        errorCode: String?,
+        count: Int?,
+        fidelity: SampleStreamFidelity? = null,
+    ): DetailPartResult {
+        store.recordPart(activityId, DetailPartRecord(type, status, errorCode, count, now(), fidelity))
+        return DetailPartResult(
+            type, status, errorCode, count,
+            fidelity?.completeness, fidelity?.requestedMaxChartSize,
+            fidelity?.sourceMetricsCount, fidelity?.sourceTotalMetricsCount,
+        )
     }
 
     private fun finish(garminActivityId: String, activityId: Long, attempted: List<DetailPartResult>): DetailCollectionResult {
