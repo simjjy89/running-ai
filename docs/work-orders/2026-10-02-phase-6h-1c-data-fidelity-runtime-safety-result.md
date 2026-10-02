@@ -17,7 +17,7 @@ committed file. Real ids stay in the git-ignored local note `.runtime/live-contr
 | Repository / branch | `C:\running-ai-github`, `main` |
 | Baseline | `a8c8b67` — working tree clean, `main` already level with `origin/main`, `a8c8b67` confirmed an ancestor |
 | Pull | nothing to fast-forward (0 ahead / 0 behind); no reset, no clean, no rebase, no force |
-| Final | `33074cb` (this document was amended into it to carry its own SHA; see §16) |
+| Final | `ece5de8`, plus one follow-up commit that only corrects the SHAs recorded below |
 | Legacy repo `C:\running-ai` | read-only inspection only; not modified |
 
 ## 2. Runtime write switches (§3) — new permanent baseline
@@ -293,11 +293,15 @@ Only one activity was fetched from Garmin, twice.
 | | |
 |---|---|
 | `69f4611` | `feat: preserve Garmin sample fidelity metadata` — V14, domain model, metadata mapper, properties + validation, ingestion wiring, API fields, tests |
-| `33074cb` | `docs: define full-resolution activity sample policy` — architecture docs, CLAUDE.md, integration skill, this work order |
+| `ece5de8` | `docs: define full-resolution activity sample policy` — architecture docs, CLAUDE.md, integration skill, this work order |
 
 The instruction's suggested third commit, `ops: harden main PC runtime defaults`, has no git content by design: the
 `.env` baseline and the JDK user environment are machine operations and are deliberately not committed. They are
 recorded in §2 and §12 instead.
+
+A third commit (`docs: record the Phase 6H-1C commit SHAs in the result document`) carries nothing but the
+corrected SHAs in this table; it is referenced by message rather than by hash, because a document cannot
+contain the hash of the commit that creates it.
 
 Push: fast-forward to `origin/main`, no force. Working tree clean.
 
