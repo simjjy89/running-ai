@@ -5,6 +5,10 @@ import com.runningai.coach.CoachTestFixtures.draft
 import com.runningai.integration.intervals.IntervalsWorkoutClient
 import com.runningai.integration.intervals.IntervalsWorkoutPublisher
 import com.runningai.integration.intervals.WorkoutPublishApplicationService
+import com.runningai.recovery.RecoveryDailyValues
+import com.runningai.recovery.RecoveryRepository
+import com.runningai.recovery.RecoverySnapshotService
+import java.time.LocalDate
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
@@ -55,6 +59,8 @@ class WorkoutDraftApiTest {
     @Autowired private lateinit var objectMapper: ObjectMapper
     @Autowired private lateinit var repository: WorkoutDraftRepository
     @Autowired private lateinit var coach: FakeAiCoach
+    @Autowired private lateinit var recoverySnapshots: RecoverySnapshotService
+    @Autowired private lateinit var recoveryRepository: RecoveryRepository
 
     @MockitoBean private lateinit var publishService: WorkoutPublishApplicationService
     @MockitoBean private lateinit var publisher: IntervalsWorkoutPublisher
@@ -68,11 +74,56 @@ class WorkoutDraftApiTest {
     @AfterEach
     fun cleanUp() {
         repository.deleteAll()
+        recoveryRepository.deleteAll()
         verifyNoInteractions(publishService, publisher, intervalsClient)
     }
 
     private fun generate(body: String) =
         mockMvc.perform(post("/api/v1/workout-drafts").contentType(MediaType.APPLICATION_JSON).content(body))
+
+    private fun storeRecovery(day: LocalDate, hrv: Double?, rhr: Int?) =
+        recoverySnapshots.upsert(day, RecoveryDailyValues(hrv, null, null, null, null, rhr, null, null, null, null, null, null))
+
+    @Test
+    fun `the coach receives the stored Garmin recovery context with its baseline`() {
+        val day = LocalDate.of(2026, 10, 2)
+        (1L..7L).forEach { storeRecovery(day.minusDays(it), hrv = 50.0, rhr = 50) }
+        storeRecovery(day, hrv = 42.0, rhr = null)
+
+        generate("""{"date":"2026-10-02"}""").andExpect(status().isOk)
+
+        val recovery = coach.createdContexts.single().recovery
+        assertThat(recovery.hrv!!.lastNightAvgMs.current).isEqualTo(42.0)
+        assertThat(recovery.hrv!!.lastNightAvgMs.differencePercent).isEqualTo(-16.0)
+        // no RHR today: yesterday's reading is passed with its age, not today's guess
+        assertThat(recovery.restingHeartRate!!.bpm.ageDays).isEqualTo(1)
+        // never ingested: still null
+        assertThat(recovery.sleep).isNull()
+        assertThat(recovery.bodyBattery).isNull()
+        assertThat(recovery.stress).isNull()
+    }
+
+    @Test
+    fun `the coach is told recovery is unknown when nothing is stored`() {
+        generate("""{"date":"2026-10-02"}""").andExpect(status().isOk)
+
+        assertThat(coach.createdContexts.single().recovery.anyAvailable).isFalse()
+    }
+
+    @Test
+    fun `the recovery context endpoint shows exactly what the coach sees, nulls included`() {
+        val day = LocalDate.of(2026, 10, 2)
+        storeRecovery(day, hrv = 45.0, rhr = 51)
+
+        mockMvc.perform(get("/api/v1/recovery-context").param("date", "2026-10-02"))
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.hrv.lastNightAvgMs.current").value(45.0))
+            .andExpect(jsonPath("$.hrv.lastNightAvgMs.baselineStatus").value("INSUFFICIENT_DATA"))
+            .andExpect(jsonPath("$.hrv.lastNightAvgMs.baseline").value(org.hamcrest.Matchers.nullValue()))
+            .andExpect(jsonPath("$.restingHeartRate.bpm.current").value(51.0))
+            .andExpect(jsonPath("$.sleep").value(org.hamcrest.Matchers.nullValue()))
+            .andExpect(jsonPath("$.stress").value(org.hamcrest.Matchers.nullValue()))
+    }
 
     @Test
     fun `generate creates version 1 and stores it`() {

@@ -1,5 +1,7 @@
 package com.runningai.coach
 
+import com.fasterxml.jackson.annotation.JsonInclude
+import com.runningai.recovery.BaselineStatus
 import com.runningai.training.CandidateTrainingType
 import java.time.LocalDate
 
@@ -9,7 +11,7 @@ import java.time.LocalDate
  * Two rules hold throughout this model and are relied on by the prompt:
  *  - a `null` value means **genuinely unknown**, never "assume a default"; and
  *  - nothing here is a raw external payload. No GPS, no credential, no token, no Garmin/Intervals
- *    response body, no athlete identity. Only derived training numbers reach the model.
+ *    response body, no athlete identity. Only derived training and recovery numbers reach the model.
  */
 data class TrainingContext(
     val date: LocalDate,
@@ -66,27 +68,92 @@ data class TrainingDay(
 )
 
 /**
- * Recovery/readiness metrics.
+ * Garmin recovery metrics (Phase 6F), each compared with the athlete's own recent history.
  *
- * **Every field is null in this build.** HRV, sleep, resting heart rate, Body Battery and stress
- * are not ingested anywhere in RunningAI: the Garmin connector exposes only `/health`,
- * `/activities` and `/lactate-threshold`, and no table stores them. They are modelled here so the
- * contract is stable once ingestion lands, and are emitted as explicit JSON nulls so the coach can
- * see that the data is missing instead of silently reasoning as if recovery were fine.
+ * Measurement only: RunningAI reports the latest value, the personal baseline and the difference,
+ * and never says whether that is good or bad or what to train because of it. The coach decides.
+ *
+ * A metric group is `null` when Garmin has no reading for it within the lookup window (no watch
+ * worn overnight, never synced, ...). Nothing is ever estimated or defaulted to fill a gap.
  */
+@JsonInclude(JsonInclude.Include.ALWAYS)
 data class RecoveryContext(
-    val hrvMs: Double? = null,
-    val restingHeartRateBpm: Int? = null,
-    val sleepHours: Double? = null,
-    val bodyBattery: Int? = null,
-    val stressLevel: Int? = null,
+    val hrv: HrvRecovery? = null,
+    val sleep: SleepRecovery? = null,
+    val restingHeartRate: RestingHeartRateRecovery? = null,
+    val bodyBattery: BodyBatteryRecovery? = null,
+    val stress: StressRecovery? = null,
 ) {
-    /** True when no recovery metric at all is available, which the prompt states explicitly. */
+    /** True when at least one recovery metric is available. */
     @get:com.fasterxml.jackson.annotation.JsonIgnore
     val anyAvailable: Boolean
-        get() = hrvMs != null || restingHeartRateBpm != null || sleepHours != null ||
-            bodyBattery != null || stressLevel != null
+        get() = hrv != null || sleep != null || restingHeartRate != null || bodyBattery != null || stress != null
 }
+
+/**
+ * One metric's latest value against the athlete's personal baseline.
+ *
+ * - [date]/[ageDays]: when the value was recorded; `ageDays` 0 means it belongs to the session date,
+ *   larger numbers mean the value is that many days old.
+ * - [baseline]: mean of the valid values in the [baselineWindowDays] days before [date].
+ * - [baselineStatus] INSUFFICIENT_DATA: fewer than [minimumSamples] valid days, so [baseline],
+ *   [difference] and [differencePercent] are null. The current value is still real.
+ */
+@JsonInclude(JsonInclude.Include.ALWAYS)
+data class RecoveryMeasurement(
+    val date: LocalDate,
+    val ageDays: Int,
+    val current: Double,
+    val baseline: Double?,
+    val difference: Double?,
+    val differencePercent: Double?,
+    val sampleCount: Int,
+    val baselineWindowDays: Int,
+    val minimumSamples: Int,
+    val baselineStatus: BaselineStatus,
+)
+
+/**
+ * Overnight HRV in milliseconds. [garminWeeklyAvgMs] and [garminHrvStatus] are Garmin's own figures
+ * for the same night, passed through verbatim (RunningAI does not compute or interpret them).
+ */
+@JsonInclude(JsonInclude.Include.ALWAYS)
+data class HrvRecovery(
+    val lastNightAvgMs: RecoveryMeasurement,
+    val garminWeeklyAvgMs: Double?,
+    val garminHrvStatus: String?,
+)
+
+/** Sleep duration in hours and Garmin's overall sleep score (0-100); either may be missing. */
+@JsonInclude(JsonInclude.Include.ALWAYS)
+data class SleepRecovery(
+    val durationHours: RecoveryMeasurement?,
+    val sleepScore: RecoveryMeasurement?,
+)
+
+@JsonInclude(JsonInclude.Include.ALWAYS)
+data class RestingHeartRateRecovery(
+    val bpm: RecoveryMeasurement,
+)
+
+/**
+ * Garmin Body Battery (0-100). [highest] is the day's highest sampled level; [lowest], [charged] and
+ * [drained] are from the same day. For the current day these are intraday values so far.
+ */
+@JsonInclude(JsonInclude.Include.ALWAYS)
+data class BodyBatteryRecovery(
+    val highest: RecoveryMeasurement,
+    val lowest: Int?,
+    val charged: Int?,
+    val drained: Int?,
+)
+
+/** Garmin all-day stress (0-100): the day's average against baseline, plus the day's maximum. */
+@JsonInclude(JsonInclude.Include.ALWAYS)
+data class StressRecovery(
+    val average: RecoveryMeasurement,
+    val max: Int?,
+)
 
 /** Rolling-window training load, straight from the existing `TrainingState` computation. */
 data class WeeklyContext(

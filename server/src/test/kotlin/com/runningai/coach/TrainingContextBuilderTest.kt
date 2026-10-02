@@ -7,6 +7,8 @@ import com.runningai.activity.ExternalSource
 import com.runningai.athlete.AthleteIntensityProfileRequest
 import com.runningai.athlete.AthleteIntensityProfileService
 import com.runningai.athlete.AthleteService
+import com.runningai.recovery.RecoveryDailyValues
+import com.runningai.recovery.RecoverySnapshotService
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -35,6 +37,7 @@ class TrainingContextBuilderTest {
     @Autowired private lateinit var activityRepository: ActivityRepository
     @Autowired private lateinit var profileService: AthleteIntensityProfileService
     @Autowired private lateinit var athleteService: AthleteService
+    @Autowired private lateinit var recoverySnapshots: RecoverySnapshotService
 
     private val asOf: LocalDate = LocalDate.of(2026, 10, 2)
     private val zone = ZoneId.of("Asia/Seoul")
@@ -123,16 +126,49 @@ class TrainingContextBuilderTest {
     }
 
     @Test
-    fun `every recovery metric is null because none is ingested in this build`() {
+    fun `with no stored recovery snapshot every recovery metric is null`() {
         val context = builder.build(asOf)
 
-        assertThat(context.recovery.hrvMs).isNull()
-        assertThat(context.recovery.restingHeartRateBpm).isNull()
-        assertThat(context.recovery.sleepHours).isNull()
+        assertThat(context.recovery.hrv).isNull()
+        assertThat(context.recovery.restingHeartRate).isNull()
+        assertThat(context.recovery.sleep).isNull()
         assertThat(context.recovery.bodyBattery).isNull()
-        assertThat(context.recovery.stressLevel).isNull()
+        assertThat(context.recovery.stress).isNull()
         assertThat(context.recovery.anyAvailable).isFalse()
     }
+
+    @Test
+    fun `stored Garmin recovery snapshots reach the coach with their personal baseline`() {
+        // 10 synthetic baseline days, then today's reading
+        (1L..10L).forEach { recoverySnapshots.upsert(asOf.minusDays(it), recovery(hrv = 50.0, rhr = 50, sleepSeconds = 27_000)) }
+        recoverySnapshots.upsert(asOf, recovery(hrv = 40.0, rhr = 55, sleepSeconds = 18_000))
+
+        val recovery = builder.build(asOf).recovery
+
+        assertThat(recovery.hrv!!.lastNightAvgMs.current).isEqualTo(40.0)
+        assertThat(recovery.hrv!!.lastNightAvgMs.baseline).isEqualTo(50.0)
+        assertThat(recovery.hrv!!.lastNightAvgMs.differencePercent).isEqualTo(-20.0)
+        assertThat(recovery.hrv!!.lastNightAvgMs.sampleCount).isEqualTo(10)
+        assertThat(recovery.hrv!!.garminHrvStatus).isEqualTo("BALANCED")
+        assertThat(recovery.restingHeartRate!!.bpm.difference).isEqualTo(5.0)
+        assertThat(recovery.sleep!!.durationHours!!.current).isEqualTo(5.0)
+        assertThat(recovery.sleep!!.durationHours!!.baseline).isEqualTo(7.5)
+        // never ingested in this fixture, so never invented
+        assertThat(recovery.bodyBattery).isNull()
+        assertThat(recovery.stress).isNull()
+        assertThat(recovery.sleep!!.sleepScore).isNull()
+    }
+
+    @Test
+    fun `a recovery snapshot after the as-of date never leaks into the context`() {
+        recoverySnapshots.upsert(asOf.plusDays(1), recovery(hrv = 60.0, rhr = 48, sleepSeconds = 30_000))
+
+        assertThat(builder.build(asOf).recovery.anyAvailable).isFalse()
+    }
+
+    private fun recovery(hrv: Double, rhr: Int, sleepSeconds: Int) = RecoveryDailyValues(
+        hrv, null, "BALANCED", sleepSeconds, null, rhr, null, null, null, null, null, null,
+    )
 
     @Test
     fun `constraints are carried through unchanged`() {

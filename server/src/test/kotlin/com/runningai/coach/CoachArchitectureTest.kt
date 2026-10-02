@@ -50,6 +50,8 @@ class CoachArchitectureTest {
         "PublishWorkoutMcpTool",
         "GarminActivitySource",
         "GarminLactateThresholdSource",
+        "GarminRecoveryClient",
+        "GarminRecoverySyncService",
         "GarminSyncOperationService",
         "publish_workout",
     )
@@ -116,6 +118,8 @@ class CoachArchitectureTest {
             WorkoutDraftStore::class.java,
             WorkoutDraftController::class.java,
             TrainingContextBuilder::class.java,
+            RecoveryContextBuilder::class.java,
+            RecoveryContextController::class.java,
             WorkoutDraftValidator::class.java,
         ).flatMap { it.constructors.toList() }
 
@@ -127,8 +131,8 @@ class CoachArchitectureTest {
             name.startsWith("com.runningai.integration.intervals") ||
                 name.startsWith("com.runningai.integration.mcp")
         }
-        // The coach reads Garmin-derived data only through athlete/training services, never through
-        // a Garmin transport type that could also write.
+        // The coach reads Garmin-derived data only through athlete/training/recovery services, never
+        // through a Garmin transport type that could also write.
         assertThat(dependencyNames).noneMatch { it.startsWith("com.runningai.integration.garmin") }
     }
 

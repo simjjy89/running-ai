@@ -81,8 +81,8 @@ class CoachJavaInteropTest {
     void javaSeesKotlinNullableFieldsAsNull() {
         RecoveryContext empty = new RecoveryContext(null, null, null, null, null);
 
-        assertThat(empty.getHrvMs()).isNull();
-        assertThat(empty.getSleepHours()).isNull();
+        assertThat(empty.getHrv()).isNull();
+        assertThat(empty.getSleep()).isNull();
         assertThat(empty.getAnyAvailable()).isFalse();
     }
 }

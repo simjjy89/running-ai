@@ -13,10 +13,12 @@ import java.time.LocalDate
  *  - [TrainingDecisionContextService] for recent pattern, last-event dates, consecutive counters,
  *    load trend, candidates and the whole rolling-window training state; and
  *  - [AthleteIntensityProfileService] for the athlete's current LTHR and threshold pace (which
- *    Phase 6D keeps in sync with Garmin).
+ *    Phase 6D keeps in sync with Garmin); and
+ *  - [RecoveryContextBuilder] for Garmin recovery metrics against the athlete's own baseline
+ *    (Phase 6F).
  *
- * Nothing is recomputed here and nothing is invented: metrics RunningAI does not collect stay
- * null (see [RecoveryContext]), so the coach is told they are unknown rather than being handed a
+ * Nothing is recomputed here and nothing is invented: a metric without data stays null (see
+ * [RecoveryContext]), so the coach is told it is unknown rather than being handed a
  * plausible-looking default.
  */
 @Service
@@ -24,6 +26,7 @@ import java.time.LocalDate
 class TrainingContextBuilder(
     private val decisionContextService: TrainingDecisionContextService,
     private val profileService: AthleteIntensityProfileService,
+    private val recoveryContextBuilder: RecoveryContextBuilder,
 ) {
 
     fun today(): LocalDate = decisionContextService.today()
@@ -62,8 +65,7 @@ class TrainingContextBuilder(
                 consecutiveRestDays = decision.consecutiveRestDays(),
                 candidateTrainingTypes = decision.candidateTrainingTypes(),
             ),
-            // Not ingested anywhere in this build; see RecoveryContext for the full gap list.
-            recovery = RecoveryContext(),
+            recovery = recoveryContextBuilder.build(date),
             weeklyContext = WeeklyContext(
                 acuteLoadMinutes = state.acuteLoad(),
                 chronicLoadMinutes = state.chronicLoad(),
