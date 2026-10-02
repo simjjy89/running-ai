@@ -1,5 +1,6 @@
 package com.runningai.coach
 
+import com.runningai.recovery.BaselineStatus
 import com.runningai.training.CandidateTrainingType
 import com.runningai.training.IntensityClass
 import com.runningai.training.SegmentType
@@ -55,6 +56,43 @@ object CoachTestFixtures {
         consecutiveActiveDays = consecutiveActiveDays,
         consecutiveRestDays = consecutiveRestDays,
         candidateTrainingTypes = candidates,
+    )
+
+    /**
+     * A synthetic recovery measurement, built the way [RecoveryContextBuilder] reports one:
+     * difference = current - baseline, percentage relative to baseline. `baseline = null` means
+     * INSUFFICIENT_DATA.
+     */
+    fun measurement(
+        current: Double,
+        baseline: Double?,
+        ageDays: Int = 0,
+        date: LocalDate = DATE,
+        sampleCount: Int = if (baseline == null) 3 else 21,
+    ): RecoveryMeasurement {
+        val difference = baseline?.let { Math.round((current - it) * 10) / 10.0 }
+        val percent = baseline?.takeIf { it != 0.0 }?.let { Math.round((current - it) / it * 1000) / 10.0 }
+        return RecoveryMeasurement(
+            date = date.minusDays(ageDays.toLong()),
+            ageDays = ageDays,
+            current = current,
+            baseline = baseline,
+            difference = difference,
+            differencePercent = percent,
+            sampleCount = sampleCount,
+            baselineWindowDays = 28,
+            minimumSamples = 7,
+            baselineStatus = if (baseline == null) BaselineStatus.INSUFFICIENT_DATA else BaselineStatus.AVAILABLE,
+        )
+    }
+
+    /** A complete synthetic recovery context where every metric sits exactly on its baseline. */
+    fun normalRecovery(ageDays: Int = 0, date: LocalDate = DATE) = RecoveryContext(
+        hrv = HrvRecovery(measurement(52.0, 52.0, ageDays, date), 51.0, "BALANCED"),
+        sleep = SleepRecovery(measurement(7.4, 7.4, ageDays, date), measurement(80.0, 80.0, ageDays, date)),
+        restingHeartRate = RestingHeartRateRecovery(measurement(50.0, 50.0, ageDays, date)),
+        bodyBattery = BodyBatteryRecovery(measurement(78.0, 78.0, ageDays, date), 25, 55, 50),
+        stress = StressRecovery(measurement(26.0, 26.0, ageDays, date), 80),
     )
 
     fun weeklyContext(

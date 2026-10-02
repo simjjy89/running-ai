@@ -3,6 +3,8 @@ package com.runningai.coach.eval
 import com.runningai.coach.AthleteThresholds
 import com.runningai.coach.CoachAssessment
 import com.runningai.coach.CoachTestFixtures
+import com.runningai.coach.RecoveryContext
+import com.runningai.coach.RecoveryMeasurement
 import com.runningai.coach.TrainingContext
 import com.runningai.coach.WorkoutDraft
 import com.runningai.coach.WorkoutDraftValidationException
@@ -31,8 +33,8 @@ class CoachEvalScenarioTest {
 
     /**
      * A reasonable deterministic answer for any scenario: it fits the available time when one is
-     * given, says recovery is unknown (which is always true in this build), and echoes any reported
-     * fatigue. It stands in for "a coach that read the context".
+     * given, describes exactly the recovery data it was given (and names what is missing or old),
+     * and echoes any reported fatigue. It stands in for "a coach that read the context".
      */
     private fun goodAnswer(context: TrainingContext): WorkoutDraft {
         val budget = context.constraints.availableMinutes ?: 45
@@ -57,7 +59,7 @@ class CoachEvalScenarioTest {
             ),
             totalDurationMinutes = budget,
             assessment = CoachAssessment(
-                recoveryAssessment = "Recovery data is unavailable, so readiness is unknown.",
+                recoveryAssessment = recoveryAssessment(context.recovery),
                 loadAssessment = "Recent load trend: ${context.weeklyContext.loadTrend}.",
                 selectedWorkoutType = "EASY",
                 rationale = if (fatigue != null) {
@@ -68,6 +70,32 @@ class CoachEvalScenarioTest {
                 warnings = listOfNotNull(fatigue?.let { "Athlete reported: $it" }),
             ),
         )
+    }
+
+    private fun recoveryAssessment(r: RecoveryContext): String {
+        if (!r.anyAvailable) return "Recovery data is unavailable, so readiness is unknown."
+        val known = mutableListOf<String>()
+        val missing = mutableListOf<String>()
+        val ages = mutableListOf<Int>()
+        fun add(name: String, m: RecoveryMeasurement?, unit: String) {
+            if (m == null) {
+                missing += name
+            } else {
+                known += "$name ${m.current}$unit against a baseline of ${m.baseline ?: "n/a"}"
+                ages += m.ageDays
+            }
+        }
+        add("HRV", r.hrv?.lastNightAvgMs, " ms")
+        add("sleep", r.sleep?.durationHours, " h")
+        add("resting HR", r.restingHeartRate?.bpm, " bpm")
+        add("body battery", r.bodyBattery?.highest, "")
+        add("stress", r.stress?.average, "")
+        return buildString {
+            append("Based on ").append(known.joinToString("; ")).append(".")
+            if (missing.isNotEmpty()) append(" Unavailable: ").append(missing.joinToString(", ")).append(".")
+            val oldest = ages.max()
+            if (oldest >= 2) append(" These readings are $oldest days old and may not reflect today.")
+        }
     }
 
     @TestFactory
@@ -144,6 +172,84 @@ class CoachEvalScenarioTest {
         val failures = scenario.invariants.mapNotNull { it.check(dismissive) }
 
         assertThat(failures).anyMatch { it.contains("not reflected") }
+    }
+
+    @Test
+    fun `there are ten recovery-aware scenarios covering the Phase 6F situations`() {
+        val ids = CoachEvalScenarios.ALL.map { it.id }
+        assertThat(ids).contains(
+            "11-hrv-drop", "12-resting-hr-up", "13-short-sleep", "14-low-body-battery", "15-stress-up",
+            "16-recovery-normal", "17-mixed-signals", "18-no-recovery-data", "19-stale-recovery",
+            "20-fatigue-reported-wearable-normal",
+        )
+        assertThat(CoachEvalScenarios.ALL.single { it.id == "18-no-recovery-data" }.context.recovery.anyAvailable).isFalse()
+        assertThat(CoachEvalScenarios.ALL.single { it.id == "19-stale-recovery" }.context.recovery.hrv!!.lastNightAvgMs.ageDays)
+            .isEqualTo(6)
+    }
+
+    @Test
+    fun `the missing-metric invariant catches a coach that invents an unrecorded HRV`() {
+        val scenario = CoachEvalScenarios.ALL.single { it.id == "12-resting-hr-up" }
+        val inventing = goodAnswer(scenario.context).let {
+            it.copy(assessment = it.assessment.copy(
+                recoveryAssessment = "Resting HR is up 8 bpm. HRV is solid at 55 ms, so you are fine.",
+            ))
+        }
+
+        val failures = scenario.invariants.mapNotNull { it.check(inventing) }
+
+        assertThat(failures).anyMatch { it.contains("cites missing metric(s) [hrv]") }
+    }
+
+    @Test
+    fun `the missing-metric invariant accepts a coach that names the gap honestly`() {
+        val scenario = CoachEvalScenarios.ALL.single { it.id == "12-resting-hr-up" }
+        val honest = goodAnswer(scenario.context).let {
+            it.copy(assessment = it.assessment.copy(
+                recoveryAssessment = "Resting HR is 8 bpm above baseline. HRV and body battery were not recorded.",
+            ))
+        }
+
+        assertThat(scenario.invariants.mapNotNull { it.check(honest) }).isEmpty()
+    }
+
+    @Test
+    fun `the recovery-reflected invariant catches a coach that ignores the recovery data`() {
+        val scenario = CoachEvalScenarios.ALL.single { it.id == "11-hrv-drop" }
+        val ignoring = goodAnswer(scenario.context).let {
+            it.copy(assessment = it.assessment.copy(recoveryAssessment = "Nothing of note.", warnings = emptyList()))
+        }
+
+        val failures = scenario.invariants.mapNotNull { it.check(ignoring) }
+
+        assertThat(failures).anyMatch { it.contains("does not mention any recovery metric") }
+    }
+
+    @Test
+    fun `the stale invariant catches a coach that treats six-day-old readings as current`() {
+        val scenario = CoachEvalScenarios.ALL.single { it.id == "19-stale-recovery" }
+        val naive = goodAnswer(scenario.context).let {
+            it.copy(assessment = it.assessment.copy(
+                recoveryAssessment = "HRV, sleep and resting HR are all on baseline today.",
+                rationale = "Everything looks normal, so a steady run fits.",
+            ))
+        }
+
+        val failures = scenario.invariants.mapNotNull { it.check(naive) }
+
+        assertThat(failures).anyMatch { it.contains("treats days-old readings as current") }
+    }
+
+    @Test
+    fun `the no-recovery scenario catches a coach that invents sleep data`() {
+        val scenario = CoachEvalScenarios.ALL.single { it.id == "18-no-recovery-data" }
+        val inventing = goodAnswer(scenario.context).let {
+            it.copy(assessment = it.assessment.copy(recoveryAssessment = "You slept well and sleep score is high."))
+        }
+
+        val failures = scenario.invariants.mapNotNull { it.check(inventing) }
+
+        assertThat(failures).isNotEmpty
     }
 
     @Test

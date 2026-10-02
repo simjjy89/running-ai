@@ -1,6 +1,11 @@
 package com.runningai.coach.eval
 
 import com.runningai.coach.AthleteThresholds
+import com.runningai.coach.BodyBatteryRecovery
+import com.runningai.coach.HrvRecovery
+import com.runningai.coach.RestingHeartRateRecovery
+import com.runningai.coach.SleepRecovery
+import com.runningai.coach.StressRecovery
 import com.runningai.coach.CoachTestFixtures
 import com.runningai.coach.RecentTraining
 import com.runningai.coach.RecoveryContext
@@ -107,6 +112,73 @@ object CoachEvalScenarios {
     }
 
     private val base = listOf(structurallyValid, durationsAddUp, explained, notUnsafelyLong)
+
+    // ---- recovery invariants (Phase 6F) -----------------------------------------------------
+
+    private val recoveryWords = listOf("hrv", "sleep", "resting", "heart rate", "rhr", "body battery", "stress")
+
+    private val admitsUnknown = listOf("unavailable", "unknown", "missing", "not available", "no data", "no ",
+        "n/a", "without", "lack", "absent", "not recorded", "not reported")
+
+    /** The assessment must engage with the recovery data it was given, not skip past it. */
+    private val reflectsRecovery = CoachEvalInvariant("recovery context is reflected in the assessment") { d ->
+        val text = (d.assessment.recoveryAssessment + " " + d.assessment.warnings.joinToString(" ")).lowercase()
+        if (recoveryWords.any { text.contains(it) }) null
+        else "recovery assessment does not mention any recovery metric: '${d.assessment.recoveryAssessment}'"
+    }
+
+    /**
+     * A metric that is null in the context may only be named as unknown: any sentence of the recovery
+     * assessment or warnings that mentions it must also say it is missing, otherwise it was invented.
+     */
+    private fun doesNotCiteMissing(vararg metricKeywords: String) =
+        CoachEvalInvariant("does not invent missing recovery metrics (${metricKeywords.joinToString()})") { d ->
+            val text = (d.assessment.recoveryAssessment + " " + d.assessment.warnings.joinToString(" ")).lowercase()
+            val sentences = text.split(Regex("(?<=[.!?;])\\s+"))
+            val invented = metricKeywords.filter { keyword ->
+                sentences.any { s -> s.contains(keyword) && admitsUnknown.none { s.contains(it) } }
+            }
+            if (invented.isEmpty()) null
+            else "cites missing metric(s) $invented as if known: '${d.assessment.recoveryAssessment}'"
+        }
+
+    private val acknowledgesStaleRecovery = CoachEvalInvariant("acknowledges that recovery data is stale") { d ->
+        val text = (d.assessment.recoveryAssessment + " " + d.assessment.rationale + " " +
+            d.assessment.warnings.joinToString(" ")).lowercase()
+        val admits = listOf("stale", "old", "days ago", "outdated", "not current", "not recent", "dated", "ago",
+            "no recent", "last reading", "last recorded", "may not reflect", "doesn't reflect", "does not reflect")
+        if (admits.any { text.contains(it) }) null
+        else "treats days-old readings as current: '${d.assessment.recoveryAssessment}'"
+    }
+
+    private val baseRecovery = base + reflectsRecovery
+
+    private fun recovering(
+        hrv: HrvRecovery? = CoachTestFixtures.normalRecovery().hrv,
+        sleep: SleepRecovery? = CoachTestFixtures.normalRecovery().sleep,
+        restingHeartRate: RestingHeartRateRecovery? = CoachTestFixtures.normalRecovery().restingHeartRate,
+        bodyBattery: BodyBatteryRecovery? = CoachTestFixtures.normalRecovery().bodyBattery,
+        stress: StressRecovery? = CoachTestFixtures.normalRecovery().stress,
+    ) = RecoveryContext(hrv, sleep, restingHeartRate, bodyBattery, stress)
+
+    private fun m(current: Double, baseline: Double?) = CoachTestFixtures.measurement(current, baseline)
+
+    /** A normal, steady training week, so recovery is the variable under test. */
+    private fun recoveryScenarioContext(
+        recovery: RecoveryContext,
+        constraints: SessionConstraints = SessionConstraints(),
+    ) = CoachTestFixtures.context(
+        date = DATE,
+        athlete = thresholds(),
+        recentTraining = CoachTestFixtures.recentTraining(
+            date = DATE, daysSinceLastRun = 1, daysSinceLastLongRun = 5,
+            consecutiveActiveDays = 1, consecutiveRestDays = 0,
+            candidates = listOf(CandidateTrainingType.EASY, CandidateTrainingType.QUALITY, CandidateTrainingType.LONG),
+        ),
+        recovery = recovery,
+        weeklyContext = CoachTestFixtures.weeklyContext(acute = 50.0, chronic = 48.0),
+        constraints = constraints,
+    )
 
     // ---- scenarios -------------------------------------------------------------------------
 
@@ -288,6 +360,106 @@ object CoachEvalScenarios {
                 weeklyContext = CoachTestFixtures.weeklyContext(acute = 0.0, chronic = 0.0, loadTrend = "UNKNOWN"),
             ),
             invariants = base + acknowledgesMissingRecovery,
+        ),
+
+        // ---- Phase 6F: recovery-aware scenarios. Synthetic values. They assert that recovery data
+        // is used and never invented, not which workout has to follow from it. ----
+
+        CoachEvalScenario(
+            id = "11-hrv-drop",
+            description = "Overnight HRV well below the athlete's 28-day baseline, everything else normal",
+            context = recoveryScenarioContext(
+                recovering(hrv = HrvRecovery(m(38.0, 52.0), 47.0, "UNBALANCED")),
+            ),
+            invariants = baseRecovery,
+        ),
+
+        CoachEvalScenario(
+            id = "12-resting-hr-up",
+            description = "Resting heart rate clearly above baseline; HRV and Body Battery not recorded",
+            context = recoveryScenarioContext(
+                recovering(
+                    hrv = null,
+                    bodyBattery = null,
+                    restingHeartRate = RestingHeartRateRecovery(m(58.0, 50.0)),
+                ),
+            ),
+            invariants = baseRecovery + doesNotCiteMissing("hrv", "body battery"),
+        ),
+
+        CoachEvalScenario(
+            id = "13-short-sleep",
+            description = "A short, poor night of sleep compared with the athlete's usual",
+            context = recoveryScenarioContext(
+                recovering(sleep = SleepRecovery(m(4.6, 7.4), m(41.0, 78.0))),
+            ),
+            invariants = baseRecovery,
+        ),
+
+        CoachEvalScenario(
+            id = "14-low-body-battery",
+            description = "Body Battery peaked far below its usual level",
+            context = recoveryScenarioContext(
+                recovering(bodyBattery = BodyBatteryRecovery(m(28.0, 76.0), 9, 15, 40)),
+            ),
+            invariants = baseRecovery,
+        ),
+
+        CoachEvalScenario(
+            id = "15-stress-up",
+            description = "All-day stress well above baseline",
+            context = recoveryScenarioContext(
+                recovering(stress = StressRecovery(m(48.0, 26.0), 97)),
+            ),
+            invariants = baseRecovery,
+        ),
+
+        CoachEvalScenario(
+            id = "16-recovery-normal",
+            description = "Every recovery metric sits on the athlete's baseline",
+            context = recoveryScenarioContext(CoachTestFixtures.normalRecovery()),
+            invariants = baseRecovery,
+        ),
+
+        CoachEvalScenario(
+            id = "17-mixed-signals",
+            description = "HRV above baseline but short sleep and raised stress; resting HR normal",
+            context = recoveryScenarioContext(
+                recovering(
+                    hrv = HrvRecovery(m(60.0, 52.0), 54.0, "BALANCED"),
+                    sleep = SleepRecovery(m(5.5, 7.4), m(58.0, 80.0)),
+                    stress = StressRecovery(m(40.0, 26.0), 90),
+                ),
+            ),
+            invariants = baseRecovery,
+        ),
+
+        CoachEvalScenario(
+            id = "18-no-recovery-data",
+            description = "Thresholds and training history present, but no recovery data at all",
+            context = recoveryScenarioContext(RecoveryContext()),
+            invariants = base + acknowledgesMissingRecovery +
+                doesNotCiteMissing("hrv", "sleep", "resting", "body battery"),
+        ),
+
+        CoachEvalScenario(
+            id = "19-stale-recovery",
+            description = "The latest recovery readings are six days old (watch not synced since)",
+            context = recoveryScenarioContext(CoachTestFixtures.normalRecovery(ageDays = 6)),
+            invariants = baseRecovery + acknowledgesStaleRecovery,
+        ),
+
+        CoachEvalScenario(
+            id = "20-fatigue-reported-wearable-normal",
+            description = "Athlete reports strong fatigue while every wearable metric looks normal",
+            context = recoveryScenarioContext(
+                CoachTestFixtures.normalRecovery(),
+                SessionConstraints(
+                    userFeedback = "Watch says I'm fine but I feel completely drained",
+                    painOrFatigueFeedback = "Exhausted, legs feel dead",
+                ),
+            ),
+            invariants = baseRecovery + acknowledgesPainFeedback,
         ),
     )
 }

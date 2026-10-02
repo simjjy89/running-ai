@@ -29,7 +29,11 @@ import org.junit.jupiter.api.TestFactory
 @Tag("live-coach")
 class LiveClaudeCoachEvalTest {
 
-    private val properties = CoachTestFixtures.properties()
+    // The fixture's "test-model" placeholder is rejected by the real CLI (unrecognized_model, exit 1),
+    // so the live run uses the production default model, overridable like production.
+    private val properties = CoachTestFixtures.properties().let {
+        it.copy(claude = it.claude.copy(model = System.getenv("RUNNING_AI_COACH_CLAUDE_MODEL") ?: "sonnet"))
+    }
     private val coach = ClaudeAiCoach(
         ClaudeCoachPromptBuilder(),
         ClaudeCliClient(properties),
@@ -43,6 +47,12 @@ class LiveClaudeCoachEvalTest {
         CoachEvalScenarios.ALL.map { scenario ->
             DynamicTest.dynamicTest("${scenario.id}: ${scenario.description}") {
                 val draft = coach.createWorkout(scenario.context)
+                // Recorded in the test report (system-out) so a live run can be reviewed afterwards.
+                println(
+                    "LIVE ${scenario.id} | ${draft.assessment.selectedWorkoutType} | ${draft.totalDurationMinutes} min | " +
+                        "${draft.title} | recovery: ${draft.assessment.recoveryAssessment} | " +
+                        "warnings: ${draft.assessment.warnings}",
+                )
 
                 val failures = scenario.invariants.mapNotNull { inv ->
                     inv.check(draft)?.let { "${inv.name}: $it" }
