@@ -12,8 +12,9 @@ import org.junit.jupiter.params.provider.ValueSource
 import java.time.Instant
 
 /**
- * Pure mapper tests (no Spring, no network). Fixtures are SYNTHETIC_NOT_LIVE_GARMIN; the point is the
- * mapping rules: nothing fabricated, nothing silently dropped, descriptors resolved per payload.
+ * Pure mapper tests (no Spring, no network). The fixtures carry live-verified shapes with synthetic values
+ * (Phase 6H-1B); the point is the mapping rules: nothing fabricated, nothing silently dropped, descriptors
+ * resolved per payload.
  */
 class GarminActivityDetailMappersTest {
 
@@ -75,22 +76,34 @@ class GarminActivityDetailMappersTest {
 
     @Test
     fun `laps keep the source index, order and values, and unknown fields in extraMetrics`() {
-        val result = laps.map(fixture("detail/splits.SYNTHETIC_NOT_LIVE_GARMIN.json"))
+        val result = laps.map(fixture("detail/splits.LIVE_SHAPE.ANONYMISED.json"))
 
-        assertThat(result.map { it.lapIndex }).containsExactly(1, 2)
+        // live lapIndex is 1-based (messageIndex is the 0-based one and stays an extra metric)
+        assertThat(result.map { it.lapIndex }).containsExactly(1, 2, 3, 4)
         val first = result[0]
         assertThat(first.startTime).isEqualTo(Instant.parse("2026-09-28T21:30:00Z"))
-        assertThat(first.durationSeconds).isEqualTo(300.0)
-        assertThat(first.distanceMeters).isEqualTo(1000.0)
-        assertThat(first.averageHeartRateBpm).isEqualTo(148.0)
-        assertThat(first.averageCadence).isEqualTo(170.0)
-        assertThat(first.extraMetrics!!.get("intensityType").asText()).isEqualTo("ACTIVE")
+        assertThat(first.durationSeconds).isEqualTo(155.1)
+        assertThat(first.distanceMeters).isEqualTo(500.0)
+        assertThat(first.averageHeartRateBpm).isEqualTo(120.0)
+        assertThat(first.averageCadence).isEqualTo(160.0)
         assertThat(first.extraMetrics!!.get("groundContactTime").asDouble()).isEqualTo(245.0)
-        // the second lap reports less: the rest is null, not copied or estimated
-        val second = result[1]
-        assertThat(second.maxHeartRateBpm).isNull()
-        assertThat(second.elevationGain).isNull()
-        assertThat(second.movingDurationSeconds).isNull()
+        assertThat(first.extraMetrics!!.get("messageIndex").asInt()).isEqualTo(0)
+        // a lap that reports less is left null, never copied from a neighbour or estimated
+        val third = result[2]
+        assertThat(third.maxHeartRateBpm).isNull()
+        assertThat(third.elevationGain).isNull()
+        assertThat(third.movingDurationSeconds).isNull()
+    }
+
+    @Test
+    fun `the live interval structure survives in extraMetrics, lap by lap`() {
+        val result = laps.map(fixture("detail/splits.LIVE_SHAPE.ANONYMISED.json"))
+
+        // Garmin marks work and rest on the lap itself; RunningAI stores it rather than re-deriving it.
+        assertThat(result.map { it.extraMetrics?.get("intensityType")?.asText() })
+            .containsExactly("WARMUP", "ACTIVE", "RECOVERY", "COOLDOWN")
+        // a lap is not a workout step: live steps repeat across laps and the last lap carries none
+        assertThat(result.map { it.extraMetrics?.get("wktStepIndex")?.asInt() }).containsExactly(0, 2, 3, null)
     }
 
     @Test
@@ -123,7 +136,7 @@ class GarminActivityDetailMappersTest {
 
     @Test
     fun `zones keep number, lower bound and time, and never derive an upper bound`() {
-        val result = zones.map(fixture("detail/hr-zones.SYNTHETIC_NOT_LIVE_GARMIN.json"), ZoneType.HEART_RATE)
+        val result = zones.map(fixture("detail/hr-zones.LIVE_SHAPE.ANONYMISED.json"), ZoneType.HEART_RATE)
 
         assertThat(result.map { it.zoneNumber }).containsExactly(1, 2, 3, 4, 5)
         assertThat(result.map { it.durationSeconds }).containsExactly(120.0, 600.5, 1500.0, 300.0, 0.0)
@@ -148,8 +161,8 @@ class GarminActivityDetailMappersTest {
 
     @Test
     fun `samples are resolved through this payload's descriptors, not by position`() {
-        // In the fixture heart rate is at index 5 and the timestamp at index 0, listed out of order.
-        val result = samples.map(fixture("detail/samples.LIBRARY_SHAPE.SYNTHETIC_NOT_LIVE_GARMIN.json"))
+        // In this payload heart rate is at index 3 and the timestamp at index 7, described out of order.
+        val result = samples.map(fixture("detail/samples-outdoor.LIVE_SHAPE.ANONYMISED.json"))
 
         assertThat(result).hasSize(3)
         assertThat(result.map { it.heartRate }).containsExactly(98.0, 104.0, 111.0)
@@ -176,7 +189,7 @@ class GarminActivityDetailMappersTest {
 
     @Test
     fun `native sampling is kept - no interpolated rows, indexes follow the source`() {
-        val result = samples.map(fixture("detail/samples.LIBRARY_SHAPE.SYNTHETIC_NOT_LIVE_GARMIN.json"))
+        val result = samples.map(fixture("detail/samples-outdoor.LIVE_SHAPE.ANONYMISED.json"))
 
         // elapsed 0, 4, 9 seconds: three rows, not ten one-second rows
         assertThat(result.map { it.sampleIndex }).containsExactly(0, 1, 2)
@@ -184,14 +197,43 @@ class GarminActivityDetailMappersTest {
 
     @Test
     fun `unknown metrics are preserved by key and missing ones stay null`() {
-        val result = samples.map(fixture("detail/samples.LIBRARY_SHAPE.SYNTHETIC_NOT_LIVE_GARMIN.json"))
+        val result = samples.map(fixture("detail/samples-outdoor.LIVE_SHAPE.ANONYMISED.json"))
 
-        assertThat(result[0].extraMetrics!!.get("directVerticalOscillation").asDouble()).isEqualTo(9.1)
+        assertThat(result[1].extraMetrics!!.get("directVerticalOscillation").asDouble()).isEqualTo(9.1)
         assertThat(result[1].extraMetrics!!.get("sumMovingDuration").asDouble()).isEqualTo(4.0)
-        // sample 2 reports null for vertical oscillation: absent, not 0 and not carried over
+        // sample 0 and sample 2 report null for vertical oscillation: absent, not 0 and not carried over
+        assertThat(result[0].extraMetrics!!.has("directVerticalOscillation")).isFalse()
         assertThat(result[2].extraMetrics!!.has("directVerticalOscillation")).isFalse()
-        // never described in this payload: null, never fabricated
-        assertThat(result).allMatch { it.power == null && it.cadence == null && it.latitude == null && it.temperature == null }
+        // live outdoor payloads describe no air temperature at all: null, never fabricated
+        assertThat(result).allMatch { it.temperature == null }
+        // what this payload does describe is read into its column
+        assertThat(result.map { it.power }).containsExactly(0.0, 300.0, 320.0)
+        assertThat(result.map { it.cadence }).containsExactly(0.0, 170.0, 172.0)
+        assertThat(result.map { it.latitude }).containsOnly(1.5)
+        assertThat(result.map { it.elevation }).containsExactly(16.6, 16.4, 16.2)
+    }
+
+    @Test
+    fun `an epoch-millisecond timestamp reported as a JSON float is still read exactly`() {
+        // Live Garmin sends directTimestamp as 1789772410000.0, not as an integer.
+        val result = samples.map(fixture("detail/samples-outdoor.LIVE_SHAPE.ANONYMISED.json"))
+
+        assertThat(result.first().sampleTime).isEqualTo(Instant.ofEpochMilli(1790000000000L))
+    }
+
+    @Test
+    fun `the same metric keys at a completely different index layout still resolve`() {
+        // Same device, different activity: live treadmill and outdoor payloads share keys but no layout.
+        val outdoor = samples.map(fixture("detail/samples-outdoor.LIVE_SHAPE.ANONYMISED.json"))
+        val treadmill = samples.map(fixture("detail/samples-treadmill.LIVE_SHAPE.ANONYMISED.json"))
+
+        assertThat(treadmill.map { it.heartRate }).containsExactly(88.0, 132.0)
+        assertThat(treadmill.map { it.speed }).containsExactly(0.0, 3.1)
+        assertThat(treadmill.map { it.cadence }).containsExactly(0.0, 174.0)
+        assertThat(treadmill.last().sampleTime).isEqualTo(Instant.ofEpochMilli(1790100005000L))
+        // a treadmill reports no position and no elevation; nothing is substituted for them
+        assertThat(treadmill).allMatch { it.latitude == null && it.longitude == null && it.elevation == null }
+        assertThat(outdoor).allMatch { it.latitude != null && it.elevation != null }
     }
 
     @Test

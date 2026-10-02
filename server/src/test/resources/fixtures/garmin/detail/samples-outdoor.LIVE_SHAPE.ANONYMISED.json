@@ -1,0 +1,36 @@
+{
+  "activityId": 999000001,
+  "measurementCount": 23,
+  "metricsCount": 3,
+  "totalMetricsCount": 6,
+  "metricDescriptors": [
+    { "metricsIndex": 3, "key": "directHeartRate", "unit": { "key": "bpm", "factor": 1.0 } },
+    { "metricsIndex": 7, "key": "directTimestamp", "unit": { "key": "gmt", "factor": 0.0 } },
+    { "metricsIndex": 2, "key": "sumElapsedDuration", "unit": { "key": "second", "factor": 1000.0 } },
+    { "metricsIndex": 12, "key": "sumDistance", "unit": { "key": "meter", "factor": 100.0 } },
+    { "metricsIndex": 5, "key": "directSpeed", "unit": { "key": "mps", "factor": 0.1 } },
+    { "metricsIndex": 0, "key": "directGradeAdjustedSpeed", "unit": { "key": "mps", "factor": 0.1 } },
+    { "metricsIndex": 1, "key": "directFractionalCadence", "unit": { "key": "stepsPerMinute", "factor": 1.0 } },
+    { "metricsIndex": 4, "key": "directPower", "unit": { "key": "watt", "factor": 1.0 } },
+    { "metricsIndex": 6, "key": "directLongitude", "unit": { "key": "dd", "factor": 1.0 } },
+    { "metricsIndex": 8, "key": "directElevation", "unit": { "key": "meter", "factor": 100.0 } },
+    { "metricsIndex": 9, "key": "directBodyBattery", "unit": { "key": "dimensionless", "factor": 1.0 } },
+    { "metricsIndex": 10, "key": "directRunCadence", "unit": { "key": "stepsPerMinute", "factor": 1.0 } },
+    { "metricsIndex": 11, "key": "directLatitude", "unit": { "key": "dd", "factor": 1.0 } },
+    { "metricsIndex": 13, "key": "sumDuration", "unit": { "key": "second", "factor": 1000.0 } },
+    { "metricsIndex": 14, "key": "directDoubleCadence", "unit": { "key": "stepsPerMinute", "factor": 1.0 } },
+    { "metricsIndex": 15, "key": "sumMovingDuration", "unit": { "key": "second", "factor": 1000.0 } },
+    { "metricsIndex": 16, "key": "directVerticalSpeed", "unit": { "key": "mps", "factor": 0.1 } },
+    { "metricsIndex": 17, "key": "directVerticalOscillation", "unit": { "key": "centimeter", "factor": 1.0 } },
+    { "metricsIndex": 18, "key": "sumAccumulatedPower", "unit": { "key": "watt", "factor": 1.0 } },
+    { "metricsIndex": 19, "key": "directGroundContactTime", "unit": { "key": "ms", "factor": 1.0 } },
+    { "metricsIndex": 20, "key": "directVerticalRatio", "unit": { "key": "dimensionless", "factor": 1.0 } },
+    { "metricsIndex": 21, "key": "directStrideLength", "unit": { "key": "centimeter", "factor": 1.0 } },
+    { "metricsIndex": 22, "key": "directPerformanceCondition", "unit": { "key": "dimensionless", "factor": 1.0 } }
+  ],
+  "activityDetailMetrics": [
+    { "metrics": [0.0, 0.0, 0.0, 98.0, 0.0, 0.0, 2.5, 1790000000000.0, 16.6, 90.0, 0.0, 1.5, 0.0, 0.0, 0.0, 0.0, null, null, null, null, null, null, null] },
+    { "metrics": [2.9, 0.0, 4.0, 104.0, 300.0, 2.8, 2.5, 1790000004000.0, 16.4, 90.0, 170.0, 1.5, 11.2, 4.0, 340.0, 4.0, 0.0, 9.1, 1200.0, 245.0, 8.2, 110.5, 3.0] },
+    { "metrics": [3.0, 0.0, 9.0, 111.0, 320.0, 2.9, 2.5, 1790000009000.0, 16.2, 89.0, 172.0, 1.5, 25.6, 9.0, 344.0, 9.0, 0.0, null, 2800.0, 243.0, 8.1, 111.0, 3.0] }
+  ]
+}

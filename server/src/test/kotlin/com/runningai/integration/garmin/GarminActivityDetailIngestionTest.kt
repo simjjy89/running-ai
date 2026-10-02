@@ -82,11 +82,12 @@ class GarminActivityDetailIngestionTest {
     private fun scriptAllParts() {
         source.calls.clear()
         source.responses.clear()
-        source.responses[GarminActivityPart.DETAIL] = { json.readTree("""{"activityId":188081596,"summaryDTO":{"x":1}}""") }
-        source.responses[GarminActivityPart.SPLITS] = { fixture("detail/splits.SYNTHETIC_NOT_LIVE_GARMIN.json") }
-        source.responses[GarminActivityPart.HR_ZONES] = { fixture("detail/hr-zones.SYNTHETIC_NOT_LIVE_GARMIN.json") }
-        source.responses[GarminActivityPart.POWER_ZONES] = { json.readTree("{}") }
-        source.responses[GarminActivityPart.SAMPLES] = { fixture("detail/samples.LIBRARY_SHAPE.SYNTHETIC_NOT_LIVE_GARMIN.json") }
+        source.responses[GarminActivityPart.DETAIL] = { json.readTree("""{"activityId":188081596,"summaryDTO":{"distance":10000.0}}""") }
+        source.responses[GarminActivityPart.SPLITS] = { fixture("detail/splits.LIVE_SHAPE.ANONYMISED.json") }
+        source.responses[GarminActivityPart.HR_ZONES] = { fixture("detail/hr-zones.LIVE_SHAPE.ANONYMISED.json") }
+        // live: an activity recorded without a power meter answers power zones with an empty array
+        source.responses[GarminActivityPart.POWER_ZONES] = { json.readTree("[]") }
+        source.responses[GarminActivityPart.SAMPLES] = { fixture("detail/samples-outdoor.LIVE_SHAPE.ANONYMISED.json") }
     }
 
     private fun failWith(part: GarminActivityPart, reason: GarminConnectorException.Reason) {
@@ -131,7 +132,7 @@ class GarminActivityDetailIngestionTest {
             DetailPayloadType.POWER_ZONES, DetailPayloadType.ACTIVITY_DETAILS_STREAM,
         )
         assertThat(store.detail(activityId)!!.distanceMeters).isEqualTo(10000.0)
-        assertThat(store.laps(activityId).map { it.lapIndex }).containsExactly(1, 2)
+        assertThat(store.laps(activityId).map { it.lapIndex }).containsExactly(1, 2, 3, 4)
         assertThat(store.zones(activityId, ZoneType.HEART_RATE)).hasSize(5)
         assertThat(store.zones(activityId, ZoneType.POWER)).isEmpty()
         assertThat(store.samples(activityId).map { it.heartRate }).containsExactly(98.0, 104.0, 111.0)
@@ -150,7 +151,7 @@ class GarminActivityDetailIngestionTest {
 
         assertThat(counts()).isEqualTo(first)
         assertThat(first).containsEntry("activity_raw_payload", 5).containsEntry("activity_detail", 1)
-            .containsEntry("activity_lap", 2).containsEntry("activity_zone", 5).containsEntry("activity_sample", 3)
+            .containsEntry("activity_lap", 4).containsEntry("activity_zone", 5).containsEntry("activity_sample", 3)
             .containsEntry("activity_detail_collection", 6)
     }
 
@@ -262,7 +263,7 @@ class GarminActivityDetailIngestionTest {
         assertThat(source.calls).isEmpty()
         assertThat(result.outcome).isEqualTo(DetailCollectionOutcome.COMPLETE)
         assertThat(store.samples(activityId)).hasSize(3)
-        assertThat(store.laps(activityId)).hasSize(2)
+        assertThat(store.laps(activityId)).hasSize(4)
     }
 
     // ---- HTTP -------------------------------------------------------------------------------------------

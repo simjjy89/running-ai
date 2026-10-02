@@ -1,0 +1,29 @@
+{
+  "activityId": 999000002,
+  "measurementCount": 17,
+  "metricsCount": 2,
+  "totalMetricsCount": 2,
+  "metricDescriptors": [
+    { "metricsIndex": 0, "key": "sumMovingDuration", "unit": { "key": "second", "factor": 1000.0 } },
+    { "metricsIndex": 1, "key": "directFractionalCadence", "unit": { "key": "stepsPerMinute", "factor": 1.0 } },
+    { "metricsIndex": 2, "key": "sumDuration", "unit": { "key": "second", "factor": 1000.0 } },
+    { "metricsIndex": 3, "key": "directSpeed", "unit": { "key": "mps", "factor": 0.1 } },
+    { "metricsIndex": 4, "key": "directPower", "unit": { "key": "watt", "factor": 1.0 } },
+    { "metricsIndex": 5, "key": "sumElapsedDuration", "unit": { "key": "second", "factor": 1000.0 } },
+    { "metricsIndex": 6, "key": "sumDistance", "unit": { "key": "meter", "factor": 100.0 } },
+    { "metricsIndex": 7, "key": "directRunCadence", "unit": { "key": "stepsPerMinute", "factor": 1.0 } },
+    { "metricsIndex": 8, "key": "directBodyBattery", "unit": { "key": "dimensionless", "factor": 1.0 } },
+    { "metricsIndex": 9, "key": "directTimestamp", "unit": { "key": "gmt", "factor": 0.0 } },
+    { "metricsIndex": 10, "key": "directDoubleCadence", "unit": { "key": "stepsPerMinute", "factor": 1.0 } },
+    { "metricsIndex": 11, "key": "directHeartRate", "unit": { "key": "bpm", "factor": 1.0 } },
+    { "metricsIndex": 12, "key": "directGroundContactTime", "unit": { "key": "ms", "factor": 1.0 } },
+    { "metricsIndex": 13, "key": "sumAccumulatedPower", "unit": { "key": "watt", "factor": 1.0 } },
+    { "metricsIndex": 14, "key": "directVerticalOscillation", "unit": { "key": "centimeter", "factor": 1.0 } },
+    { "metricsIndex": 15, "key": "directStrideLength", "unit": { "key": "centimeter", "factor": 1.0 } },
+    { "metricsIndex": 16, "key": "directVerticalRatio", "unit": { "key": "dimensionless", "factor": 1.0 } }
+  ],
+  "activityDetailMetrics": [
+    { "metrics": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 85.0, 1790100000000.0, 0.0, 88.0, null, null, null, null, null] },
+    { "metrics": [5.0, 0.0, 5.0, 3.1, 310.0, 5.0, 15.5, 174.0, 85.0, 1790100005000.0, 348.0, 132.0, 240.0, 1550.0, 8.8, 107.0, 8.0] }
+  ]
+}
