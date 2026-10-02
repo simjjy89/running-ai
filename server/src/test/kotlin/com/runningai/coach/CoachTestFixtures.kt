@@ -182,6 +182,22 @@ object CoachTestFixtures {
         status = status,
     )
 
+    /** A rest day exactly as the coach returns it: REST, 0 minutes, no segments (Phase 6F.1). */
+    fun restDraft(
+        date: LocalDate = DATE,
+        version: Int = 1,
+        rationale: String = "You reported exhaustion, so today is a full rest day to let your body recover.",
+    ) = draft(
+        date = date,
+        version = version,
+        title = "Rest Day",
+        workoutType = "REST",
+        segments = emptyList(),
+        totalDurationMinutes = 0,
+        assessment = assessment(type = "REST", rationale = rationale,
+            warnings = listOf("Rest fully; resume easy running once the fatigue has eased.")),
+    )
+
     fun properties(
         provider: CoachProvider = CoachProvider.CLAUDE,
         command: String = "claude",

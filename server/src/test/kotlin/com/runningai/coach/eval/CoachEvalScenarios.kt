@@ -51,6 +51,13 @@ object CoachEvalScenarios {
 
     private val structurallyValid = CoachEvalInvariant("structurally valid") { d ->
         when {
+            // A rest day (Phase 6F.1) is a valid answer: 0 minutes and no segments, nothing padded.
+            d.isRest -> when {
+                d.totalDurationMinutes != 0 -> "REST with ${d.totalDurationMinutes} min"
+                d.segments.isNotEmpty() -> "REST with segments"
+                d.title.isBlank() -> "blank title"
+                else -> null
+            }
             d.segments.isEmpty() -> "no segments"
             d.totalDurationMinutes <= 0 -> "non-positive total duration"
             d.segments.any { it.durationMinutes <= 0 } -> "a segment has a non-positive duration"
@@ -115,13 +122,17 @@ object CoachEvalScenarios {
 
     // ---- recovery invariants (Phase 6F) -----------------------------------------------------
 
-    private val recoveryWords = listOf("hrv", "sleep", "resting", "heart rate", "rhr", "body battery", "stress")
+    // Specific metric names, or an explicit reference to the wearable/recovery readings as a whole
+    // ("wearable metrics all at baseline"), which the Phase 6F.1 live run showed is how a coach
+    // naturally summarises five normal metrics.
+    private val recoveryWords = listOf("hrv", "sleep", "resting", "heart rate", "rhr", "body battery", "stress",
+        "wearable", "baseline", "recovery reading", "recovery metric")
 
     private val admitsUnknown = listOf("unavailable", "unknown", "missing", "not available", "no data", "no ",
         "n/a", "without", "lack", "absent", "not recorded", "not reported")
 
     /** The assessment must engage with the recovery data it was given, not skip past it. */
-    private val reflectsRecovery = CoachEvalInvariant("recovery context is reflected in the assessment") { d ->
+    internal val reflectsRecovery = CoachEvalInvariant("recovery context is reflected in the assessment") { d ->
         val text = (d.assessment.recoveryAssessment + " " + d.assessment.warnings.joinToString(" ")).lowercase()
         if (recoveryWords.any { text.contains(it) }) null
         else "recovery assessment does not mention any recovery metric: '${d.assessment.recoveryAssessment}'"

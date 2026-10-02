@@ -226,6 +226,20 @@ class CoachEvalScenarioTest {
     }
 
     @Test
+    fun `the recovery-reflected invariant accepts a summary of all wearable readings`() {
+        // Verbatim recovery assessments from the Phase 6F.1 live run (scenarios 20 and 19). Both
+        // engage with the recovery data without naming a single metric; 6F's keyword list missed them.
+        val base = goodAnswer(CoachEvalScenarios.ALL.single { it.id == "20-fatigue-reported-wearable-normal" }.context)
+        listOf(
+            "Wearable metrics all at baseline, but athlete reports exhaustion and dead legs, so readiness is poor",
+            "Unknown for today: the latest recovery readings are 6 days old (all at baseline then), so they may not describe how you feel now",
+        ).forEach { text ->
+            val d = base.copy(assessment = base.assessment.copy(recoveryAssessment = text, warnings = emptyList()))
+            assertThat(CoachEvalScenarios.reflectsRecovery.check(d)).isNull()
+        }
+    }
+
+    @Test
     fun `the stale invariant catches a coach that treats six-day-old readings as current`() {
         val scenario = CoachEvalScenarios.ALL.single { it.id == "19-stale-recovery" }
         val naive = goodAnswer(scenario.context).let {

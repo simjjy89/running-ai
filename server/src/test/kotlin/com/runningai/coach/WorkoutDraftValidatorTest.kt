@@ -202,4 +202,67 @@ class WorkoutDraftValidatorTest {
                 assertThat(e.violations.size).isGreaterThanOrEqualTo(3)
             }
     }
+
+    // ---- REST as a first-class draft (Phase 6F.1) -------------------------------------------
+
+    @Test
+    fun `a rest day with 0 minutes and no segments passes`() {
+        val rest = CoachTestFixtures.restDraft()
+
+        assertThat(rest.isRest).isTrue()
+        assertThatCode { validator.validate(rest, DATE, thresholds()) }.doesNotThrowAnyException()
+        assertThatCode { validator.validate(rest, DATE, AthleteThresholds(null, null)) }.doesNotThrowAnyException()
+    }
+
+    @Test
+    fun `a rest day with a positive duration is rejected`() {
+        expectViolation(CoachTestFixtures.restDraft().copy(totalDurationMinutes = 5),
+            "REST workout must have totalDurationMinutes 0 but was 5")
+    }
+
+    @Test
+    fun `a rest day padded with segments is rejected`() {
+        val padded = CoachTestFixtures.restDraft().copy(
+            segments = listOf(segment(SegmentType.MAIN, 10, IntensityClass.VERY_EASY)),
+            totalDurationMinutes = 0,
+        )
+        expectViolation(padded, "REST workout must have no segments but has 1")
+        // padding with a matching total is still a padded rest day
+        expectViolation(padded.copy(totalDurationMinutes = 10), "must have no segments", "totalDurationMinutes 0")
+    }
+
+    @Test
+    fun `a non rest workout with 0 minutes is rejected`() {
+        expectViolation(draft(segments = listOf(segment(durationMinutes = 30)), totalDurationMinutes = 0),
+            "totalDurationMinutes must be > 0 but was 0")
+    }
+
+    @Test
+    fun `a non rest workout with no segments is rejected even with a total`() {
+        expectViolation(draft(workoutType = "EASY", segments = emptyList(), totalDurationMinutes = 0),
+            "workout has no segments", "totalDurationMinutes must be > 0")
+        expectViolation(draft(workoutType = "RECOVERY", segments = emptyList(), totalDurationMinutes = 20),
+            "workout has no segments")
+    }
+
+    @Test
+    fun `a non rest workout below the minimum duration is still rejected`() {
+        expectViolation(draft(segments = listOf(segment(durationMinutes = 3)), totalDurationMinutes = 3), "below the minimum")
+    }
+
+    @Test
+    fun `only the exact REST type is a rest day - a lowercase variant gets no exemption`() {
+        val lower = CoachTestFixtures.restDraft().copy(workoutType = "rest")
+
+        assertThat(lower.isRest).isFalse()
+        expectViolation(lower, "workout has no segments")
+    }
+
+    @Test
+    fun `a rest day still needs the requested date, a title and a rationale`() {
+        val rest = CoachTestFixtures.restDraft()
+        expectViolation(rest.copy(date = DATE.plusDays(1)), "does not match the requested date")
+        expectViolation(rest.copy(title = " "), "title is blank")
+        expectViolation(rest.copy(assessment = rest.assessment.copy(rationale = "")), "rationale is blank")
+    }
 }

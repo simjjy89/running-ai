@@ -135,4 +135,61 @@ class WorkoutDraftPersistenceTest {
         assertThat(store.get(requireNotNull(b.id)).status).isEqualTo(WorkoutDraftStatus.DRAFT)
         assertThat(a.draftGroupId).isNotEqualTo(b.draftGroupId)
     }
+
+    // ---- REST (Phase 6F.1) --------------------------------------------------------------------
+
+    @Test
+    fun `a rest day is stored and read back as 0 minutes with no segments`() {
+        val saved = store.save(CoachTestFixtures.restDraft(), UUID.randomUUID().toString(), supersede = null)
+        val reloaded = store.get(requireNotNull(saved.id))
+
+        assertThat(reloaded.workoutType).isEqualTo("REST")
+        assertThat(reloaded.isRest).isTrue()
+        assertThat(reloaded.totalDurationMinutes).isZero()
+        assertThat(reloaded.segments).isEmpty()
+        assertThat(reloaded.status).isEqualTo(WorkoutDraftStatus.DRAFT)
+        assertThat(reloaded.assessment.selectedWorkoutType).isEqualTo("REST")
+        assertThat(reloaded.assessment.warnings).isNotEmpty
+    }
+
+    @Test
+    fun `a rest day is superseded by an easy revision`() {
+        val group = UUID.randomUUID().toString()
+        val v1 = store.save(CoachTestFixtures.restDraft(version = 1), group, supersede = null)
+
+        val v2 = store.save(draft(version = 2, title = "Easy 30"), group, supersede = v1.id)
+
+        assertThat(store.get(requireNotNull(v1.id)).status).isEqualTo(WorkoutDraftStatus.SUPERSEDED)
+        assertThat(store.get(requireNotNull(v1.id)).isRest).isTrue()
+        assertThat(store.get(requireNotNull(v2.id)).status).isEqualTo(WorkoutDraftStatus.DRAFT)
+        assertThat(store.get(requireNotNull(v2.id)).workoutType).isEqualTo("EASY")
+    }
+
+    @Test
+    fun `an easy draft can be revised into a rest day`() {
+        val group = UUID.randomUUID().toString()
+        val v1 = store.save(draft(version = 1), group, supersede = null)
+
+        val v2 = store.save(CoachTestFixtures.restDraft(version = 2), group, supersede = v1.id)
+
+        assertThat(store.get(requireNotNull(v1.id)).status).isEqualTo(WorkoutDraftStatus.SUPERSEDED)
+        val current = store.get(requireNotNull(v2.id))
+        assertThat(current.status).isEqualTo(WorkoutDraftStatus.DRAFT)
+        assertThat(current.isRest).isTrue()
+        assertThat(current.segments).isEmpty()
+        assertThat(repository.findByDraftGroupIdOrderByVersionDesc(group).map { it.version }).containsExactly(2, 1)
+    }
+
+    @Test
+    fun `the schema itself refuses a padded rest day and a zero minute workout`() {
+        val group = UUID.randomUUID().toString()
+
+        assertThatThrownBy {
+            store.save(CoachTestFixtures.restDraft().copy(totalDurationMinutes = 5), group, supersede = null)
+        }.isInstanceOf(Exception::class.java)
+        assertThatThrownBy {
+            store.save(draft(totalDurationMinutes = 0), UUID.randomUUID().toString(), supersede = null)
+        }.isInstanceOf(Exception::class.java)
+        assertThat(repository.count()).isZero()
+    }
 }

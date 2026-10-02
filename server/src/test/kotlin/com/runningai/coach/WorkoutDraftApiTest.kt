@@ -59,6 +59,7 @@ class WorkoutDraftApiTest {
     @Autowired private lateinit var objectMapper: ObjectMapper
     @Autowired private lateinit var repository: WorkoutDraftRepository
     @Autowired private lateinit var coach: FakeAiCoach
+    @Autowired private lateinit var validator: WorkoutDraftValidator
     @Autowired private lateinit var recoverySnapshots: RecoverySnapshotService
     @Autowired private lateinit var recoveryRepository: RecoveryRepository
 
@@ -309,5 +310,114 @@ class WorkoutDraftApiTest {
 
         // asserted again in cleanUp(), but stated here because it is the point of this phase
         verifyNoInteractions(publishService, publisher, intervalsClient)
+    }
+
+    // ---- REST (Phase 6F.1) --------------------------------------------------------------------
+
+    /** Scripts the fake coach and runs the real validator on its answer, as ClaudeAiCoach does. */
+    private fun coachAnswers(block: (TrainingContext) -> WorkoutDraft) =
+        coach.respondWith { ctx ->
+            block(ctx).also {
+                try {
+                    validator.validate(it, ctx.date, ctx.athlete)
+                } catch (e: WorkoutDraftValidationException) {
+                    throw AiCoachException(AiCoachException.Reason.VALIDATION_FAILED, e.message ?: "invalid", e)
+                }
+            }
+        }
+
+    private fun idOf(result: org.springframework.test.web.servlet.ResultActions): Long =
+        objectMapper.readTree(result.andReturn().response.contentAsString).get("id").asLong()
+
+    private fun revise(id: Long, request: String) = mockMvc.perform(
+        post("/api/v1/workout-drafts/$id/revisions")
+            .contentType(MediaType.APPLICATION_JSON)
+            .content(objectMapper.writeValueAsString(mapOf("request" to request))),
+    )
+
+    @Test
+    fun `a rest day draft is generated, returned and readable like any other draft`() {
+        coachAnswers { CoachTestFixtures.restDraft(date = it.date) }
+
+        val id = idOf(
+            generate("""{"date":"2026-10-02","painOrFatigueFeedback":"Exhausted, legs feel dead"}""")
+                .andExpect(status().isOk)
+                .andExpect(jsonPath("$.workoutType").value("REST"))
+                .andExpect(jsonPath("$.totalDurationMinutes").value(0))
+                .andExpect(jsonPath("$.segments").isArray)
+                .andExpect(jsonPath("$.segments").isEmpty)
+                .andExpect(jsonPath("$.status").value("DRAFT"))
+                .andExpect(jsonPath("$.version").value(1))
+                .andExpect(jsonPath("$.assessment.selectedWorkoutType").value("REST"))
+                .andExpect(jsonPath("$.assessment.rationale").isNotEmpty)
+                .andExpect(jsonPath("$.rest").doesNotExist()),
+        )
+
+        mockMvc.perform(get("/api/v1/workout-drafts/$id"))
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.workoutType").value("REST"))
+            .andExpect(jsonPath("$.segments").isEmpty)
+    }
+
+    @Test
+    fun `a rest day can be revised into an easy run`() {
+        coachAnswers { CoachTestFixtures.restDraft(date = it.date) }
+        val v1 = idOf(generate("""{"date":"2026-10-02"}"""))
+
+        coachAnswers {
+            draft(date = it.date, title = "Easy 30", segments = listOf(
+                CoachTestFixtures.segment(com.runningai.training.SegmentType.MAIN, 30,
+                    com.runningai.training.IntensityClass.EASY),
+            ))
+        }
+        revise(v1, "몸은 괜찮아졌어. 30분 easy로 바꿔줘")
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.version").value(2))
+            .andExpect(jsonPath("$.status").value("DRAFT"))
+            .andExpect(jsonPath("$.workoutType").value("EASY"))
+            .andExpect(jsonPath("$.totalDurationMinutes").value(30))
+
+        mockMvc.perform(get("/api/v1/workout-drafts/$v1"))
+            .andExpect(jsonPath("$.status").value("SUPERSEDED"))
+            .andExpect(jsonPath("$.workoutType").value("REST"))
+        // the coach saw the rest day it was asked to change
+        assertThat(coach.revisedDrafts.single().isRest).isTrue()
+    }
+
+    @Test
+    fun `an easy run can be revised into a rest day`() {
+        coachAnswers { draft(date = it.date) }
+        val v1 = idOf(generate("""{"date":"2026-10-02"}"""))
+
+        coachAnswers { CoachTestFixtures.restDraft(date = it.date) }
+        val v2 = idOf(
+            revise(v1, "I am completely exhausted today")
+                .andExpect(status().isOk)
+                .andExpect(jsonPath("$.version").value(2))
+                .andExpect(jsonPath("$.workoutType").value("REST"))
+                .andExpect(jsonPath("$.totalDurationMinutes").value(0))
+                .andExpect(jsonPath("$.segments").isEmpty),
+        )
+
+        mockMvc.perform(get("/api/v1/workout-drafts/$v1")).andExpect(jsonPath("$.status").value("SUPERSEDED"))
+        mockMvc.perform(get("/api/v1/workout-drafts/$v2")).andExpect(jsonPath("$.status").value("DRAFT"))
+        assertThat(repository.count()).isEqualTo(2)
+    }
+
+    @Test
+    fun `a padded rest day from the coach is refused and nothing is stored`() {
+        coachAnswers {
+            CoachTestFixtures.restDraft(date = it.date).copy(
+                totalDurationMinutes = 10,
+                segments = listOf(CoachTestFixtures.segment(com.runningai.training.SegmentType.MAIN, 10,
+                    com.runningai.training.IntensityClass.VERY_EASY)),
+            )
+        }
+
+        generate("""{"date":"2026-10-02"}""")
+            .andExpect(status().isUnprocessableEntity)
+            .andExpect(jsonPath("$.code").value("AI_COACH_VALIDATION_FAILED"))
+
+        assertThat(repository.count()).isZero()
     }
 }

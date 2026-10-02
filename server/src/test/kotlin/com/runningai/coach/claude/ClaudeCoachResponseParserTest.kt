@@ -1,6 +1,11 @@
 package com.runningai.coach.claude
 
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.databind.SerializationFeature
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
+import com.fasterxml.jackson.module.kotlin.registerKotlinModule
+import com.runningai.coach.CoachTestFixtures
+import com.runningai.coach.WorkoutDraft
 import com.runningai.coach.AiCoachException
 import com.runningai.coach.CoachProvider
 import com.runningai.coach.CoachTestFixtures.DATE
@@ -194,5 +199,44 @@ class ClaudeCoachResponseParserTest {
     @Test
     fun `the model falls back to the envelope when none is supplied`() {
         assertThat(parser.parse(envelope(coachJson), DATE, null, 1).model).isEqualTo("claude-sonnet-5")
+    }
+
+    // ---- REST (Phase 6F.1) --------------------------------------------------------------------
+
+    private val restJson = """
+        {"assessment":{"recovery":"Athlete reports exhaustion","loadTrend":"High",
+         "selectedWorkoutType":"REST","rationale":"Take a full rest day.","warnings":["Rest fully"]},
+         "workout":{"title":"Rest Day","totalDurationMinutes":0,"segments":[]}}
+    """.trimIndent()
+
+    @Test
+    fun `a rest day with an empty segments array parses as a REST draft`() {
+        val draft = parse(envelope(restJson))
+
+        assertThat(draft.workoutType).isEqualTo("REST")
+        assertThat(draft.isRest).isTrue()
+        assertThat(draft.totalDurationMinutes).isZero()
+        assertThat(draft.segments).isEmpty()
+        assertThat(draft.assessment.rationale).isEqualTo("Take a full rest day.")
+    }
+
+    @Test
+    fun `a rest day still needs the segments array to be present`() {
+        expectInvalid(envelope(restJson.replace(",\"segments\":[]", "")), "segments")
+    }
+
+    @Test
+    fun `a REST draft round-trips through JSON without a derived flag leaking`() {
+        val mapper = ObjectMapper().registerKotlinModule().registerModule(JavaTimeModule())
+            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
+        val rest = CoachTestFixtures.restDraft()
+
+        val json = mapper.writeValueAsString(rest)
+        val back = mapper.readValue(json, WorkoutDraft::class.java)
+
+        assertThat(json).contains("\"workoutType\":\"REST\"", "\"totalDurationMinutes\":0", "\"segments\":[]")
+        assertThat(json).doesNotContain("isRest").doesNotContain("\"rest\"")
+        assertThat(back).isEqualTo(rest)
+        assertThat(back.isRest).isTrue()
     }
 }
