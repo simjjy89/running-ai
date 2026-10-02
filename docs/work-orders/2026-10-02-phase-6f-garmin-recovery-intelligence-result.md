@@ -239,5 +239,5 @@ Live eval details (`gradlew test -PliveCoachEval --tests "...LiveClaudeCoachEval
 
 ## 15. Git
 
-Commits on `main`: `90dfd5a` feat: add Garmin recovery intelligence · `8fd81d6` feat: integrate recovery context into AI coach · `2f6d459` test: add recovery aware coach evaluation · plus the docs commit recording this file. **Not pushed** — the task asked for commits and for the
-push status to be recorded, not for a push.
+Commits on `main`: `90dfd5a` feat: add Garmin recovery intelligence · `8fd81d6` feat: integrate recovery context into AI coach · `2f6d459` test: add recovery aware coach evaluation · `44309a9` docs: record Phase 6F result, plus a follow-up docs commit recording the push. **Pushed to
+`origin/main`** on the owner's request after the phase was completed.
