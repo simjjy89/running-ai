@@ -50,6 +50,16 @@ private fun JsonNode.numberOrNull(key: String, where: String): Double? {
 
 private fun JsonNode.textOrNull(key: String): String? = get(key)?.takeUnless { it.isNull }?.asText()
 
+/** An integer the source reports; a non-integral or out-of-range value fails rather than being rounded. */
+private fun JsonNode.intOrNull(key: String, where: String): Int? {
+    val v = get(key) ?: return null
+    if (v.isNull) return null
+    if (!v.canConvertToExactIntegral() || !v.canConvertToInt()) {
+        throw GarminDetailMappingException("NON_INTEGRAL_METRIC", "$where: $key is not an integer")
+    }
+    return v.intValue()
+}
+
 private fun JsonNode.isEmptyPayload() = isNull || (isContainerNode && isEmpty)
 
 /** Activity-level metrics from one activity-list item (the payload in `activity_raw`). */
@@ -132,6 +142,10 @@ class GarminLapMapper(private val objectMapper: ObjectMapper) {
             elevationGain = lap.numberOrNull("elevationGain", w),
             elevationLoss = lap.numberOrNull("elevationLoss", w),
             calories = lap.numberOrNull("calories", w),
+            // Workout structure, CONFIRMED_LIVE in 6H-1B. intensityType stays the source's own string.
+            intensityType = lap.textOrNull("intensityType"),
+            workoutIndex = lap.intOrNull("wktIndex", w),
+            workoutStepIndex = lap.intOrNull("wktStepIndex", w),
             extraMetrics = extras(lap),
         )
     }
@@ -144,6 +158,9 @@ class GarminLapMapper(private val objectMapper: ObjectMapper) {
 
     private companion object {
         const val LAPS = "lapDTOs"
+        // Keys with a column of their own. intensityType / wktIndex / wktStepIndex are deliberately NOT
+        // listed: they now have columns but are also kept in extraMetrics, because the raw lap shape is
+        // what a future mapper correction reprocesses from.
         val LAP_KEYS = setOf(
             "lapIndex", "startTimeGMT", "duration", "elapsedDuration", "movingDuration", "distance",
             "averageSpeed", "maxSpeed", "averageHR", "maxHR", "averageRunCadence", "maxRunCadence",

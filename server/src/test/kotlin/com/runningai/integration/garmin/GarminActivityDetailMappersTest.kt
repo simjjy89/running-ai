@@ -96,14 +96,33 @@ class GarminActivityDetailMappersTest {
     }
 
     @Test
-    fun `the live interval structure survives in extraMetrics, lap by lap`() {
+    fun `the live interval structure is read into first-class lap fields`() {
         val result = laps.map(fixture("detail/splits.LIVE_SHAPE.ANONYMISED.json"))
 
         // Garmin marks work and rest on the lap itself; RunningAI stores it rather than re-deriving it.
+        assertThat(result.map { it.intensityType }).containsExactly("WARMUP", "ACTIVE", "RECOVERY", "COOLDOWN")
+        // a lap is not a workout step: live steps repeat across laps and the last lap carries none
+        assertThat(result.map { it.workoutStepIndex }).containsExactly(0, 2, 3, null)
+        assertThat(result.map { it.workoutIndex }).containsExactly(0, 0, 0, null)
+        // the raw keys stay in extraMetrics too, so a future mapper correction reprocesses from them
         assertThat(result.map { it.extraMetrics?.get("intensityType")?.asText() })
             .containsExactly("WARMUP", "ACTIVE", "RECOVERY", "COOLDOWN")
-        // a lap is not a workout step: live steps repeat across laps and the last lap carries none
-        assertThat(result.map { it.extraMetrics?.get("wktStepIndex")?.asInt() }).containsExactly(0, 2, 3, null)
+    }
+
+    @Test
+    fun `an intensity type the source invents widens the data instead of breaking ingestion`() {
+        val result = laps.map(node("""{"lapDTOs":[{"lapIndex":1,"intensityType":"SOMETHING_NEW","wktStepIndex":7}]}"""))
+
+        assertThat(result.single().intensityType).isEqualTo("SOMETHING_NEW")
+        assertThat(result.single().workoutStepIndex).isEqualTo(7)
+    }
+
+    @Test
+    fun `a workout index that is not an integer fails rather than being rounded`() {
+        assertThatThrownBy { laps.map(node("""{"lapDTOs":[{"lapIndex":1,"wktStepIndex":2.5}]}""")) }
+            .isInstanceOfSatisfying(GarminDetailMappingException::class.java) {
+                assertThat(it.code).isEqualTo("NON_INTEGRAL_METRIC")
+            }
     }
 
     @Test

@@ -185,6 +185,10 @@ class ActivityLapEntity(
     @Column(name = "elevation_gain") var elevationGain: Double?,
     @Column(name = "elevation_loss") var elevationLoss: Double?,
     @Column(name = "calories") var calories: Double?,
+    // Workout structure (V15). intensity_type is a free string: the vocabulary belongs to the source.
+    @Column(name = "intensity_type", length = 32) var intensityType: String?,
+    @Column(name = "workout_index") var workoutIndex: Int?,
+    @Column(name = "workout_step_index") var workoutStepIndex: Int?,
     @JdbcTypeCode(SqlTypes.JSON) @Column(name = "extra_metrics") var extraMetrics: JsonNode?,
 ) {
     @Id
@@ -195,7 +199,8 @@ class ActivityLapEntity(
     fun toData() = LapData(
         lapIndex, startTime, durationSeconds, elapsedDurationSeconds, movingDurationSeconds, distanceMeters,
         averageSpeed, maxSpeed, averageHeartRateBpm, maxHeartRateBpm, averageCadence, maxCadence, averagePower,
-        maxPower, elevationGain, elevationLoss, calories, extraMetrics as ObjectNode?,
+        maxPower, elevationGain, elevationLoss, calories, intensityType, workoutIndex, workoutStepIndex,
+        extraMetrics as ObjectNode?,
     )
 
     companion object {
@@ -203,7 +208,7 @@ class ActivityLapEntity(
             activityId, l.lapIndex, l.startTime, l.durationSeconds, l.elapsedDurationSeconds,
             l.movingDurationSeconds, l.distanceMeters, l.averageSpeed, l.maxSpeed, l.averageHeartRateBpm,
             l.maxHeartRateBpm, l.averageCadence, l.maxCadence, l.averagePower, l.maxPower, l.elevationGain,
-            l.elevationLoss, l.calories, l.extraMetrics,
+            l.elevationLoss, l.calories, l.intensityType, l.workoutIndex, l.workoutStepIndex, l.extraMetrics,
         )
     }
 }

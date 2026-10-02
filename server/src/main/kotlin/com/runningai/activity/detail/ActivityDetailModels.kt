@@ -86,7 +86,15 @@ data class ActivityDetailData(
     val trainingEffectLabel: String? = null,
 )
 
-/** One lap / split. [extraMetrics] keeps every source field that has no column, by its source key. */
+/**
+ * One lap / split. [extraMetrics] keeps every source field that has no column, by its source key.
+ *
+ * [intensityType], [workoutIndex] and [workoutStepIndex] describe how the lap sits inside a structured
+ * workout (Phase 6H-4). [intensityType] stays a plain string on purpose: the vocabulary is the source's
+ * (live Garmin: WARMUP / ACTIVE / RECOVERY / COOLDOWN), and an unseen value must widen the data rather
+ * than break ingestion. A lap is not 1:1 with a workout step - several laps can share one step index,
+ * and a lap can carry none at all.
+ */
 data class LapData(
     val lapIndex: Int,
     val startTime: Instant? = null,
@@ -105,6 +113,9 @@ data class LapData(
     val elevationGain: Double? = null,
     val elevationLoss: Double? = null,
     val calories: Double? = null,
+    val intensityType: String? = null,
+    val workoutIndex: Int? = null,
+    val workoutStepIndex: Int? = null,
     val extraMetrics: ObjectNode? = null,
 )
 
