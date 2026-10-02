@@ -73,8 +73,17 @@ retry inside a tick (429/auth/connector-down just wait for the next tick), alrea
 nothing escapes the scheduler thread, logs carry counts/reason codes only. Tests must never enable it against a real connector.
 
 **Not implemented — do not assume it exists:** retry/backoff growth, scheduler history,
-connector process supervision, FIT/TCX/details/splits
-collection, historical backfill beyond `max-pages`. Phase 3B-3
+connector process supervision, FIT/TCX download/storage, typed splits / split summaries / weather / gear /
+exercise sets, any scheduled or batch detail collection, historical backfill beyond `max-pages`.
+
+**Detailed activity (Phase 6H-1A, STATIC_SOURCE_CONFIRMED, not live-verified):** connector
+`GET /activities/{id}/detail|splits|hr-zones|power-zones|samples` → `GarminActivityDetailSource` →
+`GarminActivityDetailIngestionService` (raw `activity_raw_payload` first, then `GarminLapMapper` /
+`GarminZoneMapper` / `GarminSampleMapper`, per-part status in `activity_detail_collection`). The connector
+creates `Garmin(retry_attempts=0)` — python-garminconnect 0.3.16 otherwise retries 5xx 3× by itself. Samples
+are resolved through each payload's `metricDescriptors`; never hard-code a metric index. Lap/zone/sample metric
+keys are PROVISIONAL until Main-PC 6H-1B; correct a mapper and run `/reprocess` rather than re-fetching.
+Contract: `docs/architecture/garmin-detailed-activity-contract-static.md`. Phase 3B-3
 (`docs/work-orders/2026-09-29-garmin-live-e2e-validation.md`) ran the full
 Connector → Spring → PostgreSQL path against one real Garmin activity twice (live
 login, live fetch, live sync, live idempotency all passed) — the main contract

@@ -72,6 +72,18 @@ RunningAI automation (which lives only on the main PC and is NOT in this repo).
   (`running-ai.draft-publishing.enabled`) = false; approve/preview work while off. No scheduler, no startup trigger, no MCP tool;
   per-draft in-JVM single-flight. `POST /api/v1/workout-publish` stays the separate legacy deterministic date-based path (both use
   the same per-date Intervals marker). Real external publish: NOT_RUN (fake/mock only so far).
+- **Detailed activity foundation** (Phase 6H-1A; `activity.detail` + `integration.garmin`, Kotlin; architecture in
+  `docs/architecture/detailed-activity-v2.md`, static contract in `docs/architecture/garmin-detailed-activity-contract-static.md`).
+  Connector `GET /activities/{id}/detail|splits|hr-zones|power-zones|samples` (raw, one Garmin request, library retries disabled:
+  `Garmin(retry_attempts=0)`; 404 → `GARMIN_NOT_FOUND`). Raw-first: `activity_raw_payload` (V11, per activity+type, own commit) →
+  pure mappers (Garmin field names end there) → `activity_detail` / `activity_lap` / `activity_zone` / `activity_sample` (V12,
+  replaced per part, `extra_metrics` keeps unknown keys) → per-part status `activity_detail_collection` (V13; COMPLETE/PARTIAL/FAILED,
+  account-level failures stop the run). `activity_detail` comes from the list item already in `activity_raw`; `get_activity` is raw-only.
+  Samples are parsed by each payload's `metricDescriptors` (never a fixed index), native sampling kept, nothing fabricated.
+  Manual only: `POST /api/v1/garmin/activities/{garminActivityId}/details` and `/reprocess` (no Garmin call). Contract is
+  STATIC_SOURCE_CONFIRMED; lap/zone/sample metric keys are PROVISIONAL (synthetic fixtures) — **not LIVE_VERIFIED until Main-PC 6H-1B**.
+  No scheduler, no historical backfill, no FIT storage, TrainingContext unchanged. `activity` identity unchanged (an
+  `activity_source` link table is planned for Intervals enrichment).
 - **Legacy publishing XOR AI Draft publishing** (Phase 6G.1, `draftpublish.PublishingModeGuard`): `WORKOUT_PUBLISHING_ENABLED` and
   `RUNNING_AI_DRAFT_PUBLISHING_ENABLED` both true → application startup fails ("Legacy workout publishing and AI draft publishing
   cannot be enabled at the same time"). Both off or exactly one on starts normally. Never weaken or bypass this guard.
