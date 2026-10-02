@@ -15,7 +15,7 @@ RunningAI automation (which lives only on the main PC and is NOT in this repo).
   renders a `StructuredWorkout` into Intervals.icu Workout Builder text; `IntervalsWorkoutPublisher` +
   `IntervalsWorkoutClient` publish it idempotently with readback verification (Phase 5C-3); no
   scheduler yet), `integration/mcp` (`publish_workout` MCP tool, off by default), `training` (derived training load, workout recommendation/prescription/intensity
-  targets). Layering: Controller → Service → Entity → Repository.
+  targets), `coach` (Kotlin AI coach, drafts, approval), `recovery`, `draftpublish` (Kotlin, Phase 6G approved-draft publish gateway). Layering: Controller → Service → Entity → Repository.
 - Implemented: Activity API, ActivityRaw JSONB storage, Garmin ingestion + incremental sync via the
   localhost Python connector (`tools/garmin-connector`; Spring never holds Garmin credentials),
   sync API and opt-in scheduler, Windows (`scripts/windows`) and Linux (`deploy/linux`) runtime
@@ -58,6 +58,20 @@ RunningAI automation (which lives only on the main PC and is NOT in this repo).
   `RecoveryContextBuilder` → `TrainingContext.recovery` for the Kotlin AI coach (Phase 6E, drafts only). Manual triggers only:
   `POST /api/v1/garmin/recovery-sync` and `/backfill` (≤28 days, sequential, no retry, stops at the first connector failure);
   read-only `GET /api/v1/recovery-context`. Spring never turns a recovery value into a training decision; the coach does.
+  Live validation: external PC `BLOCKED_BY_CORPORATE_TLS`; main PC `PENDING`.
+- **Draft approval & safe publish gateway** (Phase 6G; `coach` approval + package `draftpublish`). Lifecycle:
+  TrainingContext → ClaudeAiCoach → WorkoutDraft `DRAFT` → optional revision(s) → explicit `POST /api/v1/workout-drafts/{id}/approve`
+  (`APPROVED`, V9 `workout_draft_approval`; DB-only, at most one approved draft per athlete+date, approved drafts are immutable:
+  revision → `WORKOUT_DRAFT_APPROVED_IMMUTABLE`) → read-only `GET .../{id}/publish-preview` → explicit `POST .../{id}/publish`.
+  REST → `SKIPPED_REST_DAY`, zero renderer/publisher/client calls. Other workouts → `WorkoutDraftStructuredWorkoutMapper` (exact
+  transport mapping, repeats expanded, total re-checked) → existing `IntervalsWorkoutRenderer` → existing `IntervalsWorkoutPublisher` →
+  `PUBLISHED` (V10 `workout_draft_publication`, unique per draft, failures never stored, re-publish returns the stored result).
+  Never uses `WorkoutPublishApplicationService`/`WorkoutIntensityTargetService` (that would re-prescribe). Lossy drafts fail closed
+  (`UNPUBLISHABLE_DRAFT`): bpm heart-rate targets (renderer only has %LTHR), half ranges, treadmill speed without incline, negative
+  incline, MODERATE/HARD without pace or speed, CROSS_TRAINING/unknown types. Separate switch `RUNNING_AI_DRAFT_PUBLISHING_ENABLED`
+  (`running-ai.draft-publishing.enabled`) = false; approve/preview work while off. No scheduler, no startup trigger, no MCP tool;
+  per-draft in-JVM single-flight. `POST /api/v1/workout-publish` stays the separate legacy deterministic date-based path (both use
+  the same per-date Intervals marker: never enable both). Real external publish: NOT_RUN (fake/mock only so far).
 - Planned, not started: interval/repeat workout structure, QUALITY workout structure,
   cycling threshold profile, race pace, RPE model, reporting, remote ChatGPT ↔ MCP transport + authentication, missed-run catch-up / retry / notifications for publishing.
 - Skills with the detailed rules: `running-ai-dev` (workflow), `running-ai-database`
