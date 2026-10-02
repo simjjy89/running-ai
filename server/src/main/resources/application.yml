@@ -114,6 +114,7 @@ running-ai:
     # independent of workout-publishing above (the legacy date-based deterministic path): neither switch implies the
     # other. With it off, drafts can still be generated, revised, approved and previewed. There is no scheduler and no
     # MCP tool for it; an approved REST day is recorded as SKIPPED_REST_DAY and never sent anywhere.
+    # Legacy XOR draft (Phase 6G.1): with workout-publishing.enabled also true, startup fails (PublishingModeGuard).
     enabled: ${RUNNING_AI_DRAFT_PUBLISHING_ENABLED:false}
 
   coach:
