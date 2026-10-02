@@ -51,6 +51,13 @@ RunningAI automation (which lives only on the main PC and is NOT in this repo).
   Spring AI 2.x / Boot 4 for this), Streamable HTTP stateless on `POST /mcp`, exactly one tool `publish_workout({"date":"YYYY-MM-DD"})` that only
   calls `WorkoutPublishApplicationService` (master switch still applies). `RUNNINGAI_MCP_ENABLED` (`running-ai.mcp.enabled`) = false also switches
   the Spring AI server off (its own default is on). `/mcp` has no auth: never expose it publicly; remote ChatGPT transport is not set up.
+- **Garmin recovery intelligence** (Phase 6F; package `recovery` + `integration/garmin` + `coach`): connector `GET /recovery?date=`
+  (HRV, sleep, resting HR, Body Battery, stress; documented fields only) → `GarminRecoveryClient` → `GarminRecoveryMapper` →
+  `garmin_recovery_daily` (V7, unique athlete+date, idempotent merge: a missing metric never clears a stored one) →
+  `RecoveryBaselineService` (28-day personal baseline, ≥7 valid days else INSUFFICIENT_DATA; measurement only, no ratings) →
+  `RecoveryContextBuilder` → `TrainingContext.recovery` for the Kotlin AI coach (Phase 6E, drafts only). Manual triggers only:
+  `POST /api/v1/garmin/recovery-sync` and `/backfill` (≤28 days, sequential, no retry, stops at the first connector failure);
+  read-only `GET /api/v1/recovery-context`. Spring never turns a recovery value into a training decision; the coach does.
 - Planned, not started: interval/repeat workout structure, QUALITY workout structure,
   cycling threshold profile, race pace, RPE model, reporting, remote ChatGPT ↔ MCP transport + authentication, missed-run catch-up / retry / notifications for publishing.
 - Skills with the detailed rules: `running-ai-dev` (workflow), `running-ai-database`
