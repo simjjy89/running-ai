@@ -15,7 +15,8 @@ RunningAI automation (which lives only on the main PC and is NOT in this repo).
   renders a `StructuredWorkout` into Intervals.icu Workout Builder text; `IntervalsWorkoutPublisher` +
   `IntervalsWorkoutClient` publish it idempotently with readback verification (Phase 5C-3); no
   scheduler yet), `integration/mcp` (`publish_workout` MCP tool, off by default), `training` (derived training load, workout recommendation/prescription/intensity
-  targets), `coach` (Kotlin AI coach, drafts, approval), `recovery`, `draftpublish` (Kotlin, Phase 6G approved-draft publish gateway). Layering: Controller → Service → Entity → Repository.
+  targets), `coach` (Kotlin AI coach, drafts, approval), `recovery`, `draftpublish` (Kotlin, Phase 6G approved-draft publish gateway),
+  `analysis` (Kotlin, Phase 6H-4 running analysis engine: derived evidence only, no coaching judgment). Layering: Controller → Service → Entity → Repository.
 - Implemented: Activity API, ActivityRaw JSONB storage, Garmin ingestion + incremental sync via the
   localhost Python connector (`tools/garmin-connector`; Spring never holds Garmin credentials),
   sync API and opt-in scheduler, Windows (`scripts/windows`) and Linux (`deploy/linux`) runtime
@@ -97,6 +98,23 @@ RunningAI automation (which lives only on the main PC and is NOT in this repo).
   with no Garmin call. Live-verified: the long run went 1399/2784 DOWNSAMPLED -> 2784/2784 FULL.
   No scheduler, no historical backfill, no FIT storage, TrainingContext unchanged. `activity` identity unchanged (an
   `activity_source` link table is planned for Intervals enrichment).
+- **Running Analysis Engine** (Phase 6H-4; package `analysis`, Kotlin; `docs/architecture/running-analysis-engine.md`).
+  Derives objective evidence from **stored rows only** (no Garmin call, no Intervals call, nothing published):
+  `RunningActivityAnalysisService` -> `SessionMetricsCalculator` / `ZoneExposureCalculator` / `ThresholdExposureCalculator` /
+  `LapMetricsCalculator` / `IntervalStructureExtractor` / `IntervalMetricsCalculator` -> `ActivityAnalysisStore` ->
+  `activity_analysis` + `activity_analysis_interval_group` + `activity_analysis_interval` (V16). Manual only:
+  `POST|GET /api/v1/activities/{activityId}/analysis`; version `RUNNING_ANALYSIS_V1`, re-analysis replaces derived rows.
+  **It measures, it never judges**: no rating, score, threshold, readiness/risk number or good/bad label may enter this
+  package or its schema -- interpretation is the AI coach's. `analysis_status` (COMPLETE/PARTIAL/INSUFFICIENT_DATA) describes
+  the *data*, not the session. Rules: missing data is null, never estimated; halves split at the **elapsed-time midpoint**
+  (never by sample index, and no index fallback); no moving-time filter or speed threshold; zone percentages use the **zone
+  total**, not activity duration; LTHR exposure **integrates real sample gaps** (the last sample contributes nothing) and is
+  null without an LTHR; `speed_hr_decoupling_percent` = `(EF1-EF2)/EF1*100` where `EF = avgSpeed/avgHR` -- a
+  **RunningAI-derived descriptive metric, not Garmin's or Intervals.icu's**, with no threshold; every CV is a **population**
+  SD (divisor n); cadence metrics only for RUN/TREADMILL_RUN. Interval structure is **read, never inferred**: blocks are
+  consecutive laps sharing `intensity_type`+`workout_step_index` (V15 first-class lap columns), a group needs ACTIVE, the same
+  step >=2 times, and a RECOVERY block between occurrences -- never a speed/HR pattern. `recovery_hr_drop_bpm` is the
+  **RunningAI interval recovery HR change** (fixed 10 s windows), not Garmin's Recovery HR.
 - **Legacy publishing XOR AI Draft publishing** (Phase 6G.1, `draftpublish.PublishingModeGuard`): `WORKOUT_PUBLISHING_ENABLED` and
   `RUNNING_AI_DRAFT_PUBLISHING_ENABLED` both true → application startup fails ("Legacy workout publishing and AI draft publishing
   cannot be enabled at the same time"). Both off or exactly one on starts normally. Never weaken or bypass this guard.

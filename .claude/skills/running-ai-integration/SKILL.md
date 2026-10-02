@@ -87,8 +87,10 @@ from the stored raw payloads, never by re-fetching. Live rules that must not be 
 `directTimestamp` at index 7/5/9/2), so samples are always resolved through that payload's `metricDescriptors`;
 `directTimestamp` is a JSON **float** of epoch milliseconds; descriptor `unit.factor` is **not** a divisor
 (values already carry the stated unit — never scale them); lap `lapIndex` is **1-based** and the interval
-structure lives in `intensityType` + `wktStepIndex` (a lap is **not** 1:1 with a workout step — group by
-`wktStepIndex`); zones always arrive as 5 entries with **no upper bound** (never derive one); power zones of an
+structure lives in `intensityType` + `wktStepIndex`, now mapped to the first-class lap columns
+`intensity_type` / `workout_index` / `workout_step_index` (V15) and still kept in `extra_metrics`
+(a lap is **not** 1:1 with a workout step — group by `wktStepIndex`; `intensity_type` is a free string so an
+unseen Garmin value widens the data instead of breaking ingestion); zones always arrive as 5 entries with **no upper bound** (never derive one); power zones of an
 activity without a power meter are `[]` → part status `EMPTY`, never a failure; `/samples` **down-samples** to the requested
 `maxChartSize`, so Phase 6H-1C made `running-ai.garmin.detail.samples-max-chart-size` default to **20000** and always
 send it (sample part only; range 1..100000, outside it startup fails). That request is never treated as proof: each
