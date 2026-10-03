@@ -236,6 +236,37 @@ publisher stack `IntervalsWorkoutPublisher` → `IntervalsWorkoutClient` (interf
 - Not implemented: scheduler / automatic daily publishing (the only caller is the manual Phase 6A trigger, off by default), deletion/cancel,
   persistence of remote ids. Garmin 265 device validation (Phase 5C-4): pace target, %LTHR bpm target and treadmill cue (cue before duration/target) all DEVICE_VERIFIED; in-run gauge/alert NOT TESTED. Live validation (Phase 5C-3.5, SERVER_VERIFIED: CREATE → NO_CHANGE → UPDATE same id → NO_CHANGE, external_id round-trips) needs a real key and a safe empty date; on this PC the JVM needs `-Djavax.net.ssl.trustStoreType=Windows-ROOT`.
 
+## Intervals.icu read-only enrichment (Phase 6H-5)
+
+Live contract LIVE_VERIFIED 2026-10-03 against the real account (details and §49 record:
+`docs/work-orders/2026-10-03-phase-6h-5-intervals-enrichment-result.md`; architecture:
+`docs/architecture/intervals-enrichment.md`). Rules that must not be broken:
+
+- **Enrichment never touches the workout client.** `IntervalsReadClient` → `HttpIntervalsReadClient` is GET only and
+  declares no write method; auth + error mapping are shared with the publisher via `IntervalsHttp` (one request per
+  call, no retry, 401/403/429 stop — a `Retry-After` is recorded, never waited out automatically).
+- Live endpoints: `GET /api/v1/athlete/0/activities?oldest&newest` (array), `GET /api/v1/activity/{id}` (same object
+  shape as a list item, no extra keys), `?intervals=true` adds only `icu_intervals`+`icu_groups` (reference, not
+  normalised), `GET /api/v1/athlete/0/wellness?oldest&newest` (array, `id` = ISO date). Two live timestamp forms:
+  `start_date` ends in `Z`; `analyzed`/`updated` carry `+00:00` — parse with OffsetDateTime, not Instant.parse.
+  Rate-limit headers were absent on live 200s. A request without a User-Agent got 403 at the edge during the probe.
+- **Terminology is load-bearing**: CTL = Intervals calculated fitness, ATL = Intervals calculated fatigue; the wellness
+  `fatigue` field is subjective, is never read by the mappers and must never be mapped to ATL; `derived_form = ctl - atl`
+  is RunningAI-derived and says so (no ambiguous `fatigue` column anywhere).
+- Raw-first into `intervals_raw_payload` (ACTIVITY = matched list item keyed by the Intervals id; WELLNESS_DAY keyed by
+  the date), own committed transaction; `reprocess` endpoints re-map from storage with **zero** Intervals calls.
+- An Intervals activity is linked to the existing Garmin-based activity via `activity_source_link` (V17), never created
+  as a second Activity row. Matching: SOURCE_ID (`source=GARMIN_CONNECT`, `external_id` = Garmin id — live 5/5) →
+  EXTERNAL_ID → COMPOSITE with measured tolerances (|start| <= 30 s, |duration| <= 5 s vs `elapsed_time`,
+  |distance| <= 5 m, live-observed type pairs RUN↔Run / TREADMILL_RUN↔VirtualRun / INDOOR_CYCLING↔VirtualRide only; a
+  candidate explicitly claiming a different Garmin id is excluded; 0 candidates → UNMATCHED is normal, 2+ → AMBIGUOUS is
+  never auto-linked; an id already linked elsewhere → `INTERVALS_LINK_CONFLICT`, manual decision).
+- Normalised values live only in `activity_intervals_metrics` / `intervals_fitness_daily` — never in
+  `activity_analysis`, never in `garmin_recovery_daily`, never in `activity_sample` (Garmin stays source of truth).
+- Manual triggers only (`POST /api/v1/intervals/enrichment/...`); the fitness window is capped at 31 days because the
+  90-day backfill is a separate, not-run phase. No scheduler, no webhook. Tests replace the read client with a
+  scripted fake and pin a blank key + unreachable URL; fixtures are `LIVE_SHAPE.ANONYMISED` under `fixtures/intervals/`.
+
 ## Canonical publishing path and legacy retirement (Phase 5C-5)
 
 - `IntervalsWorkoutPublisher` is the **canonical** workout publishing path; `HttpIntervalsWorkoutClient` is the only code that

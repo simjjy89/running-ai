@@ -115,6 +115,25 @@ RunningAI automation (which lives only on the main PC and is NOT in this repo).
   consecutive laps sharing `intensity_type`+`workout_step_index` (V15 first-class lap columns), a group needs ACTIVE, the same
   step >=2 times, and a RECOVERY block between occurrences -- never a speed/HR pattern. `recovery_hr_drop_bpm` is the
   **RunningAI interval recovery HR change** (fixed 10 s windows), not Garmin's Recovery HR.
+- **Intervals.icu analysis enrichment** (Phase 6H-5; `integration.intervals` + package `enrichment`, Kotlin;
+  `docs/architecture/intervals-enrichment.md`; live contract LIVE_VERIFIED 2026-10-03 on the real account). Roles never merged:
+  Garmin = sensor truth, RunningAI analysis = own derived metrics, Intervals = training-load/fitness-model enrichment. Terminology:
+  **CTL = Intervals calculated fitness (`icu_ctl`/wellness `ctl`), ATL = Intervals calculated fatigue (`icu_atl`/`atl`);
+  wellness `fatigue` is a SUBJECTIVE field and is never mapped to ATL**; Form has no live API field → `derived_form = ctl - atl`
+  (explicitly RunningAI-derived, only when both exist). Read-only towards Intervals: `IntervalsReadClient`/`HttpIntervalsReadClient`
+  (GET only, structurally no write method, shared auth/error mapping via `IntervalsHttp`, one request per call, no retry; 429 stops).
+  Raw-first: `intervals_raw_payload` (V18; ACTIVITY / WELLNESS_DAY, own commit) → pure mappers (Intervals field names end there) →
+  `activity_intervals_metrics` (V18, 1:1: training_load, intensity, ctl/atl_after_activity) and `intervals_fitness_daily` (V18,
+  athlete+date: ctl, atl, derived_form, ramp_rate, ctl_load, atl_load). An Intervals activity never becomes a second Activity row:
+  `activity_source_link` (V17, unique external identity + activity+source, match evidence deltas) attaches the Intervals id.
+  Matching priority SOURCE_ID (`source=GARMIN_CONNECT` + `external_id`=Garmin id; live 5/5) → EXTERNAL_ID → COMPOSITE (only
+  live-observed type pairs; measured-based tolerances |start|<=30s, |duration|<=5s, |distance|<=5m; a candidate explicitly claiming a
+  different Garmin id never matches; 0→UNMATCHED normal, 2+→AMBIGUOUS never auto-linked; already-linked-elsewhere → 409
+  `INTERVALS_LINK_CONFLICT`). Manual only: `POST /api/v1/intervals/enrichment/activities/{id}` (+`/reprocess`, 0 Intervals calls),
+  `POST .../fitness?oldest&newest` (range <= 31 days; backfill is NOT this endpoint; +`/reprocess`), read-only
+  `GET /api/v1/activities/{id}/intervals`, `GET /api/v1/intervals/fitness`. No scheduler/webhook/periodic sync (Phase 7). Intervals
+  values never enter `activity_analysis`; Intervals wellness never overwrites `garmin_recovery_daily`; `activity_sample` stays
+  Garmin-only. TrainingContext unchanged (V2 = 6H-7).
 - **Legacy publishing XOR AI Draft publishing** (Phase 6G.1, `draftpublish.PublishingModeGuard`): `WORKOUT_PUBLISHING_ENABLED` and
   `RUNNING_AI_DRAFT_PUBLISHING_ENABLED` both true → application startup fails ("Legacy workout publishing and AI draft publishing
   cannot be enabled at the same time"). Both off or exactly one on starts normally. Never weaken or bypass this guard.
