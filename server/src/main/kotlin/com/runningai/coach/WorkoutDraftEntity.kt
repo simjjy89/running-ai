@@ -92,6 +92,20 @@ class WorkoutDraftEntity(
     var id: Long? = null
         private set
 
+    /** Which [com.runningai.coach.ContextVersion] built [contextSnapshot]; null for pre-6H-7 drafts. */
+    @Column(name = "context_version", length = 32)
+    var contextVersion: String? = null
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "context_snapshot")
+    var contextSnapshot: JsonNode? = null
+
+    @Column(name = "context_built_at")
+    var contextBuiltAt: Instant? = null
+
+    @Column(name = "context_sha256", length = 64)
+    var contextSha256: String? = null
+
     @CreatedDate
     @Column(name = "created_at", nullable = false, updatable = false)
     var createdAt: Instant? = null

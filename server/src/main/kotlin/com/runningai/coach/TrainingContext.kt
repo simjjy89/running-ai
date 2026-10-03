@@ -14,13 +14,13 @@ import java.time.LocalDate
  *    response body, no athlete identity. Only derived training and recovery numbers reach the model.
  */
 data class TrainingContext(
-    val date: LocalDate,
-    val athlete: AthleteThresholds,
+    override val date: LocalDate,
+    override val athlete: AthleteThresholds,
     val recentTraining: RecentTraining,
     val recovery: RecoveryContext,
     val weeklyContext: WeeklyContext,
-    val constraints: SessionConstraints,
-)
+    override val constraints: SessionConstraints,
+) : CoachTrainingContext
 
 /**
  * The athlete's current running threshold profile (Phase 6D keeps it in sync with Garmin). Both

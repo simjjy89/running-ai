@@ -21,4 +21,8 @@ public interface ActivityRepository extends JpaRepository<Activity, Long> {
      */
     List<Activity> findByAthleteIdAndStartedAtGreaterThanEqualAndStartedAtLessThan(
             Long athleteId, Instant fromInclusive, Instant toExclusive);
+
+    /** Same half-open range, newest first — for callers that need a deterministic processing order. */
+    List<Activity> findByAthleteIdAndStartedAtGreaterThanEqualAndStartedAtLessThanOrderByStartedAtDesc(
+            Long athleteId, Instant fromInclusive, Instant toExclusive);
 }

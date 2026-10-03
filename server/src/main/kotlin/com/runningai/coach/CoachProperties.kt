@@ -15,6 +15,12 @@ data class CoachProperties(
     @param:DefaultValue("CLAUDE") val provider: CoachProvider,
     @param:DefaultValue val claude: Claude,
     @param:DefaultValue val validation: Validation,
+    /**
+     * Which [CoachTrainingContext] [CoachTrainingContextBuilder] builds (Phase 6H-7). Defaults to V1
+     * for backward compatibility: V2 is activated deliberately, on this Main PC only after its live
+     * validation passes (`RUNNING_AI_TRAINING_CONTEXT_VERSION=V2`), never automatically.
+     */
+    @param:DefaultValue("V1") val contextVersion: ContextVersion = ContextVersion.V1,
 ) {
 
     data class Claude(
