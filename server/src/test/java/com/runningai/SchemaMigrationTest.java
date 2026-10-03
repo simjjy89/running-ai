@@ -9,6 +9,9 @@ import com.runningai.athlete.AthleteIntensityProfileRepository;
 import com.runningai.athlete.AthleteService;
 import com.runningai.integration.garmin.GarminSyncState;
 import com.runningai.integration.garmin.GarminSyncStateRepository;
+import com.runningai.enrichment.IntervalsPayloadType;
+import com.runningai.enrichment.IntervalsRawPayloadEntity;
+import com.runningai.enrichment.IntervalsRawPayloadRepository;
 import com.runningai.recovery.RecoveryRepository;
 import com.runningai.recovery.RecoverySnapshot;
 import jakarta.persistence.EntityManager;
@@ -62,6 +65,9 @@ class SchemaMigrationTest {
     private RecoveryRepository recoveryRepository;
 
     @Autowired
+    private IntervalsRawPayloadRepository intervalsRawPayloadRepository;
+
+    @Autowired
     private EntityManager entityManager;
 
     @Test
@@ -70,15 +76,16 @@ class SchemaMigrationTest {
 
         assertThat(applied).extracting(MigrationInfo::getVersion)
                 .extracting(Object::toString)
-                .containsExactly("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16");
+                .containsExactly("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16",
+                        "17", "18");
         assertThat(applied).extracting(MigrationInfo::getState)
                 .containsOnly(MigrationState.SUCCESS);
         assertThat(flyway.info().pending()).isEmpty();
 
         Integer historyRows = jdbcTemplate.queryForObject(
-                "select count(*) from flyway_schema_history where success = true and version in ('1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16')",
+                "select count(*) from flyway_schema_history where success = true and version in ('1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18')",
                 Integer.class);
-        assertThat(historyRows).isEqualTo(16);
+        assertThat(historyRows).isEqualTo(18);
     }
 
     @Test
@@ -91,6 +98,8 @@ class SchemaMigrationTest {
                         + "'activity_raw_payload', 'activity_detail', 'activity_lap', 'activity_zone', 'activity_sample', "
                         + "'activity_detail_collection', 'activity_analysis', 'activity_analysis_interval', "
                         + "'activity_analysis_interval_group', "
+                        + "'activity_source_link', 'intervals_raw_payload', 'activity_intervals_metrics', "
+                        + "'intervals_fitness_daily', "
                         + "'flyway_schema_history')",
                 String.class);
 
@@ -100,6 +109,8 @@ class SchemaMigrationTest {
                 "activity_raw_payload", "activity_detail", "activity_lap", "activity_zone", "activity_sample",
                 "activity_detail_collection", "activity_analysis", "activity_analysis_interval",
                 "activity_analysis_interval_group",
+                "activity_source_link", "intervals_raw_payload", "activity_intervals_metrics",
+                "intervals_fitness_daily",
                 "flyway_schema_history");
     }
 
@@ -207,6 +218,85 @@ class SchemaMigrationTest {
             recoveryRepository.save(new RecoverySnapshot(athleteId, day));
             entityManager.flush();
         }).isInstanceOfAny(DataIntegrityViolationException.class, jakarta.persistence.PersistenceException.class);
+    }
+
+    // Each of these ends its transaction on the first failing statement: on PostgreSQL a failed insert
+    // aborts the transaction, so one violation per @Transactional test (same reason as the recovery test).
+
+    private Long saveActivity(String externalId) {
+        return activityRepository.save(new Activity(
+                athleteService.getDefaultAthlete().getId(), ExternalSource.GARMIN, externalId,
+                ActivityType.RUN, Instant.parse("2026-10-01T00:00:00Z"), 1800, null, null, null)).getId();
+    }
+
+    private void insertSourceLink(Long activityId, String externalActivityId, String method) {
+        jdbcTemplate.update("insert into activity_source_link "
+                        + "(activity_id, external_source, external_activity_id, match_method, matched_at, created_at, updated_at) "
+                        + "values (?, 'INTERVALS_ICU', ?, ?, current_timestamp, current_timestamp, current_timestamp)",
+                activityId, externalActivityId, method);
+    }
+
+    @Test
+    @Transactional
+    void sourceLinkRejectsASecondClaimOnTheSameExternalActivity() {
+        insertSourceLink(saveActivity("9900000017"), "i-unique", "SOURCE_ID");
+        Long other = saveActivity("9900000018");
+
+        assertThatThrownBy(() -> insertSourceLink(other, "i-unique", "SOURCE_ID"))
+                .isInstanceOf(DataIntegrityViolationException.class);
+    }
+
+    @Test
+    @Transactional
+    void sourceLinkRejectsASecondLinkOfTheSameSourceOnOneActivity() {
+        Long activityId = saveActivity("9900000019");
+        insertSourceLink(activityId, "i-first", "SOURCE_ID");
+
+        assertThatThrownBy(() -> insertSourceLink(activityId, "i-other", "COMPOSITE"))
+                .isInstanceOf(DataIntegrityViolationException.class);
+    }
+
+    @Test
+    @Transactional
+    void sourceLinkRejectsAnUnknownMatchMethod() {
+        Long activityId = saveActivity("9900000020");
+
+        assertThatThrownBy(() -> insertSourceLink(activityId, "i-method", "GUESSED"))
+                .isInstanceOf(DataIntegrityViolationException.class);
+    }
+
+    @Test
+    @Transactional
+    void uniqueConstraintOnIntervalsRawPayloadIsEnforcedByTheDatabase() {
+        Long athleteId = athleteService.getDefaultAthlete().getId();
+        Instant fetchedAt = Instant.parse("2026-10-01T00:00:00Z");
+
+        intervalsRawPayloadRepository.save(new IntervalsRawPayloadEntity(athleteId, IntervalsPayloadType.WELLNESS_DAY,
+                "2026-10-01", null, com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode(), fetchedAt));
+        entityManager.flush();
+
+        assertThatThrownBy(() -> {
+            intervalsRawPayloadRepository.save(new IntervalsRawPayloadEntity(athleteId, IntervalsPayloadType.WELLNESS_DAY,
+                    "2026-10-01", null, com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode(), fetchedAt));
+            entityManager.flush();
+        }).isInstanceOfAny(DataIntegrityViolationException.class, jakarta.persistence.PersistenceException.class);
+    }
+
+    @Test
+    @Transactional
+    void uniqueConstraintOnIntervalsFitnessDailyIsEnforcedByTheDatabase() {
+        Long athleteId = athleteService.getDefaultAthlete().getId();
+
+        jdbcTemplate.update("insert into intervals_fitness_daily "
+                        + "(athlete_id, fitness_date, created_at, updated_at, fetched_at) "
+                        + "values (?, '2026-10-01', current_timestamp, current_timestamp, current_timestamp)",
+                athleteId);
+
+        assertThatThrownBy(() -> jdbcTemplate.update("insert into intervals_fitness_daily "
+                        + "(athlete_id, fitness_date, created_at, updated_at, fetched_at) "
+                        + "values (?, '2026-10-01', current_timestamp, current_timestamp, current_timestamp)",
+                athleteId))
+                .isInstanceOf(DataIntegrityViolationException.class);
     }
 
     @Test

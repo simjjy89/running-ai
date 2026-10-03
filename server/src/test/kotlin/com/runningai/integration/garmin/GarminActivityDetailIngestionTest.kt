@@ -109,7 +109,8 @@ class GarminActivityDetailIngestionTest {
     @AfterEach
     fun cleanUp() {
         listOf("activity_detail_collection", "activity_sample", "activity_zone", "activity_lap", "activity_detail",
-            "activity_raw_payload", "activity_raw", "activity").forEach { jdbc.update("delete from $it") }
+            "activity_raw_payload", "activity_raw", "activity_intervals_metrics", "activity_source_link",
+            "activity").forEach { jdbc.update("delete from $it") }
     }
 
     @Test
