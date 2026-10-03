@@ -106,6 +106,16 @@ running-ai:
     connect-timeout: 3s
     read-timeout: 15s
 
+  historical-backfill:
+    # Manual 90-day historical backfill (Phase 6H-6, POST /api/v1/historical-backfill). No scheduler, no
+    # auto-resume. activity-delay sits between two activities whose detail is actually fetched from
+    # Garmin; the discovery caps PAUSE the run (BACKFILL_DISCOVERY_LIMIT_EXCEEDED) instead of silently
+    # truncating it. Recovery days reuse running-ai.garmin.recovery-sync.backfill-delay.
+    page-size: 100
+    max-pages: 20
+    max-activities: 500
+    activity-delay: ${HISTORICAL_BACKFILL_ACTIVITY_DELAY:2s}
+
   workout-publishing:
     # Manual workout publish trigger (WorkoutPublishApplicationService, POST /api/v1/workout-publish). OFF by default:
     # do not enable while the legacy main-PC workout publisher is still active (two writers on one calendar).
