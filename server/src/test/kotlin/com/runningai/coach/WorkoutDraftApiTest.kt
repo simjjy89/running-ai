@@ -95,7 +95,7 @@ class WorkoutDraftApiTest {
 
         generate("""{"date":"2026-10-02"}""").andExpect(status().isOk)
 
-        val recovery = coach.createdContexts.single().recovery
+        val recovery = (coach.createdContexts.single() as TrainingContext).recovery
         assertThat(recovery.hrv!!.lastNightAvgMs.current).isEqualTo(42.0)
         assertThat(recovery.hrv!!.lastNightAvgMs.differencePercent).isEqualTo(-16.0)
         // no RHR today: yesterday's reading is passed with its age, not today's guess
@@ -110,7 +110,7 @@ class WorkoutDraftApiTest {
     fun `the coach is told recovery is unknown when nothing is stored`() {
         generate("""{"date":"2026-10-02"}""").andExpect(status().isOk)
 
-        assertThat(coach.createdContexts.single().recovery.anyAvailable).isFalse()
+        assertThat((coach.createdContexts.single() as TrainingContext).recovery.anyAvailable).isFalse()
     }
 
     @Test
@@ -325,7 +325,8 @@ class WorkoutDraftApiTest {
 
     /** Scripts the fake coach and runs the real validator on its answer, as ClaudeAiCoach does. */
     private fun coachAnswers(block: (TrainingContext) -> WorkoutDraft) =
-        coach.respondWith { ctx ->
+        coach.respondWith { rawCtx ->
+            val ctx = rawCtx as TrainingContext
             block(ctx).also {
                 try {
                     validator.validate(it, ctx.date, ctx.athlete)

@@ -229,16 +229,16 @@ object CoachTestFixtures {
  * what keeps `gradlew test` free of live Claude calls.
  */
 class FakeAiCoach(
-    private var nextDraft: (TrainingContext) -> WorkoutDraft = { CoachTestFixtures.draft(date = it.date) },
+    private var nextDraft: (CoachTrainingContext) -> WorkoutDraft = { CoachTestFixtures.draft(date = it.date) },
 ) : AiCoach {
 
     var failWith: RuntimeException? = null
-    val createdContexts = mutableListOf<TrainingContext>()
-    val revisedContexts = mutableListOf<TrainingContext>()
+    val createdContexts = mutableListOf<CoachTrainingContext>()
+    val revisedContexts = mutableListOf<CoachTrainingContext>()
     val revisionRequests = mutableListOf<String>()
     val revisedDrafts = mutableListOf<WorkoutDraft>()
 
-    fun respondWith(block: (TrainingContext) -> WorkoutDraft) {
+    fun respondWith(block: (CoachTrainingContext) -> WorkoutDraft) {
         nextDraft = block
     }
 
@@ -255,14 +255,14 @@ class FakeAiCoach(
         revisedDrafts.clear()
     }
 
-    override fun createWorkout(context: TrainingContext): WorkoutDraft {
+    override fun createWorkout(context: CoachTrainingContext): WorkoutDraft {
         createdContexts += context
         failWith?.let { throw it }
         return nextDraft(context)
     }
 
     override fun reviseWorkout(
-        context: TrainingContext,
+        context: CoachTrainingContext,
         currentDraft: WorkoutDraft,
         userRequest: String,
     ): WorkoutDraft {

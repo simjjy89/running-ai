@@ -44,12 +44,12 @@ class CoachJavaInteropTest {
     void javaCanImplementTheKotlinAiCoachInterface() {
         AiCoach coach = new AiCoach() {
             @Override
-            public WorkoutDraft createWorkout(TrainingContext context) {
+            public WorkoutDraft createWorkout(CoachTrainingContext context) {
                 return stub(context.getDate(), 1);
             }
 
             @Override
-            public WorkoutDraft reviseWorkout(TrainingContext context, WorkoutDraft currentDraft, String userRequest) {
+            public WorkoutDraft reviseWorkout(CoachTrainingContext context, WorkoutDraft currentDraft, String userRequest) {
                 return stub(context.getDate(), currentDraft.getVersion() + 1);
             }
 

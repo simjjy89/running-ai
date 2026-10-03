@@ -123,6 +123,10 @@ class CoachArchitectureTest {
             RecoveryContextBuilder::class.java,
             RecoveryContextController::class.java,
             WorkoutDraftValidator::class.java,
+            CoachTrainingContextBuilder::class.java,
+            TrainingContextV2Builder::class.java,
+            CoachContextSerializer::class.java,
+            TrainingContextPreviewController::class.java,
         ).flatMap { it.constructors.toList() }
 
         val dependencyNames = constructors
