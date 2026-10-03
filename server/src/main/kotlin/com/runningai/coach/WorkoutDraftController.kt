@@ -3,6 +3,7 @@ package com.runningai.coach
 import com.fasterxml.jackson.annotation.JsonInclude
 import com.runningai.common.exception.ErrorResponse
 import com.runningai.training.IntensityClass
+import com.runningai.training.PrimaryTargetType
 import com.runningai.training.SegmentType
 import jakarta.validation.Valid
 import jakarta.validation.constraints.NotBlank
@@ -166,25 +167,61 @@ data class SegmentResponse(
     val durationMinutes: Int,
     val intensity: IntensityClass,
     val description: String?,
+    val primaryTargetType: PrimaryTargetType?,
     val paceSecondsPerKmFast: Int?,
     val paceSecondsPerKmSlow: Int?,
     val heartRateBpmMin: Int?,
     val heartRateBpmMax: Int?,
+    val heartRatePercentLthrMin: Int?,
+    val heartRatePercentLthrMax: Int?,
     val treadmillSpeedKphMin: Double?,
     val treadmillSpeedKphMax: Double?,
     val inclinePercentMin: Double?,
     val inclinePercentMax: Double?,
     val repetitions: Int?,
     val recoveryDurationMinutes: Int?,
+    val recovery: RecoveryResponse?,
 ) {
     companion object {
         fun of(s: WorkoutDraftSegment) = SegmentResponse(
-            s.type, s.durationMinutes, s.intensity, s.description,
+            s.type, s.durationMinutes, s.intensity, s.description, s.primaryTargetType,
             s.paceSecondsPerKmFast, s.paceSecondsPerKmSlow,
             s.heartRateBpmMin, s.heartRateBpmMax,
+            s.heartRatePercentLthrMin, s.heartRatePercentLthrMax,
             s.treadmillSpeedKphMin, s.treadmillSpeedKphMax,
             s.inclinePercentMin, s.inclinePercentMax,
             s.repetitions, s.recoveryDurationMinutes,
+            s.recovery?.let(RecoveryResponse::of),
+        )
+    }
+}
+
+/**
+ * What the athlete will see Garmin do during a repeat block's recovery (Phase 6H-7.1) - shown so
+ * approval happens with the device target visible, not just the work steps.
+ */
+@JsonInclude(JsonInclude.Include.ALWAYS)
+data class RecoveryResponse(
+    val durationMinutes: Int,
+    val intensity: IntensityClass,
+    val description: String?,
+    val primaryTargetType: PrimaryTargetType,
+    val paceSecondsPerKmFast: Int?,
+    val paceSecondsPerKmSlow: Int?,
+    val heartRatePercentLthrMin: Int?,
+    val heartRatePercentLthrMax: Int?,
+    val treadmillSpeedKphMin: Double?,
+    val treadmillSpeedKphMax: Double?,
+    val inclinePercentMin: Double?,
+    val inclinePercentMax: Double?,
+) {
+    companion object {
+        fun of(r: WorkoutDraftRecovery) = RecoveryResponse(
+            r.durationMinutes, r.intensity, r.description, r.primaryTargetType,
+            r.paceSecondsPerKmFast, r.paceSecondsPerKmSlow,
+            r.heartRatePercentLthrMin, r.heartRatePercentLthrMax,
+            r.treadmillSpeedKphMin, r.treadmillSpeedKphMax,
+            r.inclinePercentMin, r.inclinePercentMax,
         )
     }
 }

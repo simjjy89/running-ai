@@ -6,8 +6,10 @@ import com.runningai.coach.AiCoachException
 import com.runningai.coach.CoachAssessment
 import com.runningai.coach.CoachProvider
 import com.runningai.coach.WorkoutDraft
+import com.runningai.coach.WorkoutDraftRecovery
 import com.runningai.coach.WorkoutDraftSegment
 import com.runningai.training.IntensityClass
+import com.runningai.training.PrimaryTargetType
 import com.runningai.training.SegmentType
 import org.springframework.stereotype.Component
 import java.time.LocalDate
@@ -150,17 +152,55 @@ class ClaudeCoachResponseParser(private val objectMapper: ObjectMapper) {
             durationMinutes = requireInt(node, "durationMinutes", at),
             intensity = enumValue<IntensityClass>(requireText(node, "intensity", at), at, "intensity"),
             description = optionalText(node, "description"),
+            primaryTargetType = optionalEnum<PrimaryTargetType>(node, "primaryTargetType", at),
             paceSecondsPerKmFast = optionalInt(node, "paceSecondsPerKmFast", at),
             paceSecondsPerKmSlow = optionalInt(node, "paceSecondsPerKmSlow", at),
             heartRateBpmMin = optionalInt(node, "heartRateBpmMin", at),
             heartRateBpmMax = optionalInt(node, "heartRateBpmMax", at),
+            heartRatePercentLthrMin = optionalInt(node, "heartRatePercentLthrMin", at),
+            heartRatePercentLthrMax = optionalInt(node, "heartRatePercentLthrMax", at),
             treadmillSpeedKphMin = optionalDouble(node, "treadmillSpeedKphMin", at),
             treadmillSpeedKphMax = optionalDouble(node, "treadmillSpeedKphMax", at),
             inclinePercentMin = optionalDouble(node, "inclinePercentMin", at),
             inclinePercentMax = optionalDouble(node, "inclinePercentMax", at),
             repetitions = optionalInt(node, "repetitions", at),
             recoveryDurationMinutes = optionalInt(node, "recoveryDurationMinutes", at),
+            recovery = optionalRecovery(node, at),
         )
+    }
+
+    /**
+     * `recovery` is a nested object with the same target shape as a segment, minus the repeat/duration
+     * fields that only make sense once ([repetitions], [recoveryDurationMinutes]). Absent entirely is
+     * normal (a non-repeated segment, or a legacy `recoveryDurationMinutes`-only response); present but
+     * malformed is a hard parse failure, same policy as every other field here.
+     */
+    private fun optionalRecovery(node: JsonNode, at: String): WorkoutDraftRecovery? {
+        val r = node.get("recovery") ?: return null
+        if (r.isNull) return null
+        if (!r.isObject) throw invalid("$at.recovery is not an object")
+        val rAt = "$at.recovery"
+        return WorkoutDraftRecovery(
+            durationMinutes = requireInt(r, "durationMinutes", rAt),
+            intensity = enumValue<IntensityClass>(requireText(r, "intensity", rAt), rAt, "intensity"),
+            primaryTargetType = enumValue<PrimaryTargetType>(requireText(r, "primaryTargetType", rAt), rAt, "primaryTargetType"),
+            description = optionalText(r, "description"),
+            paceSecondsPerKmFast = optionalInt(r, "paceSecondsPerKmFast", rAt),
+            paceSecondsPerKmSlow = optionalInt(r, "paceSecondsPerKmSlow", rAt),
+            heartRatePercentLthrMin = optionalInt(r, "heartRatePercentLthrMin", rAt),
+            heartRatePercentLthrMax = optionalInt(r, "heartRatePercentLthrMax", rAt),
+            treadmillSpeedKphMin = optionalDouble(r, "treadmillSpeedKphMin", rAt),
+            treadmillSpeedKphMax = optionalDouble(r, "treadmillSpeedKphMax", rAt),
+            inclinePercentMin = optionalDouble(r, "inclinePercentMin", rAt),
+            inclinePercentMax = optionalDouble(r, "inclinePercentMax", rAt),
+        )
+    }
+
+    private inline fun <reified E : Enum<E>> optionalEnum(node: JsonNode, field: String, at: String): E? {
+        val n = node.get(field) ?: return null
+        if (n.isNull) return null
+        if (!n.isTextual) throw invalid("$at.$field is not a string")
+        return enumValue<E>(n.asText(), at, field)
     }
 
     private inline fun <reified E : Enum<E>> enumValue(raw: String, at: String, field: String): E =

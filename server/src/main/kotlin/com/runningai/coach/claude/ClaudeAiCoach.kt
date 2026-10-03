@@ -54,7 +54,7 @@ class ClaudeAiCoach(
         val draft = parser.parse(result.stdout, context.date, properties.claude.model, version)
 
         try {
-            validator.validate(draft, context.date, context.athlete)
+            validator.validate(draft, context)
         } catch (e: WorkoutDraftValidationException) {
             log.warn("AI coach {} rejected by validation: violations={}", what, e.violations)
             throw AiCoachException(

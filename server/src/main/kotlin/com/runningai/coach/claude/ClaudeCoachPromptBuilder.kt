@@ -40,6 +40,7 @@ class ClaudeCoachPromptBuilder {
         appendLine(snapshot(context))
         appendLine()
         appendLine(RESPONSE_CONTRACT)
+        targetGuidance(context)?.let { appendLine(); appendLine(it) }
     }
 
     /** The "the athlete asked for a change, design it again" message. */
@@ -61,6 +62,7 @@ class ClaudeCoachPromptBuilder {
             appendLine(snapshot(context))
             appendLine()
             appendLine(RESPONSE_CONTRACT)
+            targetGuidance(context)?.let { appendLine(); appendLine(it) }
         }
 
     /** The deterministic JSON snapshot handed to the model, for either context shape. */
@@ -71,6 +73,20 @@ class ClaudeCoachPromptBuilder {
             "Intervals.icu training model, Garmin recovery)"
         is TrainingContext -> "TRAINING CONTEXT"
         else -> "TRAINING CONTEXT"
+    }
+
+    /**
+     * V2-only device-target guidance (Phase 6H-7.1): `null` for V1, so V1's existing behaviour and
+     * every V1 eval scenario are unaffected. Only emitted when the athlete actually has a threshold
+     * to derive a target from - with neither on file, `QUALITATIVE` stays the right answer and no
+     * guidance about which one to use is relevant.
+     */
+    private fun targetGuidance(context: CoachTrainingContext): String? {
+        if (context !is TrainingContextV2) return null
+        val hasLthr = context.athlete.lactateThresholdHeartRateBpm != null
+        val hasPace = context.athlete.lactateThresholdPaceSecondsPerKm != null
+        if (!hasLthr && !hasPace) return null
+        return TARGET_GUIDANCE
     }
 
     /** Trimmed view of a previous draft: the workout and its reasoning, no storage/identity fields. */
@@ -193,16 +209,24 @@ class ClaudeCoachPromptBuilder {
                     "durationMinutes": 10,
                     "intensity": "NONE | VERY_EASY | EASY | MODERATE | HARD",
                     "description": "optional one-line instruction",
+                    "primaryTargetType": "PACE | HEART_RATE | QUALITATIVE | NONE, optional",
                     "paceSecondsPerKmFast": 330,
                     "paceSecondsPerKmSlow": 360,
-                    "heartRateBpmMin": 135,
-                    "heartRateBpmMax": 150,
+                    "heartRatePercentLthrMin": 65,
+                    "heartRatePercentLthrMax": 78,
                     "treadmillSpeedKphMin": 9.5,
                     "treadmillSpeedKphMax": 10.5,
                     "inclinePercentMin": 0.5,
                     "inclinePercentMax": 1.0,
                     "repetitions": 5,
-                    "recoveryDurationMinutes": 2
+                    "recovery": {
+                      "durationMinutes": 2,
+                      "intensity": "VERY_EASY",
+                      "primaryTargetType": "HEART_RATE | PACE | NONE | QUALITATIVE",
+                      "description": "optional one-line instruction",
+                      "heartRatePercentLthrMin": 65,
+                      "heartRatePercentLthrMax": 75
+                    }
                   }
                 ]
               }
@@ -210,12 +234,29 @@ class ClaudeCoachPromptBuilder {
 
             Rules the response must satisfy:
             - Pace is SECONDS PER KILOMETRE, so the "fast" value is the SMALLER number.
+            - Heart-rate targets are given as a whole-percent range of the athlete's LTHR
+              ("heartRatePercentLthrMin"/"heartRatePercentLthrMax"), never as absolute bpm: an
+              absolute-bpm target cannot be published and is refused rather than converted, because
+              converting it would depend on whatever LTHR is on file at publish time rather than on
+              what was actually approved. Do not emit "heartRateBpmMin"/"heartRateBpmMax".
             - Every target field is optional: omit it or use null when you are not prescribing it.
-              Omit pace and heart-rate targets entirely if the athlete has no measured threshold.
-              Omit treadmill speed and incline unless the session is on a treadmill.
-            - "repetitions" and "recoveryDurationMinutes" describe an interval block. When used,
-              "durationMinutes" is the work duration of ONE repetition, and the block contributes
-              repetitions * (durationMinutes + recoveryDurationMinutes) minutes to the total.
+              Omit pace and heart-rate targets entirely if the athlete has no measured threshold for
+              that kind of target. Omit treadmill speed and incline unless the session is on a
+              treadmill.
+            - "primaryTargetType" says which single target is the one Garmin should show for this
+              step. Set it to "PACE" only together with a complete pace pair, "HEART_RATE" only
+              together with a complete %LTHR pair, never both a pace pair and a %LTHR pair on the
+              same step. "QUALITATIVE" or "NONE" means no numeric target on this step - then omit
+              both pairs. Leaving "primaryTargetType" out entirely is also fine (older behaviour:
+              a pace pair present is read as PACE, otherwise the step is qualitative).
+            - "repetitions" describes an interval block repeated that many times. Give its recovery
+              with the nested "recovery" object (preferred - it carries its own intensity and
+              target) rather than a bare recovery duration. "durationMinutes" is the work duration of
+              ONE repetition, and the block contributes
+              repetitions * (durationMinutes + recovery.durationMinutes) minutes to the total.
+              "recovery.primaryTargetType" follows the same rule as a segment's: use "NONE" only when
+              you deliberately mean passive rest (standing/walking), not as a shortcut for "I did not
+              think about it" - an easy jog recovery should carry its own %LTHR or pace target.
             - "totalDurationMinutes" MUST equal the sum of every segment's contribution computed
               that way. Check this before answering.
             - Use only the enum values listed above, spelled exactly as shown.
@@ -224,6 +265,28 @@ class ClaudeCoachPromptBuilder {
               invent walking, mobility, recovery or warm-up segments to fill it; put any optional
               advice (for example light mobility) in the rationale or warnings instead.
               Every other workout type needs at least one segment and a positive total.
+        """.trimIndent()
+
+        /**
+         * V2-only (Phase 6H-7.1): appended after [RESPONSE_CONTRACT] when the athlete has a
+         * measured threshold the V2 context can see. The 65-78% / 75-85% LTHR figures are
+         * RunningAI's own existing deterministic VERY_EASY/EASY bands
+         * (`RunningIntensityTargetPolicy`), repeated here only so this guidance agrees with that
+         * code rather than inventing a parallel zone scheme.
+         */
+        val TARGET_GUIDANCE = """
+            DEVICE TARGET COMPLETENESS (this athlete has a measured threshold on file):
+            - Give every warm-up, main and cool-down step - and every repeat block's recovery, unless
+              you deliberately intend passive rest - a real device target: a pace pair when the
+              athlete's threshold pace is known, a %LTHR pair when LTHR is known, or either when both
+              are known (pick one per step; never emit both).
+            - Prefer %LTHR for warm-up, cool-down and easy-effort recovery. RunningAI's own easy-pace
+              heuristic uses roughly 65-78% LTHR for very easy effort and 75-85% LTHR for easy effort;
+              use these as a starting reference, not a rule to copy verbatim - judge the actual session.
+            - For a quality main effort (threshold/interval/tempo), choose whichever of pace or %LTHR
+              better expresses the training purpose; both are valid, but express it as exactly one.
+            - Never invent a threshold that is not in the context. If neither LTHR nor threshold pace
+              is present, this guidance does not apply - "QUALITATIVE" is the right answer, as before.
         """.trimIndent()
     }
 }
