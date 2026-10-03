@@ -3,7 +3,7 @@ package com.runningai.coach.claude
 import com.runningai.coach.AiCoach
 import com.runningai.coach.AiCoachException
 import com.runningai.coach.CoachProperties
-import com.runningai.coach.TrainingContext
+import com.runningai.coach.CoachTrainingContext
 import com.runningai.coach.WorkoutDraft
 import com.runningai.coach.WorkoutDraftValidationException
 import com.runningai.coach.WorkoutDraftValidator
@@ -29,11 +29,11 @@ class ClaudeAiCoach(
 
     private val log = LoggerFactory.getLogger(ClaudeAiCoach::class.java)
 
-    override fun createWorkout(context: TrainingContext): WorkoutDraft =
+    override fun createWorkout(context: CoachTrainingContext): WorkoutDraft =
         ask(context, promptBuilder.createPrompt(context), version = 1, what = "create")
 
     override fun reviseWorkout(
-        context: TrainingContext,
+        context: CoachTrainingContext,
         currentDraft: WorkoutDraft,
         userRequest: String,
     ): WorkoutDraft {
@@ -46,7 +46,7 @@ class ClaudeAiCoach(
         ).copy(draftGroupId = currentDraft.draftGroupId)
     }
 
-    private fun ask(context: TrainingContext, prompt: String, version: Int, what: String): WorkoutDraft {
+    private fun ask(context: CoachTrainingContext, prompt: String, version: Int, what: String): WorkoutDraft {
         // Date and version only: the prompt, the context and the response body are never logged.
         log.info("AI coach {} requested: provider=CLAUDE date={} version={}", what, context.date, version)
 

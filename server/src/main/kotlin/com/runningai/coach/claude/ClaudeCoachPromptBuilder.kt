@@ -4,7 +4,9 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.databind.SerializationFeature
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
+import com.runningai.coach.CoachTrainingContext
 import com.runningai.coach.TrainingContext
+import com.runningai.coach.TrainingContextV2
 import com.runningai.coach.WorkoutDraft
 import org.springframework.stereotype.Component
 
@@ -30,18 +32,18 @@ class ClaudeCoachPromptBuilder {
 
     fun systemPrompt(): String = SYSTEM_PROMPT
 
-    /** The initial "design today's session" message. */
-    fun createPrompt(context: TrainingContext): String = buildString {
+    /** The initial "design today's session" message. Dispatches on the context shape (V1 or V2). */
+    fun createPrompt(context: CoachTrainingContext): String = buildString {
         appendLine("Design this athlete's training session for ${context.date}.")
         appendLine()
-        appendLine("TRAINING CONTEXT (authoritative; a null value means the data is genuinely unavailable):")
+        appendLine(contextLabel(context) + " (authoritative; a null value means the data is genuinely unavailable):")
         appendLine(snapshot(context))
         appendLine()
         appendLine(RESPONSE_CONTRACT)
     }
 
     /** The "the athlete asked for a change, design it again" message. */
-    fun revisePrompt(context: TrainingContext, currentDraft: WorkoutDraft, userRequest: String): String =
+    fun revisePrompt(context: CoachTrainingContext, currentDraft: WorkoutDraft, userRequest: String): String =
         buildString {
             appendLine("You previously designed the session below for this athlete on ${context.date}.")
             appendLine("The athlete has now asked for a change. Design the session again, taking their")
@@ -55,14 +57,21 @@ class ClaudeCoachPromptBuilder {
             appendLine("YOUR PREVIOUS WORKOUT (version ${currentDraft.version}):")
             appendLine(mapper.writeValueAsString(PreviousWorkout.of(currentDraft)))
             appendLine()
-            appendLine("TRAINING CONTEXT (unchanged; a null value means the data is genuinely unavailable):")
+            appendLine(contextLabel(context) + " (unchanged; a null value means the data is genuinely unavailable):")
             appendLine(snapshot(context))
             appendLine()
             appendLine(RESPONSE_CONTRACT)
         }
 
-    /** The deterministic JSON snapshot handed to the model. */
-    fun snapshot(context: TrainingContext): String = mapper.writeValueAsString(context)
+    /** The deterministic JSON snapshot handed to the model, for either context shape. */
+    fun snapshot(context: CoachTrainingContext): String = mapper.writeValueAsString(context)
+
+    private fun contextLabel(context: CoachTrainingContext): String = when (context) {
+        is TrainingContextV2 -> "TRAINING CONTEXT V2 (evidence: Garmin detail, RunningAI Analysis, " +
+            "Intervals.icu training model, Garmin recovery)"
+        is TrainingContext -> "TRAINING CONTEXT"
+        else -> "TRAINING CONTEXT"
+    }
 
     /** Trimmed view of a previous draft: the workout and its reasoning, no storage/identity fields. */
     private data class PreviousWorkout(
@@ -124,11 +133,30 @@ class ClaudeCoachPromptBuilder {
               different directions. Weigh them as a coach would and explain the call you made.
               Normal-looking wearable numbers never override reported pain, illness or fatigue.
 
+            Provenance, when the context separates it by source (TRAINING CONTEXT V2):
+            - GARMIN: the device/source measurement itself (activity facts, recovery readings).
+            - RUNNING_AI (labelled 'runningAiAnalysis'): RunningAI's own deterministic evidence
+              computed from stored Garmin data — for example 'speedHrDecouplingPercent' is a
+              RunningAI-derived descriptive metric, not a Garmin or Intervals.icu official score.
+            - INTERVALS: Intervals.icu's own external training-model enrichment. 'ctl' is Intervals'
+              calculated fitness, 'atl' is its calculated fatigue, and 'derivedForm' (ctl - atl) is
+              explicitly RunningAI-derived from those two Intervals numbers, not a source field.
+              No source outranks another by default: weigh each for what it actually measures.
+            - 'dataCoverage' reports how much evidence exists as plain counts, not a quality verdict.
+              A wide history window with a small activity count is a small amount of evidence over
+              a long window, not a dense training history — read the counts, do not assume density.
+
             How to handle missing and sensitive information:
             - A null value means the data genuinely does not exist. Treat it as unknown. Never
               estimate, assume or invent a recovery metric, a threshold, or a past session that is
               not in the context you were given, and never let a missing metric read as a good one.
-              Only cite recovery numbers that appear in the context.
+              Only cite recovery numbers that appear in the context. The absence of a stored activity
+              or recovery reading is not proof that nothing happened that day or that recovery was
+              poor — it only means RunningAI has no record of it.
+            - When a recent activity's 'dataQuality.sampleCompleteness' is 'FULL', its sample-derived
+              evidence (half-split, decoupling, threshold-exposure seconds) rests on the complete
+              stored stream. 'DOWNSAMPLED' or 'UNKNOWN' means treat that activity's sample-derived
+              numbers as less certain than a FULL one, without discarding them outright.
             - If recovery data is entirely unavailable, say so plainly in your recovery assessment
               and design conservatively rather than optimistically. If only some metrics are
               missing, name what you based the assessment on and what was unavailable.

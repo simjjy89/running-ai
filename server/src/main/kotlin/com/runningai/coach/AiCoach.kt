@@ -11,7 +11,7 @@ package com.runningai.coach
 interface AiCoach {
 
     /** Designs today's workout from [context] alone. */
-    fun createWorkout(context: TrainingContext): WorkoutDraft
+    fun createWorkout(context: CoachTrainingContext): WorkoutDraft
 
     /**
      * Redesigns the workout after the athlete asked for a change in their own words.
@@ -21,7 +21,7 @@ interface AiCoach {
      * patch a duration or an intensity instead of calling this.
      */
     fun reviseWorkout(
-        context: TrainingContext,
+        context: CoachTrainingContext,
         currentDraft: WorkoutDraft,
         userRequest: String,
     ): WorkoutDraft

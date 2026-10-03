@@ -213,6 +213,10 @@ class WorkoutDraftExceptionHandler {
     fun dateAlreadyApproved(e: WorkoutDateAlreadyApprovedException): ResponseEntity<ErrorResponse> =
         body(HttpStatus.CONFLICT, "WORKOUT_DATE_ALREADY_APPROVED", e.message)
 
+    @ExceptionHandler(TrainingContextTooLargeException::class)
+    fun contextTooLarge(e: TrainingContextTooLargeException): ResponseEntity<ErrorResponse> =
+        body(HttpStatus.INTERNAL_SERVER_ERROR, "TRAINING_CONTEXT_TOO_LARGE", e.message)
+
     @ExceptionHandler(AiCoachException::class)
     fun coach(e: AiCoachException): ResponseEntity<ErrorResponse> {
         val status = when (e.reason) {

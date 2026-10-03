@@ -44,9 +44,13 @@ class WorkoutDraftStore(
      * Inserts [draft] as the current version of [draftGroupId] and, when [supersede] is given,
      * marks that earlier row [WorkoutDraftStatus.SUPERSEDED] in the same transaction — so a draft
      * group can never end up with two current versions or lose its predecessor.
+     *
+     * [context] records which [CoachTrainingContext] this draft was actually built from (Phase
+     * 6H-7); `null` only for call sites that predate or deliberately skip that audit trail (every
+     * production path through [WorkoutDraftService] always passes one).
      */
     @Transactional
-    fun save(draft: WorkoutDraft, draftGroupId: String, supersede: Long?): WorkoutDraft {
+    fun save(draft: WorkoutDraft, draftGroupId: String, supersede: Long?, context: ContextSnapshot? = null): WorkoutDraft {
         supersede?.let { previousId ->
             // Compare-and-set, not read-modify-write: the AI call between loadForRevision and here
             // takes seconds, and the draft may have been approved (or revised) meanwhile. An
@@ -76,6 +80,12 @@ class WorkoutDraftStore(
             provider = draft.provider,
             model = draft.model,
         )
+        context?.let {
+            entity.contextVersion = it.version.name
+            entity.contextSnapshot = objectMapper.readTree(it.json)
+            entity.contextBuiltAt = it.builtAt
+            entity.contextSha256 = it.sha256
+        }
         val saved = repository.save(entity)
         log.info(
             "Workout draft saved: id={} group={} version={} date={} type={} status=DRAFT",
@@ -152,16 +162,20 @@ class WorkoutDraftStore(
 @Service
 class WorkoutDraftService(
     private val coach: AiCoach,
-    private val contextBuilder: TrainingContextBuilder,
+    private val contextBuilder: CoachTrainingContextBuilder,
+    private val serializer: CoachContextSerializer,
     private val store: WorkoutDraftStore,
+    private val clock: java.time.Clock,
 ) {
 
     fun today(): LocalDate = contextBuilder.today()
 
     fun generate(date: LocalDate, constraints: SessionConstraints): WorkoutDraft {
         val context = contextBuilder.build(date, constraints)
+        // Serialized and size-guarded BEFORE the coach call: an oversized context never reaches Claude.
+        val snapshot = serializer.snapshot(context, java.time.Instant.now(clock))
         val designed = coach.createWorkout(context)
-        return store.save(designed, UUID.randomUUID().toString(), supersede = null)
+        return store.save(designed, UUID.randomUUID().toString(), supersede = null, context = snapshot)
     }
 
     fun get(id: Long): WorkoutDraft = store.get(id)
@@ -169,7 +183,8 @@ class WorkoutDraftService(
     fun revise(id: Long, userRequest: String, constraints: SessionConstraints? = null): WorkoutDraft {
         val current = store.loadForRevision(id)
         val context = contextBuilder.build(current.date, constraints ?: SessionConstraints())
+        val snapshot = serializer.snapshot(context, java.time.Instant.now(clock))
         val revised = coach.reviseWorkout(context, current, userRequest)
-        return store.save(revised, requireNotNull(current.draftGroupId), supersede = current.id)
+        return store.save(revised, requireNotNull(current.draftGroupId), supersede = current.id, context = snapshot)
     }
 }
