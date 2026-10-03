@@ -142,6 +142,13 @@ running-ai:
     # Holds no credential: the Claude provider uses the Claude Code CLI's own login session on
     # this host (no ANTHROPIC_API_KEY is read, stored or forwarded anywhere).
     provider: ${RUNNING_AI_COACH_PROVIDER:CLAUDE}
+    # Which CoachTrainingContext CoachTrainingContextBuilder builds (Phase 6H-7). V1 is the source
+    # default everywhere; the Main PC sets this to V2 only after its live validation passes.
+    context-version: ${RUNNING_AI_TRAINING_CONTEXT_VERSION:V1}
+    context-v2:
+      max-recent-activities: ${RUNNING_AI_COACH_CONTEXT_V2_MAX_RECENT_ACTIVITIES:8}
+      max-interval-groups-per-activity: ${RUNNING_AI_COACH_CONTEXT_V2_MAX_INTERVAL_GROUPS:3}
+      max-snapshot-bytes: ${RUNNING_AI_COACH_CONTEXT_V2_MAX_SNAPSHOT_BYTES:65536}
     claude:
       command: ${RUNNING_AI_COACH_CLAUDE_COMMAND:claude}
       model: ${RUNNING_AI_COACH_CLAUDE_MODEL:sonnet}

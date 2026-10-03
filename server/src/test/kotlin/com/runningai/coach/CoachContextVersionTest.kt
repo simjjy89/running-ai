@@ -66,6 +66,31 @@ class CoachContextVersionTest {
         }
     }
 
+    @Nested
+    @SpringBootTest(
+        properties = [
+            "RUNNING_AI_TRAINING_CONTEXT_VERSION=V2",
+            "running-ai.intervals.api-key=",
+            "running-ai.intervals.base-url=http://127.0.0.1:9",
+        ],
+    )
+    @ActiveProfiles("test")
+    inner class ViaTheDocumentedEnvironmentVariable {
+
+        @Autowired private lateinit var properties: CoachProperties
+
+        /**
+         * The operational on/off switch for this phase (§85-87): confirms
+         * `application.yml`'s `context-version: ${RUNNING_AI_TRAINING_CONTEXT_VERSION:V1}` placeholder
+         * actually resolves from that exact environment variable name, not just from the Spring
+         * property path directly (which every other nested class here sets, bypassing the placeholder).
+         */
+        @Test
+        fun `the exact documented environment variable name actually selects V2`() {
+            assertThat(properties.contextVersion).isEqualTo(ContextVersion.V2)
+        }
+    }
+
     @Test
     fun `an unknown context version does not even bind`() {
         ApplicationContextRunner()
