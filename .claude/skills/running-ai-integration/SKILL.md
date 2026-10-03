@@ -267,6 +267,30 @@ Live contract LIVE_VERIFIED 2026-10-03 against the real account (details and §4
   90-day backfill is a separate, not-run phase. No scheduler, no webhook. Tests replace the read client with a
   scripted fake and pin a blank key + unreachable URL; fixtures are `LIVE_SHAPE.ANONYMISED` under `fixtures/intervals/`.
 
+## Historical backfill (Phase 6H-6)
+
+Package `com.runningai.backfill` (architecture: `docs/architecture/historical-backfill.md`). Rules that must not break:
+
+- Manual only (`POST /api/v1/historical-backfill`, `/{runId}/resume`, `GET /{runId}`); synchronous on the request thread;
+  in-JVM single-flight + DB RUNNING-run check. PAUSED resumes only by hand; FAILED never resumes; COMPLETED resume is a
+  deterministic 409 with zero network calls. Start/resume refuse unless all publishing switches and both Garmin schedulers
+  are false.
+- It composes EXISTING services only — `GarminActivityIngestionService`, `GarminActivityDetailIngestionService`,
+  `RunningActivityAnalysisService`, the 6H-5 Intervals mapper/matcher/stores, `GarminRecoverySyncService.syncDay` — and adds
+  no new mapper or client. **It never reads or advances `garmin_sync_state`.**
+- Discovery: offset 0 newest→oldest, page 100, stops at the window boundary or short/empty page; resume restarts at offset 0
+  (offset drift must not lose an activity; everything is idempotent); caps pause (`BACKFILL_DISCOVERY_LIMIT_EXCEEDED`),
+  never truncate. After a full pass the target set is frozen and processed oldest→newest.
+- Gates (fail-stop, no retry): detail outcome COMPLETE; a NORMALIZED stream must be `sample_completeness = FULL`
+  (`SAMPLE_STREAM_DOWNSAMPLED` / `SAMPLE_STREAM_FIDELITY_UNKNOWN` pause; never auto-retry another maxChartSize); EMPTY stream
+  is legitimate `NO_SAMPLE_STREAM`; Garmin/Intervals 401/403/429/unreachable pause the whole run where it stands; refetched
+  detail always recomputes analysis; `ANALYSIS_FAILED` pauses.
+- Intervals: ≤31-day list windows + ONE whole-window wellness GET (the manual enrichment endpoint keeps its 31-day guard);
+  never a per-activity Intervals GET, never `intervals=true`; UNMATCHED/AMBIGUOUS continue, `INTERVALS_LINK_CONFLICT` pauses.
+- Recovery stays 28 days, newest first, persisted `next_recovery_date` cursor, existing backfill delay; a day with no metric
+  at all stores no row (Phase 6F semantics).
+- VERIFY is local-only and blocks COMPLETED while any window activity still has a DOWNSAMPLED or UNKNOWN stream.
+
 ## Canonical publishing path and legacy retirement (Phase 5C-5)
 
 - `IntervalsWorkoutPublisher` is the **canonical** workout publishing path; `HttpIntervalsWorkoutClient` is the only code that

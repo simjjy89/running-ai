@@ -134,6 +134,20 @@ RunningAI automation (which lives only on the main PC and is NOT in this repo).
   `GET /api/v1/activities/{id}/intervals`, `GET /api/v1/intervals/fitness`. No scheduler/webhook/periodic sync (Phase 7). Intervals
   values never enter `activity_analysis`; Intervals wellness never overwrites `garmin_recovery_daily`; `activity_sample` stays
   Garmin-only. TrainingContext unchanged (V2 = 6H-7).
+- **Historical backfill** (Phase 6H-6; package `backfill`, Kotlin; `docs/architecture/historical-backfill.md`). Manual-only,
+  resumable 90-day pipeline: `POST /api/v1/historical-backfill` (`{"endDate","days"}`, days <= 90) → phases GARMIN_DISCOVERY →
+  GARMIN_DETAIL_ANALYSIS → INTERVALS_ACTIVITIES → INTERVALS_FITNESS → GARMIN_RECOVERY (28 days, never widened) → VERIFY →
+  COMPLETED, persisted in V19 (`historical_backfill_run` + per-activity checkpoints) with one committed checkpoint per unit of
+  work. Runs synchronously on the request thread; no scheduler, no auto-resume (PAUSED = safe stop, human `/resume`; FAILED =
+  never resumable; COMPLETED resume = deterministic 409). Reuses the existing services only (summary ingestion, detail
+  ingestion, analysis, 6H-5 matcher/stores, recovery syncDay); **never touches `garmin_sync_state`**; discovery always restarts
+  from offset 0 on resume; caps pause as `BACKFILL_DISCOVERY_LIMIT_EXCEEDED` rather than truncating. Gates: detail outcome
+  COMPLETE; NORMALIZED streams must be FULL (DOWNSAMPLED/UNKNOWN pause — never auto-retried at another maxChartSize), EMPTY
+  stream = legitimate `NO_SAMPLE_STREAM`; refetched detail always recomputes analysis (reuse only for fresh V1 + unchanged
+  detail); analysis failure pauses. Intervals: ≤31-day list windows (~3 GETs) + ONE 90-day wellness GET (the manual endpoint's
+  31-day guard is untouched), never per-activity GETs, UNMATCHED/AMBIGUOUS continue, link conflict pauses. Start/resume refuse
+  unless all four publishing switches AND both Garmin schedulers are false (`HISTORICAL_BACKFILL_UNSAFE_RUNTIME`); no external
+  write anywhere. Config `running-ai.historical-backfill.*` (page-size 100, max-pages 20, max-activities 500, activity-delay 2s).
 - **Legacy publishing XOR AI Draft publishing** (Phase 6G.1, `draftpublish.PublishingModeGuard`): `WORKOUT_PUBLISHING_ENABLED` and
   `RUNNING_AI_DRAFT_PUBLISHING_ENABLED` both true → application startup fails ("Legacy workout publishing and AI draft publishing
   cannot be enabled at the same time"). Both off or exactly one on starts normally. Never weaken or bypass this guard.
