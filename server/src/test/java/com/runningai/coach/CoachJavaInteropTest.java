@@ -19,8 +19,8 @@ class CoachJavaInteropTest {
     @Test
     void javaCanConstructAndReadKotlinCoachTypes() {
         WorkoutDraftSegment segment = new WorkoutDraftSegment(
-                SegmentType.MAIN, 30, IntensityClass.EASY, "Steady running",
-                330, 360, 140, 155, null, null, null, null, null, null);
+                SegmentType.MAIN, 30, IntensityClass.EASY, "Steady running", null,
+                330, 360, 140, 155, null, null, null, null, null, null, null, null, null);
 
         CoachAssessment assessment = new CoachAssessment(
                 "Recovery unknown", "Load steady", "EASY", "Keep it easy today.", List.of());
@@ -57,7 +57,7 @@ class CoachJavaInteropTest {
                 return new WorkoutDraft(null, null, version, date, "Stub", "EASY", 20,
                         new CoachAssessment("a", "b", "EASY", "c", List.of()),
                         List.of(new WorkoutDraftSegment(SegmentType.MAIN, 20, IntensityClass.EASY,
-                                null, null, null, null, null, null, null, null, null, null, null)),
+                                null, null, null, null, null, null, null, null, null, null, null, null, null, null, null)),
                         CoachProvider.CLAUDE, null, WorkoutDraftStatus.DRAFT, null);
             }
         };

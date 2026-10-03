@@ -300,6 +300,44 @@ class DraftPublishApiTest {
     }
 
     @Test
+    fun `a full-target draft (percent-LTHR warm-up+cool-down, pace main, targeted recovery) previews publishable with every target in the text`() {
+        val full = draft(
+            workoutType = "THRESHOLD",
+            segments = listOf(
+                segment(SegmentType.WARM_UP, 12, IntensityClass.VERY_EASY,
+                    primaryTargetType = com.runningai.training.PrimaryTargetType.HEART_RATE,
+                    hrPercentLthrMin = 65, hrPercentLthrMax = 78),
+                segment(SegmentType.MAIN, 5, IntensityClass.HARD, paceFast = 285, paceSlow = 300,
+                    repetitions = 3, recovery = com.runningai.coach.WorkoutDraftRecovery(
+                        durationMinutes = 2, intensity = IntensityClass.VERY_EASY,
+                        primaryTargetType = com.runningai.training.PrimaryTargetType.HEART_RATE,
+                        heartRatePercentLthrMin = 65, heartRatePercentLthrMax = 75,
+                    )),
+                segment(SegmentType.COOL_DOWN, 10, IntensityClass.VERY_EASY,
+                    primaryTargetType = com.runningai.training.PrimaryTargetType.HEART_RATE,
+                    hrPercentLthrMin = 65, hrPercentLthrMax = 78),
+            ),
+            totalDurationMinutes = 43,
+        )
+        val id = approved(full)
+
+        preview(id)
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.publishable").value(true))
+            .andExpect(jsonPath("$.externalWriteRequired").value(true))
+            .andExpect(jsonPath("$.expectedOutcome").value("PUBLISH"))
+            .andExpect(jsonPath("$.structuredStepCount").value(8))
+            .andExpect(jsonPath("$.unpublishableReasons").isEmpty)
+            .andExpect(jsonPath("$.renderedWorkoutText").value(
+                "- Warm Up 12m 65-78% LTHR hr=1s\n" +
+                    (1..3).joinToString("\n") { "- Main 5m 4:45-5:00/km Pace\n- Rest 2m 65-75% LTHR hr=1s" } + "\n" +
+                    "- Cool Down 10m 65-78% LTHR hr=1s",
+            ))
+
+        verifyNoInteractions(publisher)
+    }
+
+    @Test
     fun `publishing an approved workout calls the existing publisher exactly once with the approved text`() {
         val id = approved()
         publisherReturns(IntervalsPublishOperation.CREATED, "evt-42")

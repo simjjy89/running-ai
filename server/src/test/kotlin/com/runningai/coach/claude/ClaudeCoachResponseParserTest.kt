@@ -10,6 +10,7 @@ import com.runningai.coach.AiCoachException
 import com.runningai.coach.CoachProvider
 import com.runningai.coach.CoachTestFixtures.DATE
 import com.runningai.training.IntensityClass
+import com.runningai.training.PrimaryTargetType
 import com.runningai.training.SegmentType
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
@@ -238,5 +239,74 @@ class ClaudeCoachResponseParserTest {
         assertThat(json).doesNotContain("isRest").doesNotContain("\"rest\"")
         assertThat(back).isEqualTo(rest)
         assertThat(back.isRest).isTrue()
+    }
+
+    // ---- target completeness fields (Phase 6H-7.1) ---------------------------------------------
+
+    @Test
+    fun `parses primaryTargetType, percent-LTHR and a nested recovery object`() {
+        val json = """{"assessment":{"recovery":"a","loadTrend":"b","selectedWorkoutType":"THRESHOLD",
+            "rationale":"c"},"workout":{"title":"x","totalDurationMinutes":21,"segments":[
+            {"type":"MAIN","durationMinutes":5,"intensity":"HARD","primaryTargetType":"PACE",
+             "paceSecondsPerKmFast":285,"paceSecondsPerKmSlow":300,"repetitions":3,
+             "recovery":{"durationMinutes":2,"intensity":"VERY_EASY","primaryTargetType":"HEART_RATE",
+                         "description":"Easy jog","heartRatePercentLthrMin":65,"heartRatePercentLthrMax":75}}
+            ]}}"""
+
+        val segment = parse(envelope(json)).segments.single()
+
+        assertThat(segment.primaryTargetType).isEqualTo(PrimaryTargetType.PACE)
+        assertThat(segment.paceSecondsPerKmFast).isEqualTo(285)
+        assertThat(segment.recovery).isNotNull()
+        assertThat(segment.recovery!!.durationMinutes).isEqualTo(2)
+        assertThat(segment.recovery!!.primaryTargetType).isEqualTo(PrimaryTargetType.HEART_RATE)
+        assertThat(segment.recovery!!.heartRatePercentLthrMin).isEqualTo(65)
+        assertThat(segment.recovery!!.heartRatePercentLthrMax).isEqualTo(75)
+        assertThat(segment.recovery!!.description).isEqualTo("Easy jog")
+        assertThat(segment.recoveryDurationMinutes).isNull()
+    }
+
+    @Test
+    fun `the old shape without any new field still parses exactly as before`() {
+        // Draft #7's actual published shape: no primaryTargetType, no %LTHR, recoveryDurationMinutes only.
+        val legacy = """{"assessment":{"recovery":"a","loadTrend":"b","selectedWorkoutType":"THRESHOLD",
+            "rationale":"c"},"workout":{"title":"x","totalDurationMinutes":21,"segments":[
+            {"type":"MAIN","durationMinutes":5,"intensity":"HARD","paceSecondsPerKmFast":285,
+             "paceSecondsPerKmSlow":300,"repetitions":3,"recoveryDurationMinutes":2}]}}"""
+
+        val segment = parse(envelope(legacy)).segments.single()
+
+        assertThat(segment.primaryTargetType).isNull()
+        assertThat(segment.heartRatePercentLthrMin).isNull()
+        assertThat(segment.recovery).isNull()
+        assertThat(segment.recoveryDurationMinutes).isEqualTo(2)
+    }
+
+    @Test
+    fun `an unknown primaryTargetType is rejected rather than defaulted`() {
+        val bad = """{"assessment":{"recovery":"a","loadTrend":"b","selectedWorkoutType":"EASY",
+            "rationale":"c"},"workout":{"title":"x","totalDurationMinutes":30,"segments":[
+            {"type":"MAIN","durationMinutes":30,"intensity":"EASY","primaryTargetType":"ABSOLUTE_BPM"}]}}"""
+
+        expectInvalid(bad.let { envelope(it) }, "ABSOLUTE_BPM")
+    }
+
+    @Test
+    fun `a recovery that is not an object is rejected`() {
+        val bad = """{"assessment":{"recovery":"a","loadTrend":"b","selectedWorkoutType":"EASY",
+            "rationale":"c"},"workout":{"title":"x","totalDurationMinutes":30,"segments":[
+            {"type":"MAIN","durationMinutes":30,"intensity":"EASY","repetitions":2,"recovery":"2 minutes"}]}}"""
+
+        expectInvalid(envelope(bad), "recovery is not an object")
+    }
+
+    @Test
+    fun `a recovery missing its required primaryTargetType is rejected`() {
+        val bad = """{"assessment":{"recovery":"a","loadTrend":"b","selectedWorkoutType":"EASY",
+            "rationale":"c"},"workout":{"title":"x","totalDurationMinutes":30,"segments":[
+            {"type":"MAIN","durationMinutes":30,"intensity":"EASY","repetitions":2,
+             "recovery":{"durationMinutes":2,"intensity":"VERY_EASY"}}]}}"""
+
+        expectInvalid(envelope(bad), "recovery.primaryTargetType is missing")
     }
 }

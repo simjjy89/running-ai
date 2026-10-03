@@ -138,21 +138,48 @@ object CoachTestFixtures {
         speedMax: Double? = null,
         inclineMin: Double? = null,
         inclineMax: Double? = null,
+        primaryTargetType: com.runningai.training.PrimaryTargetType? = null,
+        hrPercentLthrMin: Int? = null,
+        hrPercentLthrMax: Int? = null,
+        recovery: WorkoutDraftRecovery? = null,
     ) = WorkoutDraftSegment(
         type = type,
         durationMinutes = durationMinutes,
         intensity = intensity,
         description = null,
+        primaryTargetType = primaryTargetType,
         paceSecondsPerKmFast = paceFast,
         paceSecondsPerKmSlow = paceSlow,
         heartRateBpmMin = hrMin,
         heartRateBpmMax = hrMax,
+        heartRatePercentLthrMin = hrPercentLthrMin,
+        heartRatePercentLthrMax = hrPercentLthrMax,
         treadmillSpeedKphMin = speedMin,
         treadmillSpeedKphMax = speedMax,
         inclinePercentMin = inclineMin,
         inclinePercentMax = inclineMax,
+        recovery = recovery,
         repetitions = repetitions,
         recoveryDurationMinutes = recoveryMinutes,
+    )
+
+    /** A synthetic targeted recovery block: easy-jog, %LTHR target by default. */
+    fun recovery(
+        durationMinutes: Int = 2,
+        primary: com.runningai.training.PrimaryTargetType = com.runningai.training.PrimaryTargetType.HEART_RATE,
+        hrMin: Int? = 65,
+        hrMax: Int? = 75,
+        paceFast: Int? = null,
+        paceSlow: Int? = null,
+    ) = WorkoutDraftRecovery(
+        durationMinutes = durationMinutes,
+        intensity = IntensityClass.VERY_EASY,
+        primaryTargetType = primary,
+        description = "Easy jog recovery",
+        paceSecondsPerKmFast = paceFast,
+        paceSecondsPerKmSlow = paceSlow,
+        heartRatePercentLthrMin = hrMin,
+        heartRatePercentLthrMax = hrMax,
     )
 
     /** A valid draft: segments sum exactly to the declared total. */

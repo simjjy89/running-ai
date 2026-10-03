@@ -5,6 +5,7 @@ import com.runningai.coach.CoachTestFixtures.restDraft
 import com.runningai.coach.CoachTestFixtures.segment
 import com.runningai.integration.intervals.IntervalsWorkoutRenderer
 import com.runningai.training.CandidateTrainingType
+import com.runningai.training.HeartRateTarget
 import com.runningai.training.IntensityClass
 import com.runningai.training.PaceTarget
 import com.runningai.training.PrimaryTargetType
@@ -246,9 +247,169 @@ class WorkoutDraftStructuredWorkoutMapperTest {
     }
 
     @Test
-    fun `the mapper never emits a heart-rate target`() {
+    fun `without a percent-LTHR target the mapper emits no heart-rate target at all`() {
         val workout = mapper.map(intervals)
 
+        assertThat(workout.steps()).allMatch { it.heartRateTarget() == null }
+    }
+
+    // ---- percent-LTHR heart rate (Phase 6H-7.1) --------------------------------------------------
+
+    @Test
+    fun `a percent-LTHR target is preserved exactly and becomes the primary target, bpm left null`() {
+        val d = draft(segments = listOf(segment(SegmentType.WARM_UP, 12, IntensityClass.VERY_EASY,
+            primaryTargetType = PrimaryTargetType.HEART_RATE, hrPercentLthrMin = 65, hrPercentLthrMax = 78)))
+
+        val step = mapper.map(d).steps().single()
+
+        assertThat(step.primaryTargetType()).isEqualTo(PrimaryTargetType.HEART_RATE)
+        assertThat(step.heartRateTarget()).isEqualTo(HeartRateTarget(65, 78, null, null))
+        assertThat(step.paceTarget()).isNull()
+        assertThat(render(d)).isEqualTo("- Warm Up 12m 65-78% LTHR hr=1s")
+    }
+
+    @Test
+    fun `a bpm target and a percent-LTHR target together fail closed, never silently picking one`() {
+        val d = draft(segments = listOf(segment(SegmentType.MAIN, 40, IntensityClass.EASY,
+            hrMin = 140, hrMax = 150, hrPercentLthrMin = 65, hrPercentLthrMax = 75)))
+
+        assertThat(validator.problems(d)).anyMatch { it.contains("both an absolute bpm target and a %LTHR target") }
+    }
+
+    @Test
+    fun `a half percent-LTHR range fails closed instead of inventing the other bound`() {
+        val d = draft(segments = listOf(segment(SegmentType.MAIN, 40, IntensityClass.EASY, hrPercentLthrMin = 65)))
+
+        assertThat(validator.problems(d)).anyMatch { it.contains("only one bound of its %LTHR range") }
+    }
+
+    @Test
+    fun `a non positive or inverted percent-LTHR range fails closed`() {
+        val negative = draft(segments = listOf(segment(SegmentType.MAIN, 40, IntensityClass.EASY,
+            hrPercentLthrMin = -5, hrPercentLthrMax = 78)))
+        assertThat(validator.problems(negative)).anyMatch { it.contains("%LTHR") && it.contains("cannot be rendered") }
+
+        val inverted = draft(segments = listOf(segment(SegmentType.MAIN, 40, IntensityClass.EASY,
+            hrPercentLthrMin = 80, hrPercentLthrMax = 70)))
+        assertThat(validator.problems(inverted)).anyMatch { it.contains("%LTHR range is inverted") }
+    }
+
+    @Test
+    fun `a HARD segment with only a percent-LTHR target is representable`() {
+        val d = draft(workoutType = "INTERVAL", segments = listOf(segment(SegmentType.MAIN, 20, IntensityClass.HARD,
+            hrPercentLthrMin = 95, hrPercentLthrMax = 105)))
+
+        assertThat(validator.problems(d)).isEmpty()
+    }
+
+    // ---- targeted recovery (Phase 6H-7.1) ---------------------------------------------------------
+
+    private fun targetedRecovery(
+        durationMinutes: Int = 2,
+        primary: PrimaryTargetType = PrimaryTargetType.HEART_RATE,
+        hrMin: Int? = 65,
+        hrMax: Int? = 75,
+        paceFast: Int? = null,
+        paceSlow: Int? = null,
+    ) = com.runningai.coach.WorkoutDraftRecovery(
+        durationMinutes = durationMinutes, intensity = IntensityClass.VERY_EASY, primaryTargetType = primary,
+        description = "Easy jog recovery",
+        paceSecondsPerKmFast = paceFast, paceSecondsPerKmSlow = paceSlow,
+        heartRatePercentLthrMin = hrMin, heartRatePercentLthrMax = hrMax,
+    )
+
+    @Test
+    fun `a targeted recovery object is expanded with its own intensity and target`() {
+        val d = draft(
+            workoutType = "THRESHOLD",
+            segments = listOf(
+                segment(SegmentType.WARM_UP, 12, IntensityClass.VERY_EASY,
+                    primaryTargetType = PrimaryTargetType.HEART_RATE, hrPercentLthrMin = 65, hrPercentLthrMax = 78),
+                segment(SegmentType.MAIN, 5, IntensityClass.HARD, paceFast = 285, paceSlow = 300,
+                    primaryTargetType = PrimaryTargetType.PACE, repetitions = 3, recovery = targetedRecovery()),
+                segment(SegmentType.COOL_DOWN, 10, IntensityClass.VERY_EASY,
+                    primaryTargetType = PrimaryTargetType.HEART_RATE, hrPercentLthrMin = 65, hrPercentLthrMax = 78),
+            ),
+            totalDurationMinutes = 43, // 12 + 3*(5+2) + 10
+        )
+
+        assertThat(validator.problems(d)).isEmpty()
+        val workout = mapper.map(d)
+        assertThat(workout.steps()).hasSize(8) // warm-up, 3x(main+recovery), cool-down
+        assertThat(workout.steps().sumOf { it.durationMinutes() }).isEqualTo(43)
+
+        val recoverySteps = workout.steps().filter { it.type() == SegmentType.REST }
+        assertThat(recoverySteps).hasSize(3)
+        recoverySteps.forEach {
+            assertThat(it.durationMinutes()).isEqualTo(2)
+            assertThat(it.primaryTargetType()).isEqualTo(PrimaryTargetType.HEART_RATE)
+            assertThat(it.heartRateTarget()).isEqualTo(HeartRateTarget(65, 75, null, null))
+        }
+
+        assertThat(render(d)).isEqualTo(
+            "- Warm Up 12m 65-78% LTHR hr=1s\n" +
+                (1..3).joinToString("\n") { "- Main 5m 4:45-5:00/km Pace\n- Rest 2m 65-75% LTHR hr=1s" } + "\n" +
+                "- Cool Down 10m 65-78% LTHR hr=1s",
+        )
+    }
+
+    @Test
+    fun `a passive (NONE) targeted recovery renders with no target, deliberately`() {
+        val passive = targetedRecovery(primary = PrimaryTargetType.NONE, hrMin = null, hrMax = null)
+        val d = draft(segments = listOf(
+            segment(SegmentType.MAIN, 3, IntensityClass.HARD, paceFast = 270, paceSlow = 285,
+                repetitions = 2, recovery = passive),
+        ), totalDurationMinutes = 10) // 2 * (3 + 2)
+
+        assertThat(validator.problems(d)).isEmpty()
+        assertThat(render(d)).isEqualTo("- Main 3m 4:30-4:45/km Pace\n- Rest 2m\n- Main 3m 4:30-4:45/km Pace\n- Rest 2m")
+    }
+
+    @Test
+    fun `recovery object and legacy recoveryDurationMinutes together fail closed`() {
+        val d = draft(segments = listOf(
+            segment(SegmentType.MAIN, 3, IntensityClass.HARD, paceFast = 270, paceSlow = 285,
+                repetitions = 2, recoveryMinutes = 2, recovery = targetedRecovery()),
+        ))
+
+        assertThat(validator.problems(d)).anyMatch { it.contains("both a recovery object and the legacy recoveryDurationMinutes") }
+    }
+
+    @Test
+    fun `a targeted recovery with a non positive duration fails closed`() {
+        val d = draft(segments = listOf(
+            segment(SegmentType.MAIN, 3, IntensityClass.HARD, paceFast = 270, paceSlow = 285,
+                repetitions = 2, recovery = targetedRecovery(durationMinutes = 0)),
+        ))
+
+        assertThat(validator.problems(d)).anyMatch { it.contains("recovery") && it.contains("duration must be > 0") }
+    }
+
+    @Test
+    fun `legacy Draft #7's exact published shape still renders and totals identically`() {
+        // The real, already-approved-and-published draft (Phase 6H-7): recoveryDurationMinutes only,
+        // no primaryTargetType, no percent-LTHR anywhere. This must never change.
+        val d = draft(
+            workoutType = "THRESHOLD",
+            segments = listOf(
+                segment(SegmentType.WARM_UP, 12, IntensityClass.EASY),
+                segment(SegmentType.MAIN, 5, IntensityClass.HARD, paceFast = 285, paceSlow = 300,
+                    repetitions = 3, recoveryMinutes = 2),
+                segment(SegmentType.COOL_DOWN, 10, IntensityClass.VERY_EASY),
+            ),
+            totalDurationMinutes = 43,
+        )
+
+        assertThat(validator.problems(d)).isEmpty()
+        val workout = mapper.map(d)
+        assertThat(workout.steps()).hasSize(8)
+        assertThat(workout.totalDurationMinutes()).isEqualTo(43)
+        assertThat(render(d)).isEqualTo(
+            "- Warm Up 12m\n" +
+                (1..3).joinToString("\n") { "- Main 5m 4:45-5:00/km Pace\n- Rest 2m" } + "\n" +
+                "- Cool Down 10m",
+        )
+        // no step anywhere carries a heart-rate target - exactly what was actually published
         assertThat(workout.steps()).allMatch { it.heartRateTarget() == null }
     }
 
@@ -259,7 +420,7 @@ class WorkoutDraftStructuredWorkoutMapperTest {
         val d = draft(workoutType = "INTERVAL",
             segments = listOf(segment(SegmentType.MAIN, 20, IntensityClass.HARD)))
 
-        assertThat(validator.problems(d)).anyMatch { it.contains("HARD but has no pace or treadmill-speed target") }
+        assertThat(validator.problems(d)).anyMatch { it.contains("HARD but has no pace, %LTHR or treadmill-speed target") }
     }
 
     @Test

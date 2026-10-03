@@ -5,6 +5,7 @@ import com.runningai.coach.CoachTestFixtures.draft
 import com.runningai.coach.CoachTestFixtures.segment
 import com.runningai.coach.CoachTestFixtures.thresholds
 import com.runningai.training.IntensityClass
+import com.runningai.training.PrimaryTargetType
 import com.runningai.training.SegmentType
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatCode
@@ -264,5 +265,232 @@ class WorkoutDraftValidatorTest {
         expectViolation(rest.copy(date = DATE.plusDays(1)), "does not match the requested date")
         expectViolation(rest.copy(title = " "), "title is blank")
         expectViolation(rest.copy(assessment = rest.assessment.copy(rationale = "")), "rationale is blank")
+    }
+
+    // ---- percent-LTHR / primaryTargetType / recovery shape rules (Phase 6H-7.1) -----------------
+    // These apply via the plain (date, athlete) overload too - a legacy draft never populates the
+    // new fields, so none of this can ever fire for one.
+
+    @Test
+    fun `a bpm target and a percent-LTHR target together are rejected`() {
+        expectViolation(
+            draft(segments = listOf(segment(durationMinutes = 30, hrMin = 140, hrMax = 150,
+                hrPercentLthrMin = 65, hrPercentLthrMax = 75)), totalDurationMinutes = 30),
+            "both an absolute heart-rate target and a %LTHR target",
+        )
+    }
+
+    @Test
+    fun `a half percent-LTHR range is rejected`() {
+        expectViolation(
+            draft(segments = listOf(segment(durationMinutes = 30, hrPercentLthrMin = 65)), totalDurationMinutes = 30),
+            "only one bound of its %LTHR range",
+        )
+    }
+
+    @Test
+    fun `a non positive or inverted percent-LTHR range is rejected`() {
+        expectViolation(
+            draft(segments = listOf(segment(durationMinutes = 30, hrPercentLthrMin = -1, hrPercentLthrMax = 78)),
+                totalDurationMinutes = 30),
+            "%LTHR must be > 0",
+        )
+        expectViolation(
+            draft(segments = listOf(segment(durationMinutes = 30, hrPercentLthrMin = 80, hrPercentLthrMax = 70)),
+                totalDurationMinutes = 30),
+            "%LTHR range is inverted",
+        )
+    }
+
+    @Test
+    fun `a well-formed percent-LTHR segment passes`() {
+        assertThatCode {
+            validator.validate(draft(segments = listOf(segment(durationMinutes = 30, hrPercentLthrMin = 65, hrPercentLthrMax = 78)),
+                totalDurationMinutes = 30), DATE, thresholds())
+        }.doesNotThrowAnyException()
+    }
+
+    @Test
+    fun `primaryTargetType PACE requires a complete pace pair and no percent-LTHR`() {
+        expectViolation(
+            draft(segments = listOf(segment(durationMinutes = 30, primaryTargetType = PrimaryTargetType.PACE))),
+            "declares primaryTargetType PACE but has no complete pace target",
+        )
+        expectViolation(
+            draft(segments = listOf(segment(durationMinutes = 30, primaryTargetType = PrimaryTargetType.PACE,
+                paceFast = 300, paceSlow = 320, hrPercentLthrMin = 65, hrPercentLthrMax = 78))),
+            "declares primaryTargetType PACE but also carries a %LTHR target",
+        )
+    }
+
+    @Test
+    fun `primaryTargetType HEART_RATE requires a complete percent-LTHR pair and no pace`() {
+        expectViolation(
+            draft(segments = listOf(segment(durationMinutes = 30, primaryTargetType = PrimaryTargetType.HEART_RATE))),
+            "declares primaryTargetType HEART_RATE but has no complete %LTHR target",
+        )
+        expectViolation(
+            draft(segments = listOf(segment(durationMinutes = 30, primaryTargetType = PrimaryTargetType.HEART_RATE,
+                hrPercentLthrMin = 65, hrPercentLthrMax = 78, paceFast = 300, paceSlow = 320))),
+            "declares primaryTargetType HEART_RATE but also carries a pace target",
+        )
+    }
+
+    @Test
+    fun `primaryTargetType QUALITATIVE or NONE must carry no physiological numeric target`() {
+        expectViolation(
+            draft(segments = listOf(segment(durationMinutes = 30, primaryTargetType = PrimaryTargetType.QUALITATIVE,
+                paceFast = 300, paceSlow = 320))),
+            "declares primaryTargetType QUALITATIVE but also carries a pace target",
+        )
+        expectViolation(
+            draft(segments = listOf(segment(durationMinutes = 30, primaryTargetType = PrimaryTargetType.NONE,
+                hrPercentLthrMin = 65, hrPercentLthrMax = 78))),
+            "declares primaryTargetType NONE but also carries a %LTHR target",
+        )
+    }
+
+    @Test
+    fun `primaryTargetType left null keeps the legacy inference - no new rule fires`() {
+        assertThatCode {
+            validator.validate(draft(segments = listOf(segment(durationMinutes = 30, paceFast = 300, paceSlow = 320))),
+                DATE, thresholds())
+        }.doesNotThrowAnyException()
+    }
+
+    @Test
+    fun `a recovery object and legacy recoveryDurationMinutes together are rejected`() {
+        val recovery = CoachTestFixtures.recovery()
+        expectViolation(
+            draft(segments = listOf(segment(durationMinutes = 5, repetitions = 3, recoveryMinutes = 2, recovery = recovery)),
+                totalDurationMinutes = 21),
+            "both a recovery object and the legacy recoveryDurationMinutes",
+        )
+    }
+
+    @Test
+    fun `a recovery object without repetitions is rejected`() {
+        expectViolation(
+            draft(segments = listOf(segment(durationMinutes = 5, recovery = CoachTestFixtures.recovery()))),
+            "has a recovery object but no repetitions",
+        )
+    }
+
+    @Test
+    fun `a recovery object's own target follows the same shape rules`() {
+        val malformed = CoachTestFixtures.recovery(primary = PrimaryTargetType.HEART_RATE, hrMin = 65, hrMax = null)
+        expectViolation(
+            draft(segments = listOf(segment(durationMinutes = 5, repetitions = 3, recovery = malformed))),
+            "recovery",
+            "only one bound of its %LTHR range",
+        )
+    }
+
+    @Test
+    fun `a recovery with a non positive duration is rejected`() {
+        val zero = CoachTestFixtures.recovery().let {
+            com.runningai.coach.WorkoutDraftRecovery(0, it.intensity, it.primaryTargetType, it.description,
+                it.paceSecondsPerKmFast, it.paceSecondsPerKmSlow, it.heartRatePercentLthrMin, it.heartRatePercentLthrMax,
+                it.treadmillSpeedKphMin, it.treadmillSpeedKphMax, it.inclinePercentMin, it.inclinePercentMax)
+        }
+        expectViolation(
+            draft(segments = listOf(segment(durationMinutes = 5, repetitions = 3, recovery = zero))),
+            "recovery duration must be > 0",
+        )
+    }
+
+    @Test
+    fun `duration arithmetic uses the recovery object's duration when present`() {
+        val d = draft(
+            segments = listOf(segment(SegmentType.MAIN, 5, IntensityClass.HARD, paceFast = 285, paceSlow = 300,
+                repetitions = 3, recovery = CoachTestFixtures.recovery())),
+            totalDurationMinutes = 21, // 3 * (5 + 2)
+        )
+        assertThatCode { validator.validate(d, DATE, thresholds()) }.doesNotThrowAnyException()
+        expectViolation(d.copy(totalDurationMinutes = 20), "sum to 21")
+    }
+
+    // ---- V2 target completeness (Phase 6H-7.1) --------------------------------------------------
+
+    private fun v2Context(athlete: AthleteThresholds) = TrainingContextV2(
+        date = DATE,
+        athlete = athlete,
+        dataCoverage = DataCoverageV2(90, 0, 0, 0, 0, 90, 0, 28, 0, null, null),
+        recovery = RecoveryContext(),
+        trainingLoad = TrainingLoadContextV2(null, null, null, null, null, null, null, null, null, null),
+        trainingRhythm = TrainingRhythmV2(0, 0, null, null, null, null, true, null, null),
+        recentActivities = emptyList(),
+        constraints = SessionConstraints(),
+    )
+
+    @Test
+    fun `V2 - a running segment with no target is rejected when the athlete has a threshold`() {
+        val context = v2Context(thresholds())
+        val d = draft(segments = listOf(segment(SegmentType.MAIN, 30, IntensityClass.EASY)))
+
+        assertThatThrownBy { validator.validate(d, context) }
+            .isInstanceOfSatisfying(WorkoutDraftValidationException::class.java) { e ->
+                assertThat(e.violations.joinToString(" ")).contains("V2 target completeness")
+            }
+    }
+
+    @Test
+    fun `V2 - the same draft is accepted by the plain (date, athlete) overload - no retroactive V1 rule`() {
+        assertThatCode {
+            validator.validate(draft(segments = listOf(segment(SegmentType.MAIN, 30, IntensityClass.EASY))),
+                DATE, thresholds())
+        }.doesNotThrowAnyException()
+    }
+
+    @Test
+    fun `V2 - pace-only athlete must use PACE, %LTHR is not required`() {
+        val paceOnly = AthleteThresholds(null, 300)
+        val context = v2Context(paceOnly)
+        val withPace = draft(segments = listOf(segment(SegmentType.MAIN, 30, IntensityClass.EASY, paceFast = 345, paceSlow = 375)))
+        assertThatCode { validator.validate(withPace, context) }.doesNotThrowAnyException()
+
+        val withoutAny = draft(segments = listOf(segment(SegmentType.MAIN, 30, IntensityClass.EASY)))
+        assertThatThrownBy { validator.validate(withoutAny, context) }.isInstanceOf(WorkoutDraftValidationException::class.java)
+    }
+
+    @Test
+    fun `V2 - LTHR-only athlete must use HEART_RATE, pace is not required`() {
+        val lthrOnly = AthleteThresholds(170, null)
+        val context = v2Context(lthrOnly)
+        val withHr = draft(segments = listOf(segment(SegmentType.MAIN, 30, IntensityClass.EASY,
+            hrPercentLthrMin = 75, hrPercentLthrMax = 85)))
+        assertThatCode { validator.validate(withHr, context) }.doesNotThrowAnyException()
+
+        val withoutAny = draft(segments = listOf(segment(SegmentType.MAIN, 30, IntensityClass.EASY)))
+        assertThatThrownBy { validator.validate(withoutAny, context) }.isInstanceOf(WorkoutDraftValidationException::class.java)
+    }
+
+    @Test
+    fun `V2 - either pace or percent-LTHR satisfies completeness when both thresholds are known`() {
+        val context = v2Context(thresholds())
+        val withPace = draft(segments = listOf(segment(SegmentType.MAIN, 30, IntensityClass.EASY, paceFast = 345, paceSlow = 375)))
+        val withHr = draft(segments = listOf(segment(SegmentType.MAIN, 30, IntensityClass.EASY,
+            hrPercentLthrMin = 75, hrPercentLthrMax = 85)))
+        assertThatCode { validator.validate(withPace, context) }.doesNotThrowAnyException()
+        assertThatCode { validator.validate(withHr, context) }.doesNotThrowAnyException()
+    }
+
+    @Test
+    fun `V2 - no threshold at all means QUALITATIVE is accepted, nothing is invented`() {
+        val context = v2Context(AthleteThresholds(null, null))
+        val qualitative = draft(segments = listOf(segment(SegmentType.MAIN, 30, IntensityClass.EASY)))
+
+        assertThatCode { validator.validate(qualitative, context) }.doesNotThrowAnyException()
+    }
+
+    @Test
+    fun `V2 - a REST-type segment is never subject to target completeness`() {
+        val context = v2Context(thresholds())
+        val d = draft(segments = listOf(
+            segment(SegmentType.MAIN, 5, IntensityClass.HARD, paceFast = 285, paceSlow = 300),
+            segment(SegmentType.REST, 2, IntensityClass.NONE),
+        ), totalDurationMinutes = 7)
+
+        assertThatCode { validator.validate(d, context) }.doesNotThrowAnyException()
     }
 }
