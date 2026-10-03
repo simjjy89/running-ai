@@ -148,6 +148,24 @@ RunningAI automation (which lives only on the main PC and is NOT in this repo).
   31-day guard is untouched), never per-activity GETs, UNMATCHED/AMBIGUOUS continue, link conflict pauses. Start/resume refuse
   unless all four publishing switches AND both Garmin schedulers are false (`HISTORICAL_BACKFILL_UNSAFE_RUNTIME`); no external
   write anywhere. Config `running-ai.historical-backfill.*` (page-size 100, max-pages 20, max-activities 500, activity-delay 2s).
+- **TrainingContext V2** (Phase 6H-7; package `coach`, Kotlin; `docs/architecture/training-context-v2.md`). V1
+  (`TrainingContext`/`TrainingContextBuilder`, unchanged) and V2 (`TrainingContextV2`/`TrainingContextV2Builder`) both
+  implement `CoachTrainingContext` (`date`/`athlete`/`constraints`), the only type `AiCoach` depends on;
+  `CoachTrainingContextBuilder` routes on `running-ai.coach.context-version` (`RUNNING_AI_TRAINING_CONTEXT_VERSION`,
+  default **V1**). V2Builder is **DB-only** (zero Garmin/Intervals calls, never calls `RunningActivityAnalysisService.analyse()`)
+  and combines Garmin detail, RunningAI Analysis (6H-4) and Intervals.icu CTL/ATL/derived-form (6H-5, terminology unchanged:
+  CTL=calculated fitness, ATL=calculated fatigue, subjective `fatigue` has no field) into `dataCoverage` (plain counts, never a
+  quality verdict), `trainingLoad` (exact source date/age, D-7/D-28 exact-day only, no interpolation), `trainingRhythm`
+  (factual only — **no `candidateTrainingTypes`**, the coach chooses the session), and `recentActivities` (capped by
+  `running-ai.coach.context-v2.max-recent-activities` default 8, each with Garmin/RunningAI/Intervals evidence kept in
+  separate sections, interval groups capped by `max-interval-groups-per-activity` default 3, no individual repetitions, no
+  raw sample/GPS/external-id ever reachable). Strict no-look-ahead (nothing after date `D`); `CoachContextSerializer`
+  produces deterministic canonical JSON + SHA-256, size-guarded at `max-snapshot-bytes` (default 64 KiB,
+  `TRAINING_CONTEXT_TOO_LARGE` raised before any coach call, never silently truncated). Every draft (either context version)
+  persists `context_version`/`context_snapshot`/`context_built_at`/`context_sha256` (V20, all nullable, pre-6H-7 drafts stay
+  null); a revision stores its own snapshot and never touches the superseded row's. Read-only preview:
+  `GET /api/v1/coach/training-context?date=&version=` (DB-only, zero Garmin/Intervals/Claude calls). V2 does not change the
+  Claude response contract, the validator, or any V1 behavior.
 - **Legacy publishing XOR AI Draft publishing** (Phase 6G.1, `draftpublish.PublishingModeGuard`): `WORKOUT_PUBLISHING_ENABLED` and
   `RUNNING_AI_DRAFT_PUBLISHING_ENABLED` both true → application startup fails ("Legacy workout publishing and AI draft publishing
   cannot be enabled at the same time"). Both off or exactly one on starts normally. Never weaken or bypass this guard.
