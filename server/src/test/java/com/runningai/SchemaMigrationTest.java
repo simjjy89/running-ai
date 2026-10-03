@@ -77,15 +77,15 @@ class SchemaMigrationTest {
         assertThat(applied).extracting(MigrationInfo::getVersion)
                 .extracting(Object::toString)
                 .containsExactly("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16",
-                        "17", "18");
+                        "17", "18", "19");
         assertThat(applied).extracting(MigrationInfo::getState)
                 .containsOnly(MigrationState.SUCCESS);
         assertThat(flyway.info().pending()).isEmpty();
 
         Integer historyRows = jdbcTemplate.queryForObject(
-                "select count(*) from flyway_schema_history where success = true and version in ('1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18')",
+                "select count(*) from flyway_schema_history where success = true and version in ('1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19')",
                 Integer.class);
-        assertThat(historyRows).isEqualTo(18);
+        assertThat(historyRows).isEqualTo(19);
     }
 
     @Test
@@ -100,6 +100,7 @@ class SchemaMigrationTest {
                         + "'activity_analysis_interval_group', "
                         + "'activity_source_link', 'intervals_raw_payload', 'activity_intervals_metrics', "
                         + "'intervals_fitness_daily', "
+                        + "'historical_backfill_run', 'historical_backfill_activity', "
                         + "'flyway_schema_history')",
                 String.class);
 
@@ -111,6 +112,7 @@ class SchemaMigrationTest {
                 "activity_analysis_interval_group",
                 "activity_source_link", "intervals_raw_payload", "activity_intervals_metrics",
                 "intervals_fitness_daily",
+                "historical_backfill_run", "historical_backfill_activity",
                 "flyway_schema_history");
     }
 
@@ -296,6 +298,27 @@ class SchemaMigrationTest {
                         + "(athlete_id, fitness_date, created_at, updated_at, fetched_at) "
                         + "values (?, '2026-10-01', current_timestamp, current_timestamp, current_timestamp)",
                 athleteId))
+                .isInstanceOf(DataIntegrityViolationException.class);
+    }
+
+    @Test
+    @Transactional
+    void uniqueConstraintOnBackfillActivityExternalIdIsEnforcedByTheDatabase() {
+        Long athleteId = athleteService.getDefaultAthlete().getId();
+        jdbcTemplate.update("insert into historical_backfill_run "
+                        + "(athlete_id, start_date, end_date, requested_days, status, current_phase, started_at, created_at, updated_at) "
+                        + "values (?, '2026-07-06', '2026-10-03', 90, 'RUNNING', 'GARMIN_DISCOVERY', current_timestamp, current_timestamp, current_timestamp)",
+                athleteId);
+        Long runId = jdbcTemplate.queryForObject("select max(id) from historical_backfill_run", Long.class);
+        jdbcTemplate.update("insert into historical_backfill_activity "
+                        + "(run_id, garmin_external_id, started_at, summary_status, created_at, updated_at) "
+                        + "values (?, 'bf-unique', current_timestamp, 'CREATED', current_timestamp, current_timestamp)",
+                runId);
+
+        assertThatThrownBy(() -> jdbcTemplate.update("insert into historical_backfill_activity "
+                        + "(run_id, garmin_external_id, started_at, summary_status, created_at, updated_at) "
+                        + "values (?, 'bf-unique', current_timestamp, 'UPDATED', current_timestamp, current_timestamp)",
+                runId))
                 .isInstanceOf(DataIntegrityViolationException.class);
     }
 
