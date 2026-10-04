@@ -1,7 +1,8 @@
 # Phase 6H-8 — Safe Coach CLI / Operator Workflow — Result
 
 Baseline SHA: `8c68c1d82be96a31fb676a010bcf29dc4c38e3d5` (Phase 6H-7.2 result)
-Final SHA: (pending commit in this worktree; not yet merged to the live checkout)
+Final SHA: `a603c98` (main-3, 4 commits ahead of baseline; fast-forward merged into the live
+checkout's `main` at `C:\running-ai-github`, confirmed `git status --short` clean there afterward)
 
 ## Server production code changed
 
@@ -169,12 +170,13 @@ already-published, REST, and a simulated publish failure) - asserted directly in
 
 ## RunningAI safe-mode health
 
-Not live-verified this session (see Live smoke / Known limitations: no real restart was ever
-triggered - `Test-CoachOperator.ps1` uses a no-op `-RuntimeRestarter` by design, and this worktree
-never merged to the live checkout). The restart-and-recheck call path itself
-(`Restart-RunningAiRuntimeForPublishing`) is the same `stop-running-ai.ps1` -> `start-running-ai.ps1`
--> `Wait-Until Test-RunningAiHealthy` sequence already used and live-validated by the earlier
-untracked script.
+Not live-verified this session: live smoke (phases 1-2) never reached the approve/publish gates, so
+the publish-enabled restart path (`Restart-RunningAiRuntimeForPublishing`) was never actually
+triggered against the real runtime - only `Test-CoachOperator.ps1`'s no-op `-RuntimeRestarter`
+exercises the surrounding logic. The restart-and-recheck call path itself is the same
+`stop-running-ai.ps1` -> `start-running-ai.ps1` -> `Wait-Until Test-RunningAiHealthy` sequence
+already used and live-validated by the earlier untracked script; a real restart would only happen
+during the controlled-publish validation (section 82), which was not run this session.
 
 ## PowerShell tests
 
@@ -237,20 +239,38 @@ a real server) was not exercised this session at all (see Live smoke).
 
 ## Live smoke
 
-**Not performed this session.** Phase 6H-7.2's live smoke worked against an already-running Main-PC
-Spring instance because that phase changed zero production code and could reuse the live server
-as-is for a read/write-through-existing-endpoints test. This phase's new scripts
-(`running-ai-coach.ps1`, `RunningAI.CoachOperator.ps1`, `publish-approved-draft-controlled.ps1`) only
-exist in this worktree (`main-3`), not in the live checkout (`C:\running-ai-github`) where the actual
-operator would run them - and the work order's own section 83 describes a separate, explicit "live
-checkout integration" step (handling the untracked pre-6H-8 `publish-approved-draft-controlled.ps1`
-there, then a fast-forward merge) that was not authorized to run unattended in this session. See
-Known limitations.
+**Performed, phases 1 and 2 only** (section 82's controlled-publish validation was not run, per the
+work order and explicit user instruction - see below). Live checkout integration (section 83) was
+done first: the untracked pre-6H-8 `publish-approved-draft-controlled.ps1` was backed up to
+`.runtime/backups/phase-6h-8/publish-approved-draft-controlled.pre-6h-8.ps1` (not git-tracked, so
+this backup lives only on the Main PC's filesystem, consistent with everything else under
+`.runtime/`), removed from its working-tree path (already preserved in the backup), and `main-3`'s 4
+commits were fast-forward merged into the live checkout's `main` (`58d77b1..a603c98`, 17 files
+changed, no conflicts). `Test-RunningAI.ps1` (36/36) and `Test-CoachOperator.ps1` (14/14) were
+re-run from the live checkout itself afterward, both green.
+
+**Phase 1** (review/resume only, no approve, no publish):
+`running-ai-coach.ps1 -DraftId 12 -NonInteractive` correctly reported draft #12 v1 as `SUPERSEDED`
+(superseded by the Korean revision made during Phase 6H-7.2's own live smoke) and took no action.
+`running-ai-coach.ps1 -DraftId 13 -NonInteractive` (the current `DRAFT` version in that same
+draft group) displayed correctly, assessment and segments included.
+
+**Phase 2** (synthetic Korean generate + revision, zero external write): a fresh draft was generated
+with a synthetic Korean goal ("today I want to run lightly, don't want a tough session") via
+`Invoke-RunningAiJsonRequest` directly (the same call `running-ai-coach.ps1` itself makes) - draft
+**#15**, `EASY`, 40 min, rationale correctly reflects the Korean goal, no corrupted-character/
+garbled/encoding warning anywhere in `assessment` or `segments`. A Korean revision ("shorten it to 25
+minutes please") was then sent to `POST /workout-drafts/15/revisions` - version 2, `DRAFT`,
+`totalDurationMinutes` exactly **25**, rationale explicitly confirms the time cut
+("You asked to cut the running time to 25 minutes..."). Draft #15 was never approved, never
+published. `git status --short` in the live checkout was clean before and after all of the above -
+no file was modified by running these scripts.
 
 ## Live controlled publish performed
 
 No. Section 82 of the work order explicitly says this phase's developer must not run it
-unprompted, and it was not run.
+unprompted, and it was not run - the user's own instruction for this session also drew the line at
+"through live smoke only."
 
 ## README
 
@@ -270,50 +290,49 @@ TOCTOU protection, the `.env`-untouched strategy, Java discovery hardening, and 
 
 ## Legacy/untracked script handling
 
-**Deferred, not performed this session** - see Known limitations. The pre-existing untracked
-`C:\running-ai-github\scripts\windows\publish-approved-draft-controlled.ps1` was read (not modified)
-to recover its validated operational logic (`.env` backup/restore pattern, the Java-21
-candidate-fallback list, the exact preview/gate/restart/verify sequence) as the basis for this
-phase's tracked implementation. It was **not** backed up to `.runtime/backups/phase-6h-8/`, not
-compared file-by-file against the new tracked script, and the live checkout was not touched at all -
-all three are section 83 "live checkout integration" actions, which this session's user explicitly
-asked to defer (same as the equivalent question in Phase 6H-7.2).
+Done. The pre-existing untracked `C:\running-ai-github\scripts\windows\publish-approved-draft-controlled.ps1`
+(validated operational logic: `.env` backup/restore pattern, the Java-21 candidate-fallback list, the
+exact preview/gate/restart/verify sequence - read in full during development as the basis for this
+phase's tracked implementation) was backed up to
+`.runtime/backups/phase-6h-8/publish-approved-draft-controlled.pre-6h-8.ps1` (untracked, Main-PC-only,
+like every other `.runtime/` artifact), then removed from its working-tree path so the merge could
+proceed; `git clean` was never used. The new tracked file at the same path (from the merge) is a
+~40-line wrapper over the shared `Invoke-RunningAiControlledPublish` function, replacing the old
+script's ~280 lines of inline logic with the same external behaviour plus the new TOCTOU
+re-preview/hash check, process-env-only (not `.env`-editing) switch handling, and ASCII-only
+safety-critical prompts.
 
 ## Commits
 
-Pending in this worktree (`main-3`) - not yet created at the time this result doc was written; see
-the session's commit history for the actual SHAs once made. Planned split (work order section 84):
-`fix: harden Windows runtime prerequisites` (Java 21 discovery), `feat: add safe AI coach operator
-workflow` (the three new scripts), `test: cover coach operator safety gates` (`Test-CoachOperator.ps1`
-+ the Java-discovery additions to `Test-RunningAI.ps1`), `docs: document coach operations and UTF-8
-API usage` (README + both architecture docs + this work order).
+Four, in `main-3` (`ec8a1a4` fix: harden Windows runtime prerequisites, `99ff0b1` feat: add safe AI
+coach operator workflow, `f5ab9a9` test: cover coach operator safety gates, `a603c98` docs: document
+coach operations and UTF-8 API usage), fast-forward merged into the live checkout's `main`
+(`58d77b1..a603c98`).
 
 ## Push
 
-Not done (pending user instruction, same as every other phase in this repository).
+Not done (pending user instruction, same as every other phase in this repository). Neither
+`main-3` nor the live checkout's `main` was pushed to `origin`.
 
 ## Known limitations
 
-- **Live checkout integration (work order section 83) was not performed.** This worktree's commits
-  were not fast-forward-merged into `C:\running-ai-github`'s `main`, the untracked pre-6H-8
-  `publish-approved-draft-controlled.ps1` there was not backed up or replaced, and none of this
-  phase's new scripts exist anywhere outside this worktree yet.
-- **Live smoke (sections 80-81) was not performed** as a direct consequence of the above - it
-  requires the new scripts to exist against a real, already-running server, which (unlike Phase
-  6H-7.2, which changed no production code and could run its live smoke against any already-running
-  instance) this phase's new *scripts* specifically need to be present to exercise.
-- **Live controlled publish validation (section 82) was not performed**, per the work order's own
-  instruction not to run it unprompted; it additionally requires the above two steps first.
-- `RunningAI safe-mode runtime health UP afterward` (a real restart's outcome) was not live-verified
-  this session - only the no-op-restarter-driven unit tests exercise the surrounding logic.
+- **Live controlled publish validation (work order section 82) was not performed**, per the work
+  order's own instruction not to run it unprompted, and per this session's explicit scope (live
+  smoke only, stopping before the approve/publish gates).
+- `RunningAI safe-mode runtime health UP afterward` (a real restart's outcome) was consequently not
+  live-verified this session - only the no-op-restarter-driven unit tests exercise that logic; the
+  restart call path itself is unchanged from what the earlier untracked script already validated.
 - The REST-day publication DB record is intentionally not written by this CLI path, consistent with
   work order section 28; a future phase would need to decide whether and how to record it.
+- The pre-6H-8 untracked script's backup (`.runtime/backups/phase-6h-8/`) lives only on this Main
+  PC's filesystem, like every other `.runtime/` artifact - it is not reachable from any other
+  machine or from git history.
 
 ## Next recommended phase
 
-Live checkout integration (back up the untracked script, compare, fast-forward merge), then live
-smoke (review/resume-only, then a synthetic Korean generate+revision with zero external write), then
-- only with separate, explicit user authorization at that time - one real controlled-publish
-validation end to end.
+Only with separate, explicit user authorization at that time: one real controlled-publish
+validation end to end (`running-ai-coach.ps1` generate/resume -> `[A]` -> type `APPROVE` -> preview
+-> type `YES` -> publish -> confirm `verified=true` -> confirm the runtime returns to safe mode with
+all four switches false).
 
 PHASE_6H_8_SAFE_COACH_OPERATOR_WORKFLOW_READY
