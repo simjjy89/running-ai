@@ -49,22 +49,6 @@ function Start-DockerDesktop {
     Stop-WithError $ExitCode.Docker 'Docker daemon is not running and Docker Desktop could not be located. Start Docker Desktop manually and retry.'
 }
 
-function Find-Java21 {
-    $candidates = @()
-    if ($env:JAVA_HOME) { $candidates += (Join-Path $env:JAVA_HOME 'bin\java.exe') }
-    $onPath = Get-Command java -ErrorAction SilentlyContinue
-    if ($onPath) { $candidates += $onPath.Source }
-    foreach ($exe in ($candidates | Select-Object -Unique)) {
-        if (-not (Test-Path $exe)) { continue }
-        $text = Invoke-NativeText $exe '-XshowSettings:properties -version'
-        if ($text -match 'java\.version\s*=\s*(\d+)' -and [int]$Matches[1] -eq 21 -and $text -match 'java\.home\s*=\s*(.+)') {
-            $javaHome = $Matches[1].Trim()
-            return [pscustomobject]@{ Exe = (Join-Path $javaHome 'bin\java.exe'); Home = $javaHome }
-        }
-    }
-    return $null
-}
-
 function Find-SpringJar {
     $libs = Join-Path $root 'server\build\libs'
     if (-not (Test-Path $libs)) { return $null }
@@ -166,8 +150,11 @@ try {
     }
 
     # ---- 4. Java + jar -------------------------------------------------------------------
-    $java = Find-Java21
-    if (-not $java) { Stop-WithError $ExitCode.Java 'Java 21 is not available (checked JAVA_HOME and PATH). Install JDK 21 and/or set JAVA_HOME.' }
+    # Phase 6H-8: checks JAVA_HOME/PATH for the current process, then falls back to the Machine/User
+    # JAVA_HOME and Program Files\Java\jdk-21* - a stale shell whose own JAVA_HOME/PATH predate a JDK
+    # 21 install no longer has to be re-launched to pick it up.
+    $java = Find-RunningAiJava21
+    if (-not $java) { Stop-WithError $ExitCode.Java 'Java 21 is not available (checked JAVA_HOME, PATH, machine/user JAVA_HOME and Program Files\Java). Install JDK 21 and/or set JAVA_HOME.' }
 
     if (Test-SpringHealth $SpringPort) {
         Write-Step "Spring Boot: UP on port $SpringPort (already running, not restarted)"

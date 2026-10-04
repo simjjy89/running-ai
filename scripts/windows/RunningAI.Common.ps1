@@ -50,6 +50,67 @@ function Invoke-NativeText {
 
 function Quote-Argument { param([string]$Value) if ($Value -match '[\s"]') { '"' + ($Value -replace '"', '\"') + '"' } else { $Value } }
 
+# ---- Java 21 discovery (Phase 6H-8) -----------------------------------------------------------
+# start-running-ai.ps1 previously only checked the current process's JAVA_HOME and PATH, so a stale
+# PowerShell session (one whose JAVA_HOME points at an older JDK, or has none at all) reported
+# "Java 21 is not available" even though a JDK 21 was installed and discoverable elsewhere on the
+# machine. These two functions are split so the candidate list - pure, no process started - can be
+# tested without a real JDK; only Find-RunningAiJava21 itself runs java.exe.
+
+# Builds an ordered, de-duplicated list of candidate JDK home directories to check, cheapest/most
+# specific first. Every source is an optional parameter so tests can fake each one independently
+# without touching the real machine/user environment or current process state.
+function Get-RunningAiJava21Candidates {
+    param(
+        [string]$EnvJavaHome = $env:JAVA_HOME,
+        [string]$PathJavaExe = $(($found = Get-Command java -ErrorAction SilentlyContinue); if ($found) { $found.Source } else { $null }),
+        [string]$MachineJavaHome = ([Environment]::GetEnvironmentVariable('JAVA_HOME', 'Machine')),
+        [string]$UserJavaHome = ([Environment]::GetEnvironmentVariable('JAVA_HOME', 'User')),
+        [string]$ProgramFilesJavaDir = $(if ($env:ProgramFiles) { Join-Path $env:ProgramFiles 'Java' } else { $null })
+    )
+
+    $candidates = New-Object System.Collections.Generic.List[string]
+    if ($EnvJavaHome) { $candidates.Add($EnvJavaHome) }
+    if ($PathJavaExe) {
+        # .../bin/java.exe -> home is two levels up.
+        $candidates.Add((Split-Path (Split-Path $PathJavaExe -Parent) -Parent))
+    }
+    if ($MachineJavaHome) { $candidates.Add($MachineJavaHome) }
+    if ($UserJavaHome) { $candidates.Add($UserJavaHome) }
+    if ($ProgramFilesJavaDir -and (Test-Path -LiteralPath $ProgramFilesJavaDir)) {
+        Get-ChildItem -LiteralPath $ProgramFilesJavaDir -Directory -Filter 'jdk-21*' -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending |
+            ForEach-Object { $candidates.Add($_.FullName) }
+    }
+
+    $seen = New-Object System.Collections.Generic.HashSet[string]([StringComparer]::OrdinalIgnoreCase)
+    $ordered = New-Object System.Collections.Generic.List[string]
+    foreach ($c in $candidates) {
+        if ([string]::IsNullOrWhiteSpace($c)) { continue }
+        $normalized = $c.TrimEnd('\')
+        if ($seen.Add($normalized)) { $ordered.Add($normalized) }
+    }
+    return ,$ordered.ToArray()
+}
+
+# Runs java.exe at each candidate home (via Invoke-NativeText, so PowerShell 5.1 never turns its
+# normal -XshowSettings/-version stderr output into a terminating NativeCommandError) until one
+# reports "java.version = 21". Returns $null if none do. A missing java.exe at a candidate is
+# skipped, never an error - most candidates will not exist on any given machine.
+function Find-RunningAiJava21 {
+    param([string[]]$Candidates = (Get-RunningAiJava21Candidates))
+
+    foreach ($candidateHome in $Candidates) {
+        $exe = Join-Path $candidateHome 'bin\java.exe'
+        if (-not (Test-Path -LiteralPath $exe)) { continue }
+        $text = Invoke-NativeText $exe '-XshowSettings:properties -version'
+        if ($text -match 'java\.version\s*=\s*21(\.|\s|$)') {
+            return [pscustomobject]@{ Exe = $exe; Home = $candidateHome }
+        }
+    }
+    return $null
+}
+
 # ---- .env loading -----------------------------------------------------------------------------
 # Parses KEY=VALUE lines from a repo-root .env into the CURRENT process's environment, so every
 # child process started afterward (Start-Process inherits the full environment block by default)
@@ -188,6 +249,29 @@ function Invoke-RunningAiJsonRequest {
     $text = [System.Text.Encoding]::UTF8.GetString($response.RawContentStream.ToArray())
     if ([string]::IsNullOrWhiteSpace($text)) { return $null }
     return $text | ConvertFrom-Json
+}
+
+# Extracts a safe, displayable {HttpStatus; Code; Message} from the exception an Invoke-WebRequest
+# call raises on a non-2xx RunningAI response (ErrorResponse: code/message/timestamp/errors - never
+# a credential, a raw prompt or a raw AI response, so this is always safe to print). Falls back to
+# the raw exception message when the response isn't the expected JSON shape (for example the server
+# is entirely unreachable, in which case $ErrorRecord.Exception.Response is $null).
+function Get-RunningAiErrorDetails {
+    param([Parameter(Mandatory)]$ErrorRecord)
+
+    $response = $ErrorRecord.Exception.Response
+    if (-not $response) {
+        return [pscustomobject]@{ HttpStatus = $null; Code = $null; Message = $ErrorRecord.Exception.Message }
+    }
+    try {
+        $status = [int]$response.StatusCode
+        $stream = $response.GetResponseStream()
+        $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::UTF8)
+        $body = $reader.ReadToEnd() | ConvertFrom-Json
+        return [pscustomobject]@{ HttpStatus = $status; Code = $body.code; Message = $body.message }
+    } catch {
+        return [pscustomobject]@{ HttpStatus = $status; Code = $null; Message = $ErrorRecord.Exception.Message }
+    }
 }
 
 # ---- HTTP -----------------------------------------------------------------------------
