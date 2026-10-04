@@ -157,6 +157,55 @@ class WorkoutDraftApiTest {
         assertThat(constraints.painOrFatigueFeedback).isEqualTo("sore calf")
     }
 
+    /**
+     * Phase 6H-7.2: a synthetic Korean natural-language goal sent as UTF-8 JSON must reach
+     * [SessionConstraints] byte-for-byte / character-for-character identical, through
+     * controller -> service -> coach, with no server-side encoding configuration involved.
+     */
+    @Test
+    fun `a Korean requestedGoal arrives at the coach exactly as sent, unmangled`() {
+        val goal = "하프마라톤 일주일 전 가볍게 훈련하고 싶어요"
+        val feedback = "다리가 좀 무거워요"
+        val pain = "무릎이 약간 뻐근해요"
+        val body = objectMapper.writeValueAsString(
+            mapOf(
+                "date" to "2026-10-02",
+                "requestedGoal" to goal,
+                "userFeedback" to feedback,
+                "painOrFatigueFeedback" to pain,
+            ),
+        )
+
+        mockMvc.perform(
+            post("/api/v1/workout-drafts")
+                .contentType(MediaType.parseMediaType("application/json; charset=UTF-8"))
+                .content(body.toByteArray(Charsets.UTF_8)),
+        ).andExpect(status().isOk)
+
+        val constraints = coach.createdContexts.single().constraints
+        assertThat(constraints.requestedGoal).isEqualTo(goal)
+        assertThat(constraints.userFeedback).isEqualTo(feedback)
+        assertThat(constraints.painOrFatigueFeedback).isEqualTo(pain)
+    }
+
+    /** Same guarantee for a revision's free-text `request` field, controller -> service -> coach. */
+    @Test
+    fun `a Korean revision request arrives at the coach exactly as sent, unmangled`() {
+        val id = objectMapper.readTree(
+            generate("""{"date":"2026-10-02"}""").andReturn().response.contentAsString,
+        ).get("id").asLong()
+        val request = "하프마라톤 일주일 전이니까 조금 더 가볍게 바꿔줘"
+        val body = objectMapper.writeValueAsString(mapOf("request" to request))
+
+        mockMvc.perform(
+            post("/api/v1/workout-drafts/$id/revisions")
+                .contentType(MediaType.parseMediaType("application/json; charset=UTF-8"))
+                .content(body.toByteArray(Charsets.UTF_8)),
+        ).andExpect(status().isOk)
+
+        assertThat(coach.revisionRequests.single()).isEqualTo(request)
+    }
+
     @Test
     fun `an omitted date defaults to the athlete-local today`() {
         generate("""{"availableMinutes":40}""").andExpect(status().isOk)
