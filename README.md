@@ -364,6 +364,48 @@ scripts\windows\uninstall-running-ai-watchdog-task.ps1          # 이 task만 �
 - 진단: `.runtime/watchdog-status.json`, `.runtime/logs/watchdog.log`, `status-running-ai.ps1`의 Watchdog / RestartBudget 행. Garmin은 호출하지 않으며 `POST /sync`도 하지 않는다.
 - Log retention: 10 MB 초과 또는 재시작 전 로그는 `<name>.<yyyyMMdd-HHmmss>.log`로 rotate, 14일 지난 rotated 로그 삭제 (`.runtime/logs` 안의 RunningAI 로그만).
 
+### Windows API 호출 / AI Coach Operator CLI
+
+**UTF-8-safe JSON 호출.** `$body | ConvertTo-Json`을 그대로 `Invoke-RestMethod -Body`에 넘기지 않는다
+(Windows PowerShell 5.1에서는 그 바이트가 콘솔/출력 encoding에 의존하고, 응답도 charset 없는
+`application/json`이면 Invoke-RestMethod 자체가 비-UTF-8로 디코드할 수 있다 - 둘 다 Phase 6H-7.2에서
+실제로 재현된 버그다). 대신 `RunningAI.Common.ps1`의 `Invoke-RunningAiJsonRequest`를 쓴다:
+
+```powershell
+. .\scripts\windows\RunningAI.Common.ps1
+Invoke-RunningAiJsonRequest -Method POST -Uri "http://127.0.0.1:8080/api/v1/workout-drafts" `
+    -Body @{ date = "2026-10-04"; requestedGoal = "easy taper run before the half marathon" }
+```
+
+또는 바로 쓸 수 있는 wrapper:
+
+```powershell
+.\scripts\windows\invoke-running-ai-api.ps1 -Method POST -Path "/api/v1/workout-drafts" -Body $body
+```
+
+자세한 원인과 수정 내용은 [docs/architecture/windows-api-encoding.md](docs/architecture/windows-api-encoding.md).
+
+**AI Coach operator CLI (Phase 6H-8).** Draft 생성/resume → review → revise 반복 → `APPROVE` 입력 →
+publish preview → `YES` 입력 → controlled publish → read-back verification → safe-mode 복귀까지
+하나의 스크립트로 진행한다. AI는 draft만 만들고, approve와 publish는 항상 사람이 정확한 단어를
+입력해야 실행된다 (bypass용 parameter는 존재하지 않는다).
+
+```powershell
+.\scripts\windows\running-ai-coach.ps1 -Date 2026-10-04 -AvailableMinutes 35 -Environment OUTDOOR -Goal "easy taper run before the half marathon"
+.\scripts\windows\running-ai-coach.ps1 -DraftId 12          # 기존 draft resume
+```
+
+이미 approve된 draft만 다시 publish하려면:
+
+```powershell
+.\scripts\windows\publish-approved-draft-controlled.ps1 -DraftId 12
+```
+
+구조와 안전장치(TOCTOU 재검증, REST/이미-published/unpublishable short-circuit, finally cleanup)는
+[docs/architecture/coach-operator-workflow.md](docs/architecture/coach-operator-workflow.md).
+비파괴 self-check: `powershell -File scripts\windows\tests\Test-CoachOperator.ps1` (로컬 HttpListener만
+사용, 실제 서버/Docker/Garmin/Intervals 호출 없음).
+
 ## Raspberry Pi / Linux Deployment
 
 Raspberry Pi OS 64-bit(arm64) 같은 systemd 호스트용 배포 artifact가 `deploy/linux/`에 있다. **준비 및 정적 검증까지만 끝났고 실제 Pi/systemd에서는 실행해 본 적이 없다.**
