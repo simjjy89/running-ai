@@ -145,6 +145,79 @@ function New-DraftFixture {
     }
 }
 
+# A RecoveryResponse (Phase 6H-8.1): deliberately has NO "type", "repetitions", "recovery",
+# "recoveryDurationMinutes", "heartRateBpmMin" or "heartRateBpmMax" key - matching the real API DTO
+# exactly, not the SegmentResponse shape. Pass $HrPercentLthrMin/$Max as $null for a qualitative
+# (no numeric target) recovery block.
+function New-RecoveryFixture {
+    param(
+        [int]$DurationMinutes = 1, [string]$Intensity = 'VERY_EASY',
+        [string]$Description = 'Easy jog recovery between reps', [string]$PrimaryTargetType = 'HEART_RATE',
+        $PaceFast = $null, $PaceSlow = $null, $HrPercentLthrMin = 65, $HrPercentLthrMax = 75,
+        $TreadmillSpeedMin = $null, $TreadmillSpeedMax = $null, $InclineMin = $null, $InclineMax = $null
+    )
+    @{
+        durationMinutes = $DurationMinutes; intensity = $Intensity; description = $Description
+        primaryTargetType = $PrimaryTargetType
+        paceSecondsPerKmFast = $PaceFast; paceSecondsPerKmSlow = $PaceSlow
+        heartRatePercentLthrMin = $HrPercentLthrMin; heartRatePercentLthrMax = $HrPercentLthrMax
+        treadmillSpeedKphMin = $TreadmillSpeedMin; treadmillSpeedKphMax = $TreadmillSpeedMax
+        inclinePercentMin = $InclineMin; inclinePercentMax = $InclineMax
+    }
+}
+
+# A SegmentResponse with a repeat block (repetitions + a nested RecoveryResponse) - the real shape
+# that exposed the Phase 6H-8.1 bug, as opposed to New-DraftFixture's plain segments = @().
+function New-RepeatSegmentFixture {
+    param(
+        [string]$Type = 'MAIN', [int]$DurationMinutes = 2, [string]$Intensity = 'HARD',
+        [string]$Description = 'Controlled fast rep', [string]$PrimaryTargetType = 'PACE',
+        $PaceFast = 275, $PaceSlow = 285, $Repetitions = 5, $Recovery = (New-RecoveryFixture)
+    )
+    @{
+        type = $Type; durationMinutes = $DurationMinutes; intensity = $Intensity
+        description = $Description; primaryTargetType = $PrimaryTargetType
+        paceSecondsPerKmFast = $PaceFast; paceSecondsPerKmSlow = $PaceSlow
+        heartRateBpmMin = $null; heartRateBpmMax = $null
+        heartRatePercentLthrMin = $null; heartRatePercentLthrMax = $null
+        treadmillSpeedKphMin = $null; treadmillSpeedKphMax = $null
+        inclinePercentMin = $null; inclinePercentMax = $null
+        repetitions = $Repetitions; recoveryDurationMinutes = $null
+        recovery = $Recovery
+    }
+}
+
+# A plain (no repeat, no recovery) SegmentResponse - a warm-up or cool-down with an HR target.
+function New-SimpleSegmentFixture {
+    param(
+        [string]$Type = 'WARM_UP', [int]$DurationMinutes = 10, [string]$Intensity = 'VERY_EASY',
+        [string]$Description = 'Warm up', $HrPercentLthrMin = 65, $HrPercentLthrMax = 75
+    )
+    @{
+        type = $Type; durationMinutes = $DurationMinutes; intensity = $Intensity; description = $Description
+        primaryTargetType = 'HEART_RATE'
+        paceSecondsPerKmFast = $null; paceSecondsPerKmSlow = $null
+        heartRateBpmMin = $null; heartRateBpmMax = $null
+        heartRatePercentLthrMin = $HrPercentLthrMin; heartRatePercentLthrMax = $HrPercentLthrMax
+        treadmillSpeedKphMin = $null; treadmillSpeedKphMax = $null
+        inclinePercentMin = $null; inclinePercentMax = $null
+        repetitions = $null; recoveryDurationMinutes = $null; recovery = $null
+    }
+}
+
+# A full draft matching the real Draft #10 shape that exposed this bug on Main PC:
+# WARM_UP (HR) -> MAIN x5 with a targeted recovery (PACE + HR recovery) -> COOL_DOWN (HR).
+function New-RepeatDraftFixture {
+    param([int]$Id = 10, [int]$Version = 1, [string]$Status = 'DRAFT')
+    $draft = New-DraftFixture -Id $Id -Version $Version -Status $Status
+    $draft.segments = @(
+        (New-SimpleSegmentFixture -Type 'WARM_UP' -Description 'Warm up'),
+        (New-RepeatSegmentFixture),
+        (New-SimpleSegmentFixture -Type 'COOL_DOWN' -Description 'Cool down')
+    )
+    return $draft
+}
+
 function New-ApprovalFixture {
     param([int]$DraftId = 12, [int]$ApprovalId = 99)
     @{ draftId = $DraftId; draftGroupId = 'g-' + $DraftId; version = 1; date = '2026-10-04'; workoutType = 'EASY'; status = 'APPROVED'; approvalId = $ApprovalId; approvedAt = '2026-10-04T00:05:00Z' }
@@ -176,6 +249,17 @@ function New-PublishedFixture {
 }
 
 function New-Port { Get-Random -Minimum 20000 -Maximum 40000 }
+
+# A hashtable fixture and a real parsed-JSON API response are NOT the same shape for property
+# access: a hashtable's dot-access ($h.foo) works for any key whether or not Get-RunningAiOptionalProperty
+# (which reads .PSObject.Properties) can see it - $h.PSObject.Properties never exposes a Hashtable's
+# own keys at all. Every fixture handed directly to a display function (not through the fake HTTP
+# server, which already round-trips through real JSON) must go through this first, or a check could
+# pass against a hashtable while the identical bug still breaks a real PSCustomObject API response.
+function ConvertTo-RunningAiFakeApiObject {
+    param([Parameter(Mandatory)][hashtable]$Fixture, [int]$Depth = 10)
+    return ($Fixture | ConvertTo-Json -Depth $Depth) | ConvertFrom-Json
+}
 
 # ---- 64: generate safety -------------------------------------------------------------------------
 
@@ -431,11 +515,90 @@ Check 'a failed publish still runs the finally cleanup: switches false, safe-mod
 # ---- 75: display helper sanity (pure, no HTTP) ---------------------------------------------------
 
 Check 'Format-RunningAiSegmentTarget shows pace, %LTHR, absolute bpm as not-publishable, and treadmill' {
-    $pace = Format-RunningAiSegmentTarget @{ paceSecondsPerKmFast = 330; paceSecondsPerKmSlow = 360; heartRatePercentLthrMin = $null; heartRatePercentLthrMax = $null; heartRateBpmMin = $null; heartRateBpmMax = $null; treadmillSpeedKphMin = $null; treadmillSpeedKphMax = $null; inclinePercentMin = $null; inclinePercentMax = $null }
-    $lthr = Format-RunningAiSegmentTarget @{ paceSecondsPerKmFast = $null; paceSecondsPerKmSlow = $null; heartRatePercentLthrMin = 65; heartRatePercentLthrMax = 75; heartRateBpmMin = $null; heartRateBpmMax = $null; treadmillSpeedKphMin = $null; treadmillSpeedKphMax = $null; inclinePercentMin = $null; inclinePercentMax = $null }
-    $bpm = Format-RunningAiSegmentTarget @{ paceSecondsPerKmFast = $null; paceSecondsPerKmSlow = $null; heartRatePercentLthrMin = $null; heartRatePercentLthrMax = $null; heartRateBpmMin = 140; heartRateBpmMax = 150; treadmillSpeedKphMin = $null; treadmillSpeedKphMax = $null; inclinePercentMin = $null; inclinePercentMax = $null }
+    $pace = Format-RunningAiSegmentTarget (ConvertTo-RunningAiFakeApiObject @{ paceSecondsPerKmFast = 330; paceSecondsPerKmSlow = 360; heartRatePercentLthrMin = $null; heartRatePercentLthrMax = $null; heartRateBpmMin = $null; heartRateBpmMax = $null; treadmillSpeedKphMin = $null; treadmillSpeedKphMax = $null; inclinePercentMin = $null; inclinePercentMax = $null })
+    $lthr = Format-RunningAiSegmentTarget (ConvertTo-RunningAiFakeApiObject @{ paceSecondsPerKmFast = $null; paceSecondsPerKmSlow = $null; heartRatePercentLthrMin = 65; heartRatePercentLthrMax = 75; heartRateBpmMin = $null; heartRateBpmMax = $null; treadmillSpeedKphMin = $null; treadmillSpeedKphMax = $null; inclinePercentMin = $null; inclinePercentMax = $null })
+    $bpm = Format-RunningAiSegmentTarget (ConvertTo-RunningAiFakeApiObject @{ paceSecondsPerKmFast = $null; paceSecondsPerKmSlow = $null; heartRatePercentLthrMin = $null; heartRatePercentLthrMax = $null; heartRateBpmMin = 140; heartRateBpmMax = 150; treadmillSpeedKphMin = $null; treadmillSpeedKphMax = $null; inclinePercentMin = $null; inclinePercentMax = $null })
 
     ($pace -eq 'Pace 5:30-6:00/km') -and ($lthr -eq 'HR 65-75% LTHR') -and ($bpm -match 'NOT PUBLISHABLE')
+}
+
+# ---- Phase 6H-8.1: recovery-block display hotfix -------------------------------------------------
+# RecoveryResponse (durationMinutes/intensity/description/primaryTargetType/pace/%LTHR/treadmill/
+# incline) is a DIFFERENT API shape from SegmentResponse (adds type/repetitions/recovery/
+# recoveryDurationMinutes/heartRateBpmMin/Max) - rendering one as if it were the other threw
+# PropertyNotFoundException live on Main PC (Draft #10: a MAIN x5 with a targeted recovery block).
+
+Check 'A: a targeted repeat+recovery segment displays without error (MAIN x5, Recovery, HR target)' {
+    $recovery = ConvertTo-RunningAiFakeApiObject (New-RecoveryFixture)
+    $segment = ConvertTo-RunningAiFakeApiObject (New-RepeatSegmentFixture -Recovery (New-RecoveryFixture))
+    Write-RunningAiSegment -Segment $segment | Out-Null
+    $true
+}
+
+Check 'B: a recovery object with no "type" property displays without PropertyNotFoundException' {
+    $recovery = ConvertTo-RunningAiFakeApiObject (New-RecoveryFixture)
+    if ($null -ne $recovery.PSObject.Properties['type']) { throw 'fixture bug: the recovery fixture must not have a type property' }
+    Write-RunningAiRecovery -Recovery $recovery | Out-Null
+    $true
+}
+
+Check 'C: a recovery object with no "repetitions" property displays without PropertyNotFoundException' {
+    $recovery = ConvertTo-RunningAiFakeApiObject (New-RecoveryFixture)
+    if ($null -ne $recovery.PSObject.Properties['repetitions']) { throw 'fixture bug: the recovery fixture must not have a repetitions property' }
+    Write-RunningAiRecovery -Recovery $recovery | Out-Null
+    $true
+}
+
+Check 'D: a qualitative recovery (no pace / %LTHR / bpm) displays without error and shows no target line' {
+    $recovery = ConvertTo-RunningAiFakeApiObject (New-RecoveryFixture -HrPercentLthrMin $null -HrPercentLthrMax $null)
+    $target = Format-RunningAiSegmentTarget $recovery
+    Write-RunningAiRecovery -Recovery $recovery | Out-Null
+    $null -eq $target
+}
+
+Check 'E: a draft that fails to display never reaches approve/preview/publish (fail-closed)' {
+    $port = New-Port
+    $base = "http://127.0.0.1:$port"
+    $malformed = New-DraftFixture
+    # A segment missing its "type" key entirely - a real API response always has it (SegmentResponse
+    # is @JsonInclude(ALWAYS)), so this simulates the display-breaking shape mismatch this phase found,
+    # without relying on the specific bug already fixed above (future-proofs the fail-closed gate).
+    $malformed.segments = @(
+        @{ durationMinutes = 10; intensity = 'VERY_EASY'; description = $null; primaryTargetType = $null
+           paceSecondsPerKmFast = $null; paceSecondsPerKmSlow = $null; heartRateBpmMin = $null; heartRateBpmMax = $null
+           heartRatePercentLthrMin = $null; heartRatePercentLthrMax = $null; treadmillSpeedKphMin = $null
+           treadmillSpeedKphMax = $null; inclinePercentMin = $null; inclinePercentMax = $null
+           repetitions = $null; recoveryDurationMinutes = $null; recovery = $null }
+    )
+    $routes = @(
+        @{ Method = 'GET'; Path = '/actuator/health'; Body = $HealthUp }
+        @{ Method = 'POST'; Path = '/api/v1/workout-drafts'; Body = $malformed }
+    )
+    $pending = Start-RunningAiFakeServer -Port $port -Routes $routes
+    # Interactive (not -NonInteractive): if display didn't fail closed, the menu would prompt next,
+    # and a reader with no scripted responses would throw "ran out of responses" instead - a
+    # different failure that would NOT prove zero approve/publish calls were made, so this uses a
+    # reader that would itself be a visible test failure if ever invoked.
+    $reader = { param($Prompt) throw "the approve/revise menu must never be reached: $Prompt" }
+    $result = Invoke-CoachOperatorSession -BaseUrl $base -Date '2026-10-04' -Reader $reader
+    $log = Complete-RunningAiFakeServer -Pending $pending
+
+    ($result.Outcome -eq 'DISPLAY_FAILED') -and (Confirm-RunningAiFakeServerLog -Log $log -ExpectedCount 2)
+}
+
+Check 'F: a Draft #10-compatible shape (WU HR / MAIN PACE x5 / Recovery HR / CD HR) displays fully' {
+    $port = New-Port
+    $base = "http://127.0.0.1:$port"
+    $routes = @(
+        @{ Method = 'GET'; Path = '/actuator/health'; Body = $HealthUp }
+        @{ Method = 'POST'; Path = '/api/v1/workout-drafts'; Body = (New-RepeatDraftFixture) }
+    )
+    $pending = Start-RunningAiFakeServer -Port $port -Routes $routes
+    $result = Invoke-CoachOperatorSession -BaseUrl $base -Date '2026-10-04' -NonInteractive
+    $log = Complete-RunningAiFakeServer -Pending $pending
+
+    ($result.Outcome -eq 'DISPLAYED') -and (Confirm-RunningAiFakeServerLog -Log $log -ExpectedCount 2) -and
+    ($result.Draft.segments.Count -eq 3) -and ($result.Draft.segments[1].recovery.durationMinutes -eq 1)
 }
 
 if ($failures.Count) {
