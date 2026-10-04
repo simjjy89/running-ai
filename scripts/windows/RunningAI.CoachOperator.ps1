@@ -319,11 +319,18 @@ function Invoke-RunningAiControlledPublish {
     $env:WORKOUT_PUBLISHING_ENABLED = 'false'
     $env:WORKOUT_PUBLISHING_SCHEDULER_ENABLED = 'false'
     $env:RUNNINGAI_MCP_ENABLED = 'false'
-    $restarted = $false
+    # Phase 6H-8.2: set BEFORE calling the restarter, not after it returns. A restarter that fails
+    # partway through (observed live: Spring stopped, connector stopped, connector started, then
+    # Java discovery failed before Spring could start) throws instead of returning - if the flag
+    # were only set on a successful return, the finally block below would never attempt the
+    # safe-mode recovery restart at all, leaving the runtime in whatever partial state the failed
+    # restart left it in. "Did we ATTEMPT a publish-enabled restart" is what determines whether a
+    # safe-mode restart is owed, not "did one FULLY SUCCEED".
+    $restartAttempted = $false
 
     try {
+        $restartAttempted = $true
         & $RuntimeRestarter $BaseUrl
-        $restarted = $true
 
         $preview2 = Invoke-RunningAiJsonRequest -Method GET -Uri "$BaseUrl/api/v1/workout-drafts/$DraftId/publish-preview"
         if (-not (Test-RunningAiPreviewUnchanged -Before $preview -After $preview2)) {
@@ -357,7 +364,7 @@ function Invoke-RunningAiControlledPublish {
         $env:WORKOUT_PUBLISHING_ENABLED = 'false'
         $env:WORKOUT_PUBLISHING_SCHEDULER_ENABLED = 'false'
         $env:RUNNINGAI_MCP_ENABLED = 'false'
-        if ($restarted) {
+        if ($restartAttempted) {
             try {
                 & $RuntimeRestarter $BaseUrl
                 Write-Host 'RunningAI safe-mode restart: OK'

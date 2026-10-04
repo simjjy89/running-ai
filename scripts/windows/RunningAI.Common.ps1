@@ -57,13 +57,28 @@ function Quote-Argument { param([string]$Value) if ($Value -match '[\s"]') { '"'
 # machine. These two functions are split so the candidate list - pure, no process started - can be
 # tested without a real JDK; only Find-RunningAiJava21 itself runs java.exe.
 
+# Returns java.exe's path from PATH, or $null. Split out of Get-RunningAiJava21Candidates's own
+# parameter default (Phase 6H-8.2): a parenthesized assignment like "($found = Get-Command ...)"
+# itself emits $found's value onto the pipeline, IN ADDITION to the subsequent "if" statement's
+# result - so the old inline "$(($found = Get-Command java ...); if ($found) {...} else {$null})"
+# default produced TWO pipeline objects, which [string] coercion joined with a space into something
+# like "java.exe C:\Program Files\Java\jdk-21.0.2\bin\java.exe" (CommandInfo's own ToString(), then
+# its real .Source, concatenated) - live on Main PC, this corrupted candidate then failed
+# Split-Path/Join-Path with "DriveNotFoundException: drive 'java.exe C' not found". A plain
+# function body has no such pipeline-emission trap: only the explicit "return" value escapes it.
+function Get-RunningAiPathJavaExe {
+    $found = Get-Command java -ErrorAction SilentlyContinue
+    if ($found) { return $found.Source }
+    return $null
+}
+
 # Builds an ordered, de-duplicated list of candidate JDK home directories to check, cheapest/most
 # specific first. Every source is an optional parameter so tests can fake each one independently
 # without touching the real machine/user environment or current process state.
 function Get-RunningAiJava21Candidates {
     param(
         [string]$EnvJavaHome = $env:JAVA_HOME,
-        [string]$PathJavaExe = $(($found = Get-Command java -ErrorAction SilentlyContinue); if ($found) { $found.Source } else { $null }),
+        [string]$PathJavaExe = (Get-RunningAiPathJavaExe),
         [string]$MachineJavaHome = ([Environment]::GetEnvironmentVariable('JAVA_HOME', 'Machine')),
         [string]$UserJavaHome = ([Environment]::GetEnvironmentVariable('JAVA_HOME', 'User')),
         [string]$ProgramFilesJavaDir = $(if ($env:ProgramFiles) { Join-Path $env:ProgramFiles 'Java' } else { $null })
@@ -259,7 +274,18 @@ function Invoke-RunningAiJsonRequest {
 function Get-RunningAiErrorDetails {
     param([Parameter(Mandatory)]$ErrorRecord)
 
-    $response = $ErrorRecord.Exception.Response
+    # Phase 6H-8.2: "$ErrorRecord.Exception.Response" assumed every exception has a Response member
+    # (true only for a WebException). A generic .NET/PowerShell exception - DriveNotFoundException,
+    # ArgumentException, FileNotFoundException, anything that is not a failed HTTP call - has no
+    # such member at all, and under Set-StrictMode referencing a genuinely-absent property throws
+    # PropertyNotFoundException itself: the error formatter caused a second failure while reporting
+    # the first one (live on Main PC, following the Java-discovery bug above). Read it as an
+    # optional property instead, exactly like Get-RunningAiOptionalProperty (CoachOperator.ps1) does
+    # for an API response shape - this function cannot depend on that one without a load-order
+    # requirement, so the same safe-read logic is duplicated here, deliberately, as a two-line
+    # primitive rather than a cross-file dependency.
+    $responseProperty = $ErrorRecord.Exception.PSObject.Properties['Response']
+    $response = if ($responseProperty) { $responseProperty.Value } else { $null }
     if (-not $response) {
         return [pscustomobject]@{ HttpStatus = $null; Code = $null; Message = $ErrorRecord.Exception.Message }
     }
