@@ -280,6 +280,58 @@ Check 'Invoke-RunningAiJsonRequest decodes a charset-less application/json respo
     } finally { $listener.Stop(); $listener.Close() }
 }
 
+# ---- Java 21 discovery (Phase 6H-8) ------------------------------------------------------------
+# Pure candidate-building logic only; no real java.exe is invoked and no real user/machine path is
+# hardcoded (every source is faked via the function's own parameters).
+
+Check 'Get-RunningAiJava21Candidates orders env JAVA_HOME, then PATH, then machine/user JAVA_HOME, then Program Files' {
+    $fakeRoot = Join-Path $env:TEMP "selftest-java-$([guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Force (Join-Path $fakeRoot 'ProgramFilesJava\jdk-21.0.9') | Out-Null
+        New-Item -ItemType Directory -Force (Join-Path $fakeRoot 'ProgramFilesJava\jdk-21.0.1') | Out-Null
+        New-Item -ItemType Directory -Force (Join-Path $fakeRoot 'ProgramFilesJava\jdk-17.0.1') | Out-Null
+
+        $result = Get-RunningAiJava21Candidates `
+            -EnvJavaHome (Join-Path $fakeRoot 'env-home') `
+            -PathJavaExe (Join-Path $fakeRoot 'path-home\bin\java.exe') `
+            -MachineJavaHome (Join-Path $fakeRoot 'machine-home') `
+            -UserJavaHome (Join-Path $fakeRoot 'user-home') `
+            -ProgramFilesJavaDir (Join-Path $fakeRoot 'ProgramFilesJava')
+
+        ($result.Count -eq 6) -and
+        ($result[0] -eq (Join-Path $fakeRoot 'env-home')) -and
+        ($result[1] -eq (Join-Path $fakeRoot 'path-home')) -and
+        ($result[2] -eq (Join-Path $fakeRoot 'machine-home')) -and
+        ($result[3] -eq (Join-Path $fakeRoot 'user-home')) -and
+        # Program Files jdk-21* candidates only (jdk-17 excluded), newest-looking name first.
+        ($result[4] -eq (Join-Path $fakeRoot 'ProgramFilesJava\jdk-21.0.9')) -and
+        ($result[5] -eq (Join-Path $fakeRoot 'ProgramFilesJava\jdk-21.0.1'))
+    } finally {
+        Remove-Item -LiteralPath $fakeRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Check 'Get-RunningAiJava21Candidates de-duplicates (case-insensitive) and skips missing sources' {
+    $result = Get-RunningAiJava21Candidates `
+        -EnvJavaHome 'C:\Fake\JDK' `
+        -PathJavaExe $null `
+        -MachineJavaHome 'c:\fake\jdk\' `
+        -UserJavaHome $null `
+        -ProgramFilesJavaDir $null
+
+    ($result.Count -eq 1) -and ($result[0] -eq 'C:\Fake\JDK')
+}
+
+Check 'Find-RunningAiJava21 skips a candidate with no java.exe and returns null, never throws' {
+    $fakeRoot = Join-Path $env:TEMP "selftest-java-$([guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Force $fakeRoot | Out-Null   # exists, but no bin\java.exe inside
+        $null -eq (Find-RunningAiJava21 -Candidates @($fakeRoot, (Join-Path $fakeRoot 'does-not-exist')))
+    } finally {
+        Remove-Item -LiteralPath $fakeRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 Check 'Quote-Argument quotes only when needed' {
     (Quote-Argument 'C:\a b\c.jar') -eq '"C:\a b\c.jar"' -and (Quote-Argument 'C:\ab\c.jar') -eq 'C:\ab\c.jar'
 }
