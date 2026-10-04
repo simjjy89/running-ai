@@ -127,6 +127,69 @@ function Initialize-DotEnvForThisProcess {
     }
 }
 
+# ---- UTF-8-safe JSON HTTP requests (Phase 6H-7.2) --------------------------------------------
+# Windows PowerShell 5.1's Invoke-RestMethod can mangle non-ASCII text on BOTH sides of a request:
+#  - REQUEST: handing a .NET string to -Body directly sends bytes that depend on the console/output
+#    encoding rather than always being UTF-8 (fixed below by always converting to UTF-8 bytes first).
+#  - RESPONSE: Invoke-RestMethod's own JSON body parsing falls back to a non-UTF-8 encoding whenever
+#    the server's Content-Type omits an explicit charset parameter - which is exactly what Spring's
+#    default JSON response looks like ("application/json", no ";charset=..."). Live-observed
+#    (Phase 6H-7.2, Main PC): an em dash (U+2014, UTF-8 bytes E2 80 94) round-tripped through
+#    Invoke-RestMethod from a real /api/v1/workout-drafts response came back as a different, wrong
+#    single character (double-UTF-8 mojibake: the response's real UTF-8 bytes were decoded as
+#    Latin-1 first, and that wrong text is what the caller received) - while decoding the identical
+#    raw response bytes as UTF-8 by hand gave back the correct em dash.
+#    This is fixed below by never trusting Invoke-RestMethod's own body decoding: every call reads
+#    the raw response bytes and decodes them as UTF-8 itself, the same technique Get-HttpBody below
+#    already uses for actuator/connector health checks.
+
+# Converts any JSON-serializable PowerShell value to UTF-8 bytes (no BOM), via ConvertTo-Json.
+function ConvertTo-RunningAiUtf8JsonBytes {
+    param(
+        [Parameter(Mandatory)]
+        $Value,
+
+        [int]$Depth = 30
+    )
+
+    $json = $Value | ConvertTo-Json -Depth $Depth
+    # -NoEnumerate: a plain "return $bytes" unrolls the byte[] into individual byte objects across
+    # the function-return pipeline boundary, so the caller receives Object[] instead of Byte[] - and
+    # Invoke-RestMethod then falls back to stringifying that Object[] (space-joined decimal values)
+    # instead of sending it as a raw body. This one call is what keeps it as an actual byte[].
+    Write-Output -NoEnumerate ([System.Text.UTF8Encoding]::new($false).GetBytes($json))
+}
+
+# Calls a RunningAI JSON API: sends a request body (when present) as explicit UTF-8 bytes with
+# Content-Type: application/json; charset=utf-8 (never a raw .NET string via -Body), and decodes
+# the response body as UTF-8 itself rather than trusting Invoke-RestMethod's own JSON parsing (see
+# the note above this file's UTF-8 helpers for why). Returns $null for an empty response body.
+function Invoke-RunningAiJsonRequest {
+    param(
+        [Parameter(Mandatory)][string]$Method,
+        [Parameter(Mandatory)][string]$Uri,
+        $Body = $null,
+        [int]$TimeoutSec = 30
+    )
+
+    if ($null -eq $Body) {
+        $response = Invoke-WebRequest -Method $Method -Uri $Uri -TimeoutSec $TimeoutSec -UseBasicParsing
+    } else {
+        $bytes = ConvertTo-RunningAiUtf8JsonBytes $Body
+        $response = Invoke-WebRequest `
+            -Method $Method `
+            -Uri $Uri `
+            -ContentType 'application/json; charset=utf-8' `
+            -Body $bytes `
+            -TimeoutSec $TimeoutSec `
+            -UseBasicParsing
+    }
+
+    $text = [System.Text.Encoding]::UTF8.GetString($response.RawContentStream.ToArray())
+    if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+    return $text | ConvertFrom-Json
+}
+
 # ---- HTTP -----------------------------------------------------------------------------
 
 # Returns the HTTP status code, or $null when nothing answered.

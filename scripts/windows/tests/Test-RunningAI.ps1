@@ -120,6 +120,166 @@ Check 'health checks read a vendor JSON content type (actuator) and plain JSON (
     } finally { $listener.Stop(); $listener.Close() }
 }
 
+# ---- UTF-8 JSON request body (Phase 6H-7.2) ---------------------------------------------------
+# Local HttpListener only: no external network, no RunningAI server required.
+#
+# This file is plain (no-BOM) UTF-8, like every other script here, and Windows PowerShell 5.1 reads
+# a no-BOM .ps1 using the system codepage rather than UTF-8 - a literal Korean string typed directly
+# into this source would silently become mojibake when the script runs (the exact failure this phase
+# investigates). So every non-ASCII fixture below is built from explicit Unicode code points via
+# Join-RunningAiTestChars instead of being typed as a literal, keeping this file itself pure ASCII.
+
+# Builds a string from an array of Unicode code points (as [int], written in hex for readability).
+function Join-RunningAiTestChars {
+    param([Parameter(Mandatory)][int[]]$CodePoints)
+    -join ($CodePoints | ForEach-Object { [char]$_ })
+}
+
+function Receive-RunningAiTestRequestOnce {
+    param([Parameter(Mandatory)][int]$Port)
+    $listener = New-Object System.Net.HttpListener
+    $listener.Prefixes.Add("http://127.0.0.1:$Port/")
+    $listener.Start()
+    try {
+        $job = [powershell]::Create().AddScript({
+            param($l)
+            $ctx = $l.GetContext()
+            $reader = New-Object System.IO.StreamReader($ctx.Request.InputStream, [System.Text.Encoding]::UTF8)
+            $bodyText = $reader.ReadToEnd()
+            $result = [pscustomobject]@{
+                BodyText    = $bodyText
+                ContentType = $ctx.Request.ContentType
+            }
+            $bytes = [Text.Encoding]::UTF8.GetBytes('{"status":"received"}')
+            $ctx.Response.ContentType = 'application/json'
+            $ctx.Response.OutputStream.Write($bytes, 0, $bytes.Length)
+            $ctx.Response.Close()
+            return $result
+        }).AddArgument($listener)
+        $handle = $job.BeginInvoke()
+        return @{ Job = $job; Handle = $handle; Listener = $listener }
+    } catch {
+        $listener.Stop(); $listener.Close()
+        throw
+    }
+}
+
+function Complete-RunningAiTestRequest {
+    param([Parameter(Mandatory)]$Pending, [int]$TimeoutSec = 10)
+    try {
+        if (-not $Pending.Handle.AsyncWaitHandle.WaitOne($TimeoutSec * 1000)) {
+            throw "local HttpListener did not receive a request within ${TimeoutSec}s"
+        }
+        return $Pending.Job.EndInvoke($Pending.Handle)
+    } finally {
+        $Pending.Job.Dispose()
+        $Pending.Listener.Stop()
+        $Pending.Listener.Close()
+    }
+}
+
+Check 'Invoke-RunningAiJsonRequest sends a Korean body as UTF-8 raw bytes (round trip)' {
+    $port = Get-Random -Minimum 20000 -Maximum 40000
+    $pending = Receive-RunningAiTestRequestOnce -Port $port
+    # "running training test" / "want to run lightly" (Korean), built from code points - see note above
+    $goal = Join-RunningAiTestChars 0xB7EC, 0xB2DD, 0x20, 0xD6C8, 0xB828, 0x20, 0xD14C, 0xC2A4, 0xD2B8
+    $feedback = Join-RunningAiTestChars 0xAC00, 0xBCCD, 0xAC8C, 0x20, 0xB2EC, 0xB9AC, 0xACE0, 0x20, 0xC2F6, 0xC5B4, 0xC694
+    $korean = @{ requestedGoal = $goal; userFeedback = $feedback }
+    Invoke-RunningAiJsonRequest -Method POST -Uri "http://127.0.0.1:$port/" -Body $korean | Out-Null
+    $received = Complete-RunningAiTestRequest -Pending $pending
+
+    $parsed = $received.BodyText | ConvertFrom-Json
+    ($parsed.requestedGoal -ceq $goal) -and ($parsed.userFeedback -ceq $feedback) -and
+    ($received.ContentType -match 'charset=utf-8')
+}
+
+Check 'Invoke-RunningAiJsonRequest never mis-decodes the raw request bytes (UTF-8 byte-for-byte)' {
+    $port = Get-Random -Minimum 20000 -Maximum 40000
+    $pending = Receive-RunningAiTestRequestOnce -Port $port
+    # "running training test" (Korean), built from code points - see note above
+    $text = Join-RunningAiTestChars 0xB7EC, 0xB2DD, 0x20, 0xD6C8, 0xB828, 0x20, 0xD14C, 0xC2A4, 0xD2B8
+    Invoke-RunningAiJsonRequest -Method POST -Uri "http://127.0.0.1:$port/" -Body @{ text = $text } | Out-Null
+    $received = Complete-RunningAiTestRequest -Pending $pending
+
+    # Decode the raw JSON body text ourselves and compare the extracted string value directly,
+    # not just "JSON.parse succeeded" - a mis-decoded body can still parse as valid (garbled) JSON.
+    ($received.BodyText | ConvertFrom-Json).text -ceq $text
+}
+
+Check 'Invoke-RunningAiJsonRequest ASCII-only body still round trips (regression)' {
+    $port = Get-Random -Minimum 20000 -Maximum 40000
+    $pending = Receive-RunningAiTestRequestOnce -Port $port
+    Invoke-RunningAiJsonRequest -Method POST -Uri "http://127.0.0.1:$port/" -Body @{ date = '2026-10-02'; availableMinutes = 45 } | Out-Null
+    $received = Complete-RunningAiTestRequest -Pending $pending
+
+    $parsed = $received.BodyText | ConvertFrom-Json
+    ($parsed.date -eq '2026-10-02') -and ($parsed.availableMinutes -eq 45)
+}
+
+Check 'Invoke-RunningAiJsonRequest round trips mixed Korean/ASCII/digits/symbols' {
+    $port = Get-Random -Minimum 20000 -Maximum 40000
+    $pending = Receive-RunningAiTestRequestOnce -Port $port
+    # "Hangul ASCII 123 !@#$%" (Hangul = Korean), built from code points - see note above
+    $mixed = Join-RunningAiTestChars 0xD55C, 0xAE00, 0x20, 0x41, 0x53, 0x43, 0x49, 0x49, 0x20, 0x31, 0x32, 0x33, 0x20, 0x21, 0x40, 0x23, 0x24, 0x25
+    Invoke-RunningAiJsonRequest -Method POST -Uri "http://127.0.0.1:$port/" -Body @{ text = $mixed } | Out-Null
+    $received = Complete-RunningAiTestRequest -Pending $pending
+
+    ($received.BodyText | ConvertFrom-Json).text -ceq $mixed
+}
+
+Check 'ConvertTo-RunningAiUtf8JsonBytes produces no BOM and decodes back to the same string' {
+    # "Hangul test" (Korean), built from code points - see note above
+    $text = Join-RunningAiTestChars 0xD55C, 0xAE00, 0x20, 0xD14C, 0xC2A4, 0xD2B8
+    $bytes = ConvertTo-RunningAiUtf8JsonBytes @{ text = $text }
+    $hasBom = $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
+    $decoded = [System.Text.Encoding]::UTF8.GetString($bytes) | ConvertFrom-Json
+    (-not $hasBom) -and ($decoded.text -ceq $text)
+}
+
+Check 'Invoke-RunningAiJsonRequest with no Body sends no request body (GET)' {
+    $port = Get-Random -Minimum 20000 -Maximum 40000
+    $pending = Receive-RunningAiTestRequestOnce -Port $port
+    Invoke-RunningAiJsonRequest -Method GET -Uri "http://127.0.0.1:$port/" | Out-Null
+    $received = Complete-RunningAiTestRequest -Pending $pending
+    [string]::IsNullOrEmpty($received.BodyText)
+}
+
+<#
+Phase 6H-7.2 live finding (Main PC, real /api/v1/workout-drafts response): Spring's JSON response
+Content-Type is "application/json" with NO charset parameter, and Windows PowerShell 5.1's
+Invoke-RestMethod silently falls back to a non-UTF-8 encoding for such a response, turning a real
+UTF-8 multi-byte character (observed: an em dash) into double-UTF-8 mojibake - a different, wrong
+character. This reproduces that exact server shape locally (no RunningAI server needed) and proves
+Invoke-RunningAiJsonRequest decodes it correctly by reading the raw response bytes as UTF-8 itself,
+never trusting Invoke-RestMethod's own body parsing.
+#>
+Check 'Invoke-RunningAiJsonRequest decodes a charset-less application/json response as UTF-8 (regression)' {
+    $port = Get-Random -Minimum 20000 -Maximum 40000
+    # An em dash (U+2014) plus Hangul ("test"), built from code points - see note above.
+    $text = Join-RunningAiTestChars 0x2014, 0x20, 0xD14C, 0xC2A4, 0xD2B8
+    $listener = New-Object System.Net.HttpListener
+    $listener.Prefixes.Add("http://127.0.0.1:$port/")
+    $listener.Start()
+    try {
+        $job = [powershell]::Create().AddScript({
+            param($l, $responseText)
+            $ctx = $l.GetContext()
+            $json = (@{ text = $responseText } | ConvertTo-Json -Compress)
+            $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($json)
+            # Exactly Spring's default: no charset parameter on the Content-Type.
+            $ctx.Response.ContentType = 'application/json'
+            $ctx.Response.OutputStream.Write($bytes, 0, $bytes.Length)
+            $ctx.Response.Close()
+        }).AddArgument($listener).AddArgument($text)
+        $handle = $job.BeginInvoke()
+        $result = Invoke-RunningAiJsonRequest -Method GET -Uri "http://127.0.0.1:$port/"
+        if (-not $handle.AsyncWaitHandle.WaitOne(10000)) { throw 'local HttpListener did not finish within 10s' }
+        $job.EndInvoke($handle) | Out-Null
+        $job.Dispose()
+        $result.text -ceq $text
+    } finally { $listener.Stop(); $listener.Close() }
+}
+
 Check 'Quote-Argument quotes only when needed' {
     (Quote-Argument 'C:\a b\c.jar') -eq '"C:\a b\c.jar"' -and (Quote-Argument 'C:\ab\c.jar') -eq 'C:\ab\c.jar'
 }
