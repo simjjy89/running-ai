@@ -332,6 +332,46 @@ Check 'Find-RunningAiJava21 skips a candidate with no java.exe and returns null,
     }
 }
 
+# Phase 6H-8.2 live finding (Main PC): the old inline default
+# "$(($found = Get-Command java ...); if ($found) {...} else {$null})" emitted TWO pipeline objects
+# (the parenthesized assignment's own value, then the if's result), which [string] coercion joined
+# with a space into a corrupted path like "java.exe C:\...\bin\java.exe" - this reproduces that exact
+# corruption class generically (any candidate must be a single clean path or $null, never a
+# space-joined concatenation of more than one value).
+Check 'Get-RunningAiPathJavaExe returns a single clean path or null, never a space-joined concatenation' {
+    $result = Get-RunningAiPathJavaExe
+    ($null -eq $result) -or (($result -is [string]) -and ($result.Trim() -notmatch '\s[A-Za-z]:\\'))
+}
+
+Check 'Get-RunningAiJava21Candidates (real PATH, no override) never throws building its candidate list' {
+    # End-to-end: exercises the real (fixed) Get-RunningAiPathJavaExe default, not a faked one - the
+    # live bug surfaced here, in Split-Path/Join-Path on a corrupted PathJavaExe default, as
+    # "DriveNotFoundException: drive 'java.exe C' not found".
+    $candidates = Get-RunningAiJava21Candidates
+    $pathExe = Get-RunningAiPathJavaExe
+    if ($pathExe) {
+        $expectedHome = Split-Path (Split-Path $pathExe -Parent) -Parent
+        ($candidates -contains $expectedHome)
+    } else {
+        $true   # nothing on PATH named java - nothing to assert about that source
+    }
+}
+
+# Phase 6H-8.2 live finding (Main PC): Get-RunningAiErrorDetails assumed every exception has a
+# .Response member (true only for a WebException raised by a failed HTTP call); a generic .NET
+# exception (here, the Java-discovery DriveNotFoundException from the bug above) has no such member
+# at all, and under Set-StrictMode referencing it threw PropertyNotFoundException itself - the error
+# formatter caused a second failure while reporting the first one.
+Check 'Get-RunningAiErrorDetails handles a generic (non-HTTP) exception safely, never a secondary failure' {
+    try {
+        throw [System.IO.DriveNotFoundException]::new("drive 'java.exe C' not found")
+    } catch {
+        $details = Get-RunningAiErrorDetails $_
+        ($null -eq $details.HttpStatus) -and ($null -eq $details.Code) -and
+        ($details.Message -eq "drive 'java.exe C' not found")
+    }
+}
+
 Check 'Quote-Argument quotes only when needed' {
     (Quote-Argument 'C:\a b\c.jar') -eq '"C:\a b\c.jar"' -and (Quote-Argument 'C:\ab\c.jar') -eq 'C:\ab\c.jar'
 }

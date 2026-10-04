@@ -130,6 +130,19 @@ function New-RunningAiNoopRestarter {
     return @{ Block = $block; Count = $count }
 }
 
+# A restarter that throws on its first call (simulating a partial restart failure - live on Main PC,
+# the Java-discovery bug broke the publish-enabled restart partway through) and succeeds silently on
+# every call after that (the finally block's safe-mode recovery restart).
+function New-RunningAiFlakyRestarter {
+    $count = [ref]0
+    $block = {
+        param($Url)
+        $count.Value++
+        if ($count.Value -eq 1) { throw 'simulated partial restart failure (Phase 6H-8.2)' }
+    }.GetNewClosure()
+    return @{ Block = $block; Count = $count }
+}
+
 # ---- fixtures (synthetic; no real athlete data) -------------------------------------------------
 
 $HealthUp = @{ status = 'UP' }
@@ -506,6 +519,32 @@ Check 'a failed publish still runs the finally cleanup: switches false, safe-mod
 
     ($result.Outcome -eq 'FAILED') -and (Confirm-RunningAiFakeServerLog -Log $log -ExpectedCount 3) -and
     ($restarter.Count.Value -eq 2) -and
+    ($env:RUNNING_AI_DRAFT_PUBLISHING_ENABLED -eq 'false') -and
+    ($env:WORKOUT_PUBLISHING_ENABLED -eq 'false') -and
+    ($env:WORKOUT_PUBLISHING_SCHEDULER_ENABLED -eq 'false') -and
+    ($env:RUNNINGAI_MCP_ENABLED -eq 'false')
+}
+
+# Phase 6H-8.2 live finding (Main PC): the publish-enabled restart itself failed partway through
+# (Spring stopped, connector stopped, connector started, then Java discovery failed before Spring
+# could start) - a partial failure, not a clean return. The old "$restarted = $true" (set only AFTER
+# the restarter call returned) never ran, so the finally block's safe-mode recovery restart was
+# skipped entirely, leaving the runtime down. This proves the fix: "was a publish-enabled restart
+# ATTEMPTED" (yes) is what must gate the recovery restart, not "did it fully succeed" (no).
+Check 'a restarter that fails partway through still gets a safe-mode recovery restart attempt (no publish, switches false)' {
+    $port = New-Port
+    $base = "http://127.0.0.1:$port"
+    $routes = @(
+        @{ Method = 'GET'; Path = '/api/v1/workout-drafts/12/publish-preview'; Body = (New-PreviewFixture) }
+    )
+    $pending = Start-RunningAiFakeServer -Port $port -Routes $routes
+    $reader = New-RunningAiScriptedReader -Responses @('YES')
+    $restarter = New-RunningAiFlakyRestarter
+    $result = Invoke-RunningAiControlledPublish -BaseUrl $base -DraftId 12 -Reader $reader -RuntimeRestarter $restarter.Block
+    $log = Complete-RunningAiFakeServer -Pending $pending
+
+    ($result.Outcome -eq 'FAILED') -and (Confirm-RunningAiFakeServerLog -Log $log -ExpectedCount 1) -and
+    ($restarter.Count.Value -eq 2) -and   # 1st: the failed publish-enabled attempt; 2nd: safe-mode recovery
     ($env:RUNNING_AI_DRAFT_PUBLISHING_ENABLED -eq 'false') -and
     ($env:WORKOUT_PUBLISHING_ENABLED -eq 'false') -and
     ($env:WORKOUT_PUBLISHING_SCHEDULER_ENABLED -eq 'false') -and
