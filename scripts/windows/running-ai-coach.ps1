@@ -104,6 +104,7 @@ $result = Invoke-CoachOperatorSession @sessionArgs
 switch ($result.Outcome) {
     'RUNTIME_NOT_UP' { exit 1 }
     'ERROR' { exit 1 }
+    'DISPLAY_FAILED' { exit 1 }
     'PREVIEW_CHANGED_AFTER_RESTART' { exit 1 }
     'FAILED' { exit 1 }
     default { exit 0 }

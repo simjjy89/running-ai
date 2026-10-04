@@ -57,27 +57,56 @@ function Test-RunningAiHealthy {
 
 # ---- display -------------------------------------------------------------------------------
 
-# One segment's device target as a single readable line, or $null for a step with no numeric
-# target. An absolute-bpm target is shown, never hidden, exactly flagged as not publishable - the
-# renderer only understands %LTHR, so a draft carrying one would fail closed at publish time.
+# Safe property read: $null for a property that does not exist at all (rather than a
+# PropertyNotFoundException under Set-StrictMode), same as for one that exists and is null.
+# Needed because SegmentResponse and RecoveryResponse are DIFFERENT API shapes (Phase 6H-8.1):
+# RecoveryResponse has no "type", "repetitions", "recovery", "recoveryDurationMinutes",
+# "heartRateBpmMin" or "heartRateBpmMax" field AT ALL - not a null one, an absent one - so any
+# formatter shared between a segment and its recovery block must read every optional field this way.
+function Get-RunningAiOptionalProperty {
+    param(
+        [Parameter(Mandatory)]$Object,
+        [Parameter(Mandatory)][string]$Name
+    )
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) { return $null }
+    return $property.Value
+}
+
+# One segment's (or one recovery block's) device target as a single readable line, or $null for a
+# step with no numeric target. An absolute-bpm target is shown, never hidden, exactly flagged as not
+# publishable - the renderer only understands %LTHR, so a draft carrying one would fail closed at
+# publish time. Shared between Write-RunningAiSegment and Write-RunningAiRecovery, so every field is
+# read through Get-RunningAiOptionalProperty: a RecoveryResponse simply has no bpm fields to find.
 function Format-RunningAiSegmentTarget {
     param([Parameter(Mandatory)]$Segment)
 
-    if ($null -ne $Segment.paceSecondsPerKmFast -and $null -ne $Segment.paceSecondsPerKmSlow) {
-        $fast = [TimeSpan]::FromSeconds($Segment.paceSecondsPerKmFast).ToString('m\:ss')
-        $slow = [TimeSpan]::FromSeconds($Segment.paceSecondsPerKmSlow).ToString('m\:ss')
+    $paceFast = Get-RunningAiOptionalProperty $Segment 'paceSecondsPerKmFast'
+    $paceSlow = Get-RunningAiOptionalProperty $Segment 'paceSecondsPerKmSlow'
+    $lthrMin = Get-RunningAiOptionalProperty $Segment 'heartRatePercentLthrMin'
+    $lthrMax = Get-RunningAiOptionalProperty $Segment 'heartRatePercentLthrMax'
+    $bpmMin = Get-RunningAiOptionalProperty $Segment 'heartRateBpmMin'
+    $bpmMax = Get-RunningAiOptionalProperty $Segment 'heartRateBpmMax'
+    $speedMin = Get-RunningAiOptionalProperty $Segment 'treadmillSpeedKphMin'
+    $speedMax = Get-RunningAiOptionalProperty $Segment 'treadmillSpeedKphMax'
+    $inclineMin = Get-RunningAiOptionalProperty $Segment 'inclinePercentMin'
+    $inclineMax = Get-RunningAiOptionalProperty $Segment 'inclinePercentMax'
+
+    if ($null -ne $paceFast -and $null -ne $paceSlow) {
+        $fast = [TimeSpan]::FromSeconds($paceFast).ToString('m\:ss')
+        $slow = [TimeSpan]::FromSeconds($paceSlow).ToString('m\:ss')
         return "Pace $fast-$slow/km"
     }
-    if ($null -ne $Segment.heartRatePercentLthrMin -and $null -ne $Segment.heartRatePercentLthrMax) {
-        return "HR $($Segment.heartRatePercentLthrMin)-$($Segment.heartRatePercentLthrMax)% LTHR"
+    if ($null -ne $lthrMin -and $null -ne $lthrMax) {
+        return "HR $lthrMin-$lthrMax% LTHR"
     }
-    if ($null -ne $Segment.heartRateBpmMin -or $null -ne $Segment.heartRateBpmMax) {
-        return "ABSOLUTE BPM $($Segment.heartRateBpmMin)-$($Segment.heartRateBpmMax) -- NOT PUBLISHABLE"
+    if ($null -ne $bpmMin -or $null -ne $bpmMax) {
+        return "ABSOLUTE BPM $bpmMin-$bpmMax -- NOT PUBLISHABLE"
     }
-    if ($null -ne $Segment.treadmillSpeedKphMin -or $null -ne $Segment.treadmillSpeedKphMax) {
-        $line = "Treadmill $($Segment.treadmillSpeedKphMin)-$($Segment.treadmillSpeedKphMax) km/h"
-        if ($null -ne $Segment.inclinePercentMin -or $null -ne $Segment.inclinePercentMax) {
-            $line += ", incline $($Segment.inclinePercentMin)-$($Segment.inclinePercentMax)%"
+    if ($null -ne $speedMin -or $null -ne $speedMax) {
+        $line = "Treadmill $speedMin-$speedMax km/h"
+        if ($null -ne $inclineMin -or $null -ne $inclineMax) {
+            $line += ", incline $inclineMin-$inclineMax%"
         }
         return $line
     }
@@ -94,11 +123,27 @@ function Write-RunningAiSegment {
     if ($Segment.repetitions) {
         Write-Host "$Indent  x$($Segment.repetitions)"
         if ($Segment.recovery) {
-            Write-RunningAiSegment -Segment $Segment.recovery -Indent "$Indent    "
+            # A RecoveryResponse, NOT a SegmentResponse - rendered by its own function (Phase 6H-8.1);
+            # it has no "type"/"repetitions"/"recovery" field, so it must never be handed back into
+            # Write-RunningAiSegment, which reads exactly those fields unconditionally.
+            Write-RunningAiRecovery -Recovery $Segment.recovery -Indent "$Indent    "
         } elseif ($Segment.recoveryDurationMinutes) {
             Write-Host "$Indent    Recovery $($Segment.recoveryDurationMinutes)m"
         }
     }
+}
+
+# Renders a repeat block's recovery (RecoveryResponse: durationMinutes, intensity, description,
+# primaryTargetType, pace/%LTHR/treadmill/incline target fields - and NOTHING else). Deliberately
+# never reads "type", "repetitions" or "recovery" - a RecoveryResponse has none of those fields, so
+# doing so would throw PropertyNotFoundException under Set-StrictMode (the Phase 6H-8.1 bug: this
+# function used to be a recursive call into Write-RunningAiSegment, which does read all three).
+function Write-RunningAiRecovery {
+    param([Parameter(Mandatory)]$Recovery, [string]$Indent = '  ')
+    $target = Format-RunningAiSegmentTarget $Recovery
+    Write-Host "${Indent}Recovery $($Recovery.durationMinutes)m ($($Recovery.intensity))"
+    if ($Recovery.description) { Write-Host "$Indent  $($Recovery.description)" }
+    if ($target) { Write-Host "$Indent  $target" }
 }
 
 # Human-readable view of a draft (generate/resume/revise response). Never dumps raw JSON.
@@ -332,8 +377,15 @@ function Invoke-RunningAiControlledPublish {
 # is typing the exact matching word.
 #
 # Returns a result object: { Outcome; Draft; Publish } where Outcome is one of RUNTIME_NOT_UP,
-# SUPERSEDED, DISPLAYED (NonInteractive), QUIT, or whatever Invoke-RunningAiControlledPublish
-# returned after an approval.
+# ERROR, DISPLAY_FAILED, SUPERSEDED, DISPLAYED (NonInteractive), QUIT, or whatever
+# Invoke-RunningAiControlledPublish returned after an approval.
+#
+# Phase 6H-8.1: if the draft cannot be displayed completely and safely, the session must not reach
+# the approve prompt at all - a human cannot approve (or even revise) a session they were not shown
+# correctly. Show-RunningAiWorkoutDraft is wrapped so any exception it throws (originally: a
+# RecoveryResponse being rendered as if it were a SegmentResponse) is a terminating failure for the
+# whole session, with zero approve/preview/publish calls, rather than being allowed to continue past
+# a broken or partial display.
 function Invoke-CoachOperatorSession {
     param(
         [Parameter(Mandatory)][string]$BaseUrl,
@@ -374,7 +426,12 @@ function Invoke-CoachOperatorSession {
     }
 
     while ($true) {
-        Show-RunningAiWorkoutDraft $draft
+        try {
+            Show-RunningAiWorkoutDraft $draft
+        } catch {
+            Write-Host "ERROR: could not safely display this draft ($($_.Exception.Message)). Stopping before any approval step - zero approve/preview/publish calls were made."
+            return [pscustomobject]@{ Outcome = 'DISPLAY_FAILED'; Draft = $draft; Publish = $null }
+        }
 
         if ($draft.status -eq 'SUPERSEDED') {
             Write-Host 'This draft version is SUPERSEDED. Nothing to do here.'
