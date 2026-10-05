@@ -163,6 +163,25 @@ running-ai:
       pace-plausibility-tolerance: 0.5
       heart-rate-plausibility-tolerance: 0.5
 
+  coach-refresh:
+    # Coach data refresh pipeline (Phase 6H-9, POST /api/v1/coach/data-refresh). Keeps the RunningAI
+    # DB current just before a coach draft is generated: Garmin summary sync -> recent-activity
+    # completion (detail/analysis/Intervals) -> Intervals fitness -> Garmin recovery -> DB-only
+    # freshness evaluation. A SEPARATE package/service from com.runningai.coach - WorkoutDraftService
+    # keeps its existing DB-only, zero-Garmin/Intervals-call contract unchanged; nothing here can
+    # write a workout (no IntervalsWorkoutPublisher/Client dependency).
+    recent-activity-days: 7
+    fitness-refresh-days: 7
+    recovery-refresh-days: 2
+    max-fitness-age-days: 2
+    max-recovery-age-days: 2
+    scheduler:
+      # Automatic periodic refresh (CoachDataRefreshScheduler). OFF by default, and stays off through
+      # this phase's own live validation (work order section 50/74): enable only deliberately.
+      enabled: ${RUNNING_AI_COACH_REFRESH_SCHEDULER_ENABLED:false}
+      fixed-delay: 1h
+      initial-delay: 1m
+
   training:
     # Training decision context (TrainingDecisionContextService). Heuristics and descriptive labels only.
     classification:
