@@ -30,6 +30,7 @@ class CoachContextSerializerTest {
                     com.runningai.analysis.AnalysisStatus.COMPLETE, "RUNNING_ANALYSIS_V1"),
             ),
         ),
+        sourceFreshness = SourceFreshnessV2(date, date, 0, date, 0),
         constraints = SessionConstraints(availableMinutes = 40),
     )
 

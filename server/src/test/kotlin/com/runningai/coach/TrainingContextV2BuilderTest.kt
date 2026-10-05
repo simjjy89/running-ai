@@ -348,6 +348,32 @@ class TrainingContextV2BuilderTest {
     }
 
     @Test
+    fun `sourceFreshness re-packages newestActivityDate, fitness source date-age and the most recent recovery metric (Phase 6H-9)`() {
+        fitnessDay(d.minusDays(1), ctl = 30.0, atl = 25.0)
+        recoveryDay(d, rhr = 50)        // most recent: age 0
+        recoveryDay(d.minusDays(3), rhr = 55) // older: must not win
+
+        val ctx = builder.build(d, SessionConstraints())
+
+        assertThat(ctx.sourceFreshness.newestActivityDate).isEqualTo(ctx.dataCoverage.newestActivityDate)
+        assertThat(ctx.sourceFreshness.fitnessSourceDate).isEqualTo(d.minusDays(1))
+        assertThat(ctx.sourceFreshness.fitnessAgeDays).isEqualTo(1)
+        assertThat(ctx.sourceFreshness.recoverySourceDate).isEqualTo(d)
+        assertThat(ctx.sourceFreshness.recoveryAgeDays).isEqualTo(0)
+    }
+
+    @Test
+    fun `sourceFreshness is all null when nothing is stored - never fabricated`() {
+        val ctx = builder.build(d, SessionConstraints())
+
+        assertThat(ctx.sourceFreshness.newestActivityDate).isNull()
+        assertThat(ctx.sourceFreshness.fitnessSourceDate).isNull()
+        assertThat(ctx.sourceFreshness.fitnessAgeDays).isNull()
+        assertThat(ctx.sourceFreshness.recoverySourceDate).isNull()
+        assertThat(ctx.sourceFreshness.recoveryAgeDays).isNull()
+    }
+
+    @Test
     fun `D-7 and D-28 fitness snapshots are exact-day only, no nearest-day substitution`() {
         fitnessDay(d, ctl = 20.0, atl = 18.0)
         fitnessDay(d.minusDays(7), ctl = 17.0, atl = 15.0)

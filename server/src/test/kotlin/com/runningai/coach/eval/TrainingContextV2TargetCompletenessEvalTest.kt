@@ -56,6 +56,7 @@ class TrainingContextV2TargetCompletenessEvalTest {
             lastStructuredIntervalDate = null, daysSinceLastStructuredInterval = null,
         ),
         recentActivities = emptyList(),
+        sourceFreshness = com.runningai.coach.SourceFreshnessV2(date.minusDays(1), date.minusDays(1), 1, date.minusDays(1), 1),
         constraints = SessionConstraints(),
     )
 
