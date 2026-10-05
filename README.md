@@ -406,6 +406,14 @@ publish preview → `YES` 입력 → controlled publish → read-back verificati
 비파괴 self-check: `powershell -File scripts\windows\tests\Test-CoachOperator.ps1` (로컬 HttpListener만
 사용, 실제 서버/Docker/Garmin/Intervals 호출 없음).
 
+**Coach data refresh (Phase 6H-9).** 새 Draft를 생성하기 전 `running-ai-coach.ps1`가 자동으로
+`POST /api/v1/coach/data-refresh`를 호출해 Garmin summary sync → 최근 activity detail/analysis/Intervals
+enrichment → Intervals fitness → Garmin recovery → DB-only freshness 판정을 순서대로 수행하고
+readiness를 보여준다. `readyForCoach=false`면 Draft 생성 자체를 하지 않는다 (Claude 호출 0회).
+`-DraftId`로 resume할 때는 refresh를 하지 않는다 (기존 Draft는 immutable context snapshot을 가지고
+있어 refresh해도 바뀌지 않는다). 구조는
+[docs/architecture/coach-data-freshness.md](docs/architecture/coach-data-freshness.md).
+
 ## Raspberry Pi / Linux Deployment
 
 Raspberry Pi OS 64-bit(arm64) 같은 systemd 호스트용 배포 artifact가 `deploy/linux/`에 있다. **준비 및 정적 검증까지만 끝났고 실제 Pi/systemd에서는 실행해 본 적이 없다.**
