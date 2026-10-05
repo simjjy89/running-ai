@@ -187,6 +187,39 @@ function Show-RunningAiApproval {
     Write-Host ''
 }
 
+# Human-readable view of a POST /api/v1/coach/data-refresh result (Phase 6H-9, section 44).
+function Show-RunningAiCoachDataRefresh {
+    param([Parameter(Mandatory)]$Refresh)
+
+    $g = $Refresh.garmin
+    $a = $Refresh.activities
+    $fit = $Refresh.intervalsFitness
+    $rec = $Refresh.recovery
+    $fresh = $Refresh.freshness
+
+    Write-Host ''
+    Write-Host '--- Coach data refresh ---'
+    Write-Host ''
+    $garminLine = if ($g.success) { "OK ($($g.syncAgeMinutes) min ago)" } else { "FAILED ($($g.failureCode))" }
+    Write-Host "Garmin summary        : $garminLine"
+    Write-Host "Recent activities     : $($a.recentActivityCount) ($($a.recentRunningActivityCount) running)"
+    Write-Host "Detail complete       : $($a.detailComplete + $a.detailCollected)/$($a.recentActivityCount)"
+    Write-Host "Running analysis      : $($a.analysisCurrent + $a.analysisComputed)/$($a.recentRunningActivityCount) current"
+    Write-Host "Intervals activities  : $($a.intervalsMatched) matched, $($a.intervalsUnmatched) unmatched, $($a.intervalsAmbiguous) ambiguous"
+    $fitnessLine = if ($fit.failed) { "FAILED ($($fit.failureCode))" } elseif ($fresh.latestFitnessDate) { "latest $($fresh.latestFitnessDate) ($($fresh.fitnessAgeDays)d old)" } else { 'no recent data' }
+    Write-Host "Intervals fitness     : $fitnessLine"
+    $recoveryLine = if ($rec.failed) { "FAILED ($($rec.failureCode))" } elseif ($fresh.latestRecoveryDate) { "latest $($fresh.latestRecoveryDate) ($($fresh.recoveryAgeDays)d old)" } else { 'no recent data' }
+    Write-Host "Garmin recovery       : $recoveryLine"
+    Write-Host ''
+    Write-Host "Coach readiness       : $(if ($Refresh.readyForCoach) { 'READY' } else { 'NOT READY' })"
+    if ($Refresh.reasons -and $Refresh.reasons.Count -gt 0) {
+        Write-Host ''
+        Write-Host 'Reasons:'
+        foreach ($r in $Refresh.reasons) { Write-Host "  - $r" }
+    }
+    Write-Host ''
+}
+
 function Show-RunningAiPublishPreview {
     param([Parameter(Mandatory)]$Preview)
     Write-Host ''
@@ -404,6 +437,10 @@ function Invoke-CoachOperatorSession {
         [string]$UserFeedback,
         [string]$PainOrFatigueFeedback,
         [switch]$NonInteractive,
+        # Phase 6H-9 section 47: a debug-only escape hatch, never a human-gate bypass (it does not
+        # touch approve/publish at all) - generating from stored data without a freshness refresh.
+        # Prints a loud warning whenever used. No parameter here skips refresh silently.
+        [switch]$SkipRefresh,
         [scriptblock]$Reader = { param($Prompt) Read-Host $Prompt },
         [scriptblock]$RuntimeRestarter = { param($Url) Restart-RunningAiRuntimeForPublishing -BaseUrl $Url }
     )
@@ -415,8 +452,23 @@ function Invoke-CoachOperatorSession {
 
     try {
         if ($DraftId) {
+            # Resume: the draft already carries an immutable context snapshot (section 42) - a
+            # refresh here would not even change what the draft shows, so it is never attempted.
             $draft = Invoke-RunningAiJsonRequest -Method GET -Uri "$BaseUrl/api/v1/workout-drafts/$DraftId"
         } else {
+            # Generate: health -> coach data refresh -> freshness report -> generate (section 41).
+            if ($SkipRefresh) {
+                Write-Host 'WARNING: generating from stored data without a freshness refresh (-SkipRefresh). The coach may see stale evidence.'
+            } else {
+                $refreshBody = $(if ($Date) { @{ date = $Date } } else { $null })
+                $refresh = Invoke-RunningAiJsonRequest -Method POST -Uri "$BaseUrl/api/v1/coach/data-refresh" -Body $refreshBody -TimeoutSec 300
+                Show-RunningAiCoachDataRefresh $refresh
+                if (-not $refresh.readyForCoach) {
+                    Write-Host 'Coach data is not ready; no draft was generated. Zero Claude calls were made.'
+                    return [pscustomobject]@{ Outcome = 'NOT_READY'; Draft = $null; Publish = $null }
+                }
+            }
+
             $body = [ordered]@{}
             if ($Date) { $body.date = $Date }
             if ($null -ne $AvailableMinutes) { $body.availableMinutes = $AvailableMinutes }

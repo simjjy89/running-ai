@@ -18,6 +18,12 @@
   not already healthy; without it, a down runtime is reported as a clear error with zero HTTP calls
   attempted beyond the health check.
 
+  Generating a new draft (Phase 6H-9) first runs POST /api/v1/coach/data-refresh and shows a
+  freshness report; if the coach data is not ready, no draft is generated and zero Claude calls are
+  made. Resuming an existing draft (-DraftId) never refreshes - its context snapshot is immutable.
+  -SkipRefresh generates from stored data without that refresh (with a loud warning); it does not
+  touch the approve/publish gates in any way.
+
 .PARAMETER GoalFile
   A UTF-8 text file whose content becomes -Goal (useful for a multi-line goal). Its raw bytes are
   decoded as UTF-8 explicitly - this script never relies on PowerShell's own encoding guesswork.
@@ -41,7 +47,8 @@ param(
     [long]$DraftId,
     [string]$BaseUrl = 'http://127.0.0.1:8080',
     [switch]$StartIfNeeded,
-    [switch]$NonInteractive
+    [switch]$NonInteractive,
+    [switch]$SkipRefresh
 )
 
 . "$PSScriptRoot\RunningAI.Common.ps1"
@@ -97,6 +104,7 @@ $sessionArgs = @{
     UserFeedback           = $UserFeedback
     PainOrFatigueFeedback  = $PainOrFatigueFeedback
     NonInteractive         = $NonInteractive
+    SkipRefresh            = $SkipRefresh
 }
 
 $result = Invoke-CoachOperatorSession @sessionArgs
@@ -105,6 +113,7 @@ switch ($result.Outcome) {
     'RUNTIME_NOT_UP' { exit 1 }
     'ERROR' { exit 1 }
     'DISPLAY_FAILED' { exit 1 }
+    'NOT_READY' { exit 1 }
     'PREVIEW_CHANGED_AFTER_RESTART' { exit 1 }
     'FAILED' { exit 1 }
     default { exit 0 }
