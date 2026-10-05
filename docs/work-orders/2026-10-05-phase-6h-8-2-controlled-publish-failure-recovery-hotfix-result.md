@@ -95,6 +95,22 @@ Performed in full, with your explicit authorization for the real external-write 
 
 You chose not to retry the publish this session (the 401 is yours to investigate/resolve).
 
+### Addendum (2026-10-05, recorded at the start of Phase 6H-9): the real publish later succeeded
+
+You resolved the `INTERVALS_API_KEY` issue and retried outside this session. Confirmed via
+`GET /api/v1/workout-drafts/17/publish-preview` at the start of the next phase:
+
+```text
+draftId=17, approvalId=3, publishable=true, structuredStepCount=3
+publication: outcome=PUBLISHED, intervalsOperation=UPDATED, verified=true
+publishedAt=2026-10-05T14:14:25.245816Z
+```
+
+This is the first real, verified, end-to-end controlled publish of an approved AI-coach draft to
+Intervals.icu (Phase 6G/6H-8's whole purpose) - the mechanism this and the preceding hotfixes built
+and fixed now has a genuine success to show for it, not just a clean failure-recovery. The API key
+value itself was never read or recorded, in this check or anywhere else.
+
 ## Safety verification
 
 - External write to Intervals.icu: **0** (the 401 means nothing was created/updated there).
@@ -119,15 +135,9 @@ Not done yet (pending your instruction, same as every other phase).
 
 ## Known limitations
 
-- **`INTERVALS_API_KEY` needs attention.** The real controlled-publish attempt failed with
-  `INTERVALS_AUTH_FAILED` (401). This is a credential/account issue, not something this session
-  touched, read, or can fix (per project rules, the key's value was never read, logged, or printed -
-  only the `INTERVALS_AUTH_FAILED` code and generic message surfaced, exactly as the error-formatting
-  code is designed to do). Draft #17 remains approved and ready to retry once resolved.
-- Everything else from the Phase 6H-8 "Known limitations" (the next real controlled-publish
-  end-to-end validation, now effectively attempted - see above) stands: this attempt validated the
-  *mechanism* (restart, preview-compare, exactly-once publish, failure recovery) completely, but did
-  not result in an actual successful Intervals.icu write, so that specific "real publish succeeds"
-  milestone is still open.
+- ~~`INTERVALS_API_KEY` needs attention~~ - **resolved**: see the addendum above. The real
+  controlled-publish of Draft #17 later succeeded (`PUBLISHED`, `verified=true`).
+- ~~Everything else from the Phase 6H-8 "Known limitations"~~ - also **resolved** by the addendum
+  above: the "real publish succeeds end to end" milestone is no longer open.
 
 PHASE_6H_8_2_CONTROLLED_PUBLISH_FAILURE_RECOVERY_READY
