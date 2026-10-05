@@ -1,0 +1,6 @@
+{
+  "schema_version": "1.0",
+  "port": 17845,
+  "cache_ttl_seconds": 240,
+  "rate_limit_per_minute": 20
+}
