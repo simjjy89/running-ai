@@ -455,8 +455,8 @@ public static class RunningAiCtrlCFlag {
 # Scope is strictly the RunningAI log directory passed in; only files whose names match the
 # rotated-name pattern below are ever deleted.
 
-$script:ManagedLogNames = @('spring.out', 'spring.err', 'garmin-connector.out', 'garmin-connector.err', 'watchdog')
-$script:RotatedLogPattern = '^(spring\.out|spring\.err|garmin-connector\.out|garmin-connector\.err|watchdog)\.\d{8}-\d{6}(-\d+)?\.log$'
+$script:ManagedLogNames = @('spring.out', 'spring.err', 'garmin-connector.out', 'garmin-connector.err', 'watchdog', 'external-relay.out', 'external-relay.err')
+$script:RotatedLogPattern = '^(spring\.out|spring\.err|garmin-connector\.out|garmin-connector\.err|watchdog|external-relay\.out|external-relay\.err)\.\d{8}-\d{6}(-\d+)?\.log$'
 
 # Renames <name>.log to <name>.<yyyyMMdd-HHmmss>.log when it is non-empty and either -Always is
 # given (before a component (re)starts and re-creates the file) or it exceeds -MaxBytes.
