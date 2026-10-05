@@ -78,15 +78,46 @@ class TrainingContextV2Builder(
             newestActivityDate = windowActivities.maxOfOrNull { it.startedAt.atZone(zone).toLocalDate() },
         )
 
+        val recoveryContext = recoveryContextBuilder.build(date)
+
         return TrainingContextV2(
             date = date,
             athlete = AthleteThresholds(profile.lactateThresholdHeartRateBpm(), profile.lactateThresholdPaceSecondsPerKm()),
             dataCoverage = coverage,
-            recovery = recoveryContextBuilder.build(date),
+            recovery = recoveryContext,
             trainingLoad = trainingLoad,
             trainingRhythm = rhythm,
             recentActivities = recentEvidence,
+            sourceFreshness = sourceFreshness(coverage, trainingLoad, recoveryContext),
             constraints = constraints,
+        )
+    }
+
+    /**
+     * Purely a re-packaging of values already computed above (Phase 6H-9 section 38): no new query,
+     * no new import. [recoverySourceDate]/[recoveryAgeDays] are the single most-recent-available
+     * recovery metric across hrv/sleep/restingHeartRate/bodyBattery/stress - whichever metric Garmin
+     * most recently reported, not an average or a specific one.
+     */
+    private fun sourceFreshness(
+        coverage: DataCoverageV2,
+        trainingLoad: TrainingLoadContextV2,
+        recovery: RecoveryContext,
+    ): SourceFreshnessV2 {
+        val mostRecentRecovery = listOfNotNull(
+            recovery.hrv?.lastNightAvgMs,
+            recovery.sleep?.durationHours,
+            recovery.sleep?.sleepScore,
+            recovery.restingHeartRate?.bpm,
+            recovery.bodyBattery?.highest,
+            recovery.stress?.average,
+        ).minByOrNull { it.ageDays }
+        return SourceFreshnessV2(
+            newestActivityDate = coverage.newestActivityDate,
+            fitnessSourceDate = trainingLoad.sourceDate,
+            fitnessAgeDays = trainingLoad.ageDays,
+            recoverySourceDate = mostRecentRecovery?.date,
+            recoveryAgeDays = mostRecentRecovery?.ageDays,
         )
     }
 

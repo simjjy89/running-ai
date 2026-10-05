@@ -162,6 +162,20 @@ class ClaudeCoachPromptBuilder {
               A wide history window with a small activity count is a small amount of evidence over
               a long window, not a dense training history — read the counts, do not assume density.
 
+            Reading 'sourceFreshness' (TRAINING CONTEXT V2; Phase 6H-9):
+            - Do not call a piece of evidence recent solely because its value exists. Use
+              'sourceFreshness.fitnessAgeDays' / 'recoverySourceDate' / 'recoveryAgeDays' — a number
+              present in the context can still describe a day several days old.
+            - No recent activity and activity data may be stale are different claims, and you must
+              not collapse them. This context is built from stored data only: by itself, it cannot
+              tell you whether the Garmin source was just synced or has not been touched in a while.
+              Normal operation runs an explicit data-refresh step immediately before you are called,
+              so ordinarily you may read a null/old 'newestActivityDate' as a genuine rest streak.
+              But if you are ever told explicitly (in this prompt or a surrounding message) that the
+              refresh was skipped, failed, or that source freshness is unknown, do not draw a strong
+              conclusion from an activity gap — say the uncertainty out loud instead of asserting a
+              rest streak you cannot actually back up.
+
             How to handle missing and sensitive information:
             - A null value means the data genuinely does not exist. Treat it as unknown. Never
               estimate, assume or invent a recovery metric, a threshold, or a past session that is

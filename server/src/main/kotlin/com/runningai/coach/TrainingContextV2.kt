@@ -28,8 +28,36 @@ data class TrainingContextV2(
     val trainingLoad: TrainingLoadContextV2,
     val trainingRhythm: TrainingRhythmV2,
     val recentActivities: List<RecentActivityEvidence>,
+    /** Additive (Phase 6H-9): when each DB-stored source was last current, nothing about *why*. */
+    val sourceFreshness: SourceFreshnessV2,
     override val constraints: SessionConstraints,
 ) : CoachTrainingContext
+
+/**
+ * When each DB-stored source was last current, by source date / age in days - **not** a verdict on
+ * whether the coach should trust it (that reasoning is the coach's own, see
+ * `ClaudeCoachPromptBuilder`'s freshness guidance).
+ *
+ * Deliberately does **not** include a Garmin incremental-sync timestamp: that would require
+ * `TrainingContextV2Builder` to import `com.runningai.integration.garmin`, which
+ * `CoachArchitectureTest` forbids for every file under `com.runningai.coach` (this package must stay
+ * DB-only and dependency-free of any Garmin/Intervals transport type, not just free of making a
+ * call). Whether the Garmin source itself was recently and successfully synced is reported only by
+ * `POST /api/v1/coach/data-refresh` (`com.runningai.coachrefresh`), the separate, explicit step that
+ * runs immediately before a new draft is generated - never inside this context.
+ *
+ * Section 37 (critical, Phase 6H-9): [newestActivityDate] being old or absent is a plain fact, never
+ * itself a staleness signal - an athlete can legitimately not have trained in days. It is repeated
+ * here (already present in [DataCoverageV2]) only so every freshness-relevant date lives in one place
+ * for the prompt to point to.
+ */
+data class SourceFreshnessV2(
+    val newestActivityDate: LocalDate?,
+    val fitnessSourceDate: LocalDate?,
+    val fitnessAgeDays: Int?,
+    val recoverySourceDate: LocalDate?,
+    val recoveryAgeDays: Int?,
+)
 
 /**
  * How much evidence actually exists, as plain counts — never a quality rating (never "POOR"/"GOOD";
