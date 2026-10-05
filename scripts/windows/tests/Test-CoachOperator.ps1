@@ -284,7 +284,7 @@ Check 'generate (NonInteractive): only health + POST /workout-drafts, zero publi
         @{ Method = 'POST'; Path = '/api/v1/workout-drafts'; Body = (New-DraftFixture) }
     )
     $pending = Start-RunningAiFakeServer -Port $port -Routes $routes
-    $result = Invoke-CoachOperatorSession -BaseUrl $base -Date '2026-10-04' -Goal 'easy run' -NonInteractive
+    $result = Invoke-CoachOperatorSession -BaseUrl $base -Date '2026-10-04' -Goal 'easy run' -NonInteractive -SkipRefresh
     $log = Complete-RunningAiFakeServer -Pending $pending
 
     ($result.Outcome -eq 'DISPLAYED') -and (Confirm-RunningAiFakeServerLog -Log $log -ExpectedCount 2)
@@ -305,7 +305,7 @@ Check 'revision: POST /revisions exactly once, Korean request body round trips, 
     )
     $pending = Start-RunningAiFakeServer -Port $port -Routes $routes
     $reader = New-RunningAiScriptedReader -Responses @('R', $koreanRequest, 'Q')
-    $result = Invoke-CoachOperatorSession -BaseUrl $base -Date '2026-10-04' -Reader $reader
+    $result = Invoke-CoachOperatorSession -BaseUrl $base -Date '2026-10-04' -Reader $reader -SkipRefresh
     $log = Complete-RunningAiFakeServer -Pending $pending
 
     $revisionCall = $log | Where-Object { $_.Path -eq '/api/v1/workout-drafts/12/revisions' }
@@ -328,7 +328,7 @@ Check 'approve gate rejects anything other than exactly APPROVE (Y / yes / Yes /
         )
         $pending = Start-RunningAiFakeServer -Port $port -Routes $routes
         $reader = New-RunningAiScriptedReader -Responses @('A', $bad, 'Q')
-        $result = Invoke-CoachOperatorSession -BaseUrl $base -Date '2026-10-04' -Reader $reader
+        $result = Invoke-CoachOperatorSession -BaseUrl $base -Date '2026-10-04' -Reader $reader -SkipRefresh
         $log = Complete-RunningAiFakeServer -Pending $pending
         if ($result.Outcome -ne 'QUIT') { throw "answer '$bad': expected QUIT, got $($result.Outcome)" }
         Confirm-RunningAiFakeServerLog -Log $log -ExpectedCount 2 | Out-Null   # health + generate only, never /approve
@@ -347,7 +347,7 @@ Check 'approve gate accepts exactly APPROVE and calls /approve once' {
     )
     $pending = Start-RunningAiFakeServer -Port $port -Routes $routes
     $reader = New-RunningAiScriptedReader -Responses @('A', 'APPROVE')
-    $result = Invoke-CoachOperatorSession -BaseUrl $base -Date '2026-10-04' -Reader $reader
+    $result = Invoke-CoachOperatorSession -BaseUrl $base -Date '2026-10-04' -Reader $reader -SkipRefresh
     $log = Complete-RunningAiFakeServer -Pending $pending
 
     ($result.Outcome -eq 'NO_EXTERNAL_WRITE_NEEDED') -and (Confirm-RunningAiFakeServerLog -Log $log -ExpectedCount 4)
@@ -619,7 +619,7 @@ Check 'E: a draft that fails to display never reaches approve/preview/publish (f
     # different failure that would NOT prove zero approve/publish calls were made, so this uses a
     # reader that would itself be a visible test failure if ever invoked.
     $reader = { param($Prompt) throw "the approve/revise menu must never be reached: $Prompt" }
-    $result = Invoke-CoachOperatorSession -BaseUrl $base -Date '2026-10-04' -Reader $reader
+    $result = Invoke-CoachOperatorSession -BaseUrl $base -Date '2026-10-04' -Reader $reader -SkipRefresh
     $log = Complete-RunningAiFakeServer -Pending $pending
 
     ($result.Outcome -eq 'DISPLAY_FAILED') -and (Confirm-RunningAiFakeServerLog -Log $log -ExpectedCount 2)
@@ -633,11 +633,87 @@ Check 'F: a Draft #10-compatible shape (WU HR / MAIN PACE x5 / Recovery HR / CD 
         @{ Method = 'POST'; Path = '/api/v1/workout-drafts'; Body = (New-RepeatDraftFixture) }
     )
     $pending = Start-RunningAiFakeServer -Port $port -Routes $routes
-    $result = Invoke-CoachOperatorSession -BaseUrl $base -Date '2026-10-04' -NonInteractive
+    $result = Invoke-CoachOperatorSession -BaseUrl $base -Date '2026-10-04' -NonInteractive -SkipRefresh
     $log = Complete-RunningAiFakeServer -Pending $pending
 
     ($result.Outcome -eq 'DISPLAYED') -and (Confirm-RunningAiFakeServerLog -Log $log -ExpectedCount 2) -and
     ($result.Draft.segments.Count -eq 3) -and ($result.Draft.segments[1].recovery.durationMinutes -eq 1)
+}
+
+# ---- Phase 6H-9: coach data refresh integration (sections 41-47, 69-71) -------------------------
+
+function New-RefreshResultFixture {
+    param([bool]$ReadyForCoach = $true, [string[]]$Reasons = @())
+    @{
+        date = '2026-10-04'; readyForCoach = $ReadyForCoach; reasons = $Reasons
+        garmin = @{ success = $true; lastSuccessfulSyncAt = '2026-10-04T00:00:00Z'; syncAgeMinutes = 1
+                    fetched = 0; created = 0; updated = 0; failed = 0; checkpointAdvanced = $true; failureCode = $null }
+        activities = @{ recentActivityCount = 0; recentRunningActivityCount = 0; detailComplete = 0; detailCollected = 0
+                        detailFailed = 0; analysisCurrent = 0; analysisComputed = 0; analysisMissing = 0; fullSamples = 0
+                        noSampleStreams = 0; sampleIncomplete = 0; intervalsMatched = 0; intervalsUnmatched = 0
+                        intervalsAmbiguous = 0; intervalsFailureCode = $null }
+        intervalsFitness = @{ oldest = '2026-09-28'; newest = '2026-10-04'; daysFetched = 0; daysStored = 0; failed = $false; failureCode = $null }
+        recovery = @{ daysAttempted = 2; daysUpdated = 0; completed = $true; failed = $false; failureCode = $null }
+        freshness = @{ newestActivityDate = $null; latestFitnessDate = $null; fitnessAgeDays = $null; latestRecoveryDate = $null; recoveryAgeDays = $null }
+    }
+}
+
+Check 'generate: data-refresh READY precedes POST /workout-drafts, in order' {
+    $port = New-Port
+    $base = "http://127.0.0.1:$port"
+    $routes = @(
+        @{ Method = 'GET'; Path = '/actuator/health'; Body = $HealthUp }
+        @{ Method = 'POST'; Path = '/api/v1/coach/data-refresh'; Body = (New-RefreshResultFixture -ReadyForCoach $true) }
+        @{ Method = 'POST'; Path = '/api/v1/workout-drafts'; Body = (New-DraftFixture) }
+    )
+    $pending = Start-RunningAiFakeServer -Port $port -Routes $routes
+    $result = Invoke-CoachOperatorSession -BaseUrl $base -Date '2026-10-04' -NonInteractive
+    $log = Complete-RunningAiFakeServer -Pending $pending
+
+    ($result.Outcome -eq 'DISPLAYED') -and (Confirm-RunningAiFakeServerLog -Log $log -ExpectedCount 3) -and
+    ($log[1].Path -eq '/api/v1/coach/data-refresh') -and ($log[2].Path -eq '/api/v1/workout-drafts')
+}
+
+Check 'generate: data-refresh NOT_READY stops before any draft is generated (zero Claude calls)' {
+    $port = New-Port
+    $base = "http://127.0.0.1:$port"
+    $routes = @(
+        @{ Method = 'GET'; Path = '/actuator/health'; Body = $HealthUp }
+        @{ Method = 'POST'; Path = '/api/v1/coach/data-refresh'; Body = (New-RefreshResultFixture -ReadyForCoach $false -Reasons @('GARMIN_RECOVERY_SYNC_FAILED')) }
+    )
+    $pending = Start-RunningAiFakeServer -Port $port -Routes $routes
+    $result = Invoke-CoachOperatorSession -BaseUrl $base -Date '2026-10-04' -NonInteractive
+    $log = Complete-RunningAiFakeServer -Pending $pending
+
+    ($result.Outcome -eq 'NOT_READY') -and (Confirm-RunningAiFakeServerLog -Log $log -ExpectedCount 2)
+}
+
+Check 'resume (-DraftId) never calls data-refresh' {
+    $port = New-Port
+    $base = "http://127.0.0.1:$port"
+    $routes = @(
+        @{ Method = 'GET'; Path = '/actuator/health'; Body = $HealthUp }
+        @{ Method = 'GET'; Path = '/api/v1/workout-drafts/12'; Body = (New-DraftFixture) }
+    )
+    $pending = Start-RunningAiFakeServer -Port $port -Routes $routes
+    $result = Invoke-CoachOperatorSession -BaseUrl $base -DraftId 12 -NonInteractive
+    $log = Complete-RunningAiFakeServer -Pending $pending
+
+    ($result.Outcome -eq 'DISPLAYED') -and (Confirm-RunningAiFakeServerLog -Log $log -ExpectedCount 2)
+}
+
+Check '-SkipRefresh generates without calling data-refresh, with a warning' {
+    $port = New-Port
+    $base = "http://127.0.0.1:$port"
+    $routes = @(
+        @{ Method = 'GET'; Path = '/actuator/health'; Body = $HealthUp }
+        @{ Method = 'POST'; Path = '/api/v1/workout-drafts'; Body = (New-DraftFixture) }
+    )
+    $pending = Start-RunningAiFakeServer -Port $port -Routes $routes
+    $result = Invoke-CoachOperatorSession -BaseUrl $base -Date '2026-10-04' -NonInteractive -SkipRefresh
+    $log = Complete-RunningAiFakeServer -Pending $pending
+
+    ($result.Outcome -eq 'DISPLAYED') -and (Confirm-RunningAiFakeServerLog -Log $log -ExpectedCount 2)
 }
 
 if ($failures.Count) {
