@@ -16,6 +16,7 @@ $repo = (Resolve-Path (Join-Path $scripts '..\..')).Path
 $external = Join-Path $scripts 'external'
 
 . (Join-Path $scripts 'RunningAI.Common.ps1')
+. (Join-Path $external 'RunningAI.ExternalRelay.Common.ps1')
 . (Join-Path $external 'RunningAI.CloudflaredSetup.ps1')
 
 $failures = New-Object System.Collections.Generic.List[string]

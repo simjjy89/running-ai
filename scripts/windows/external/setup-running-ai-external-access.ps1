@@ -1,4 +1,10 @@
 <#
+  DEFERRED 2026-10-09: the external transport decision was pivoted to Tailscale Funnel (see
+  setup-running-ai-tailscale-funnel.ps1 - the current transport). This script is kept, not
+  deleted, as a historical/fallback reference - it was live-tested (-DryRun, zero real changes)
+  on this machine and may be revisited if Tailscale Funnel does not work out. Do not run this for
+  real production setup without first re-confirming the transport decision.
+
 .SYNOPSIS
   One-command setup for RunningAI's external read-only access (Phase 6I-1): a Cloudflare Named
   Tunnel in front of tools/external-relay (127.0.0.1:17845) only - Spring (8080) and the Garmin
@@ -263,31 +269,13 @@ or download it from https://github.com/cloudflare/cloudflared/releases
     if ($DryRun) {
         Write-Step "DRY RUN: would GET https://$resolvedHostname/health, confirm /today-workout requires auth, and confirm an unlisted path/method is rejected"
     } else {
-        $base = "https://$resolvedHostname"
-        $tunnelDownStatuses = @(502, 521, 523, 530)
+        $result = Test-RunningAiExternalAccess -Hostname $resolvedHostname -TimeoutSec 15 -TunnelDownStatuses @(502, 521, 523, 530)
+        Write-Step "ExternalEndpoint: $($result.HealthState) (HTTP $($result.HealthStatus))"
+        Write-Step "Auth gate (no credential) -> $($result.AuthState)"
+        Write-Step "Unsafe path -> $($result.UnsafeState)"
 
-        $healthStatus = Get-HttpStatus -Url "$base/health" -TimeoutSec 15
-        $healthState =
-            if ($null -eq $healthStatus) { 'TUNNEL_DOWN' }
-            elseif ($tunnelDownStatuses -contains $healthStatus) { 'TUNNEL_DOWN' }
-            elseif ($healthStatus -eq 200) {
-                $body = Get-HttpBody -Url "$base/health" -TimeoutSec 15
-                $parsed = $null
-                try { $parsed = $body | ConvertFrom-Json } catch { }
-                if ($parsed -and $parsed.status -eq 'ok') { 'UP' } else { 'RELAY_DOWN' }
-            } else { 'UNKNOWN' }
-        Write-Step "ExternalEndpoint: $healthState (HTTP $healthStatus)"
-
-        $authStatus = Get-HttpStatus -Url "$base/today-workout" -TimeoutSec 15
-        $authState = if ($authStatus -eq 401) { 'AUTH_ENFORCED' } elseif ($null -eq $authStatus) { 'UNKNOWN' } else { "UNEXPECTED_STATUS_$authStatus" }
-        Write-Step "Auth gate (no credential) -> $authState"
-
-        $unsafeStatus = Get-HttpStatus -Url "$base/does-not-exist" -TimeoutSec 15
-        $unsafeState = if ($unsafeStatus -eq 404) { 'CATCH_ALL_ENFORCED' } elseif ($null -eq $unsafeStatus) { 'UNKNOWN' } else { "UNEXPECTED_STATUS_$unsafeStatus" }
-        Write-Step "Unsafe path -> $unsafeState"
-
-        if ($healthState -ne 'UP') {
-            Write-Host "ERROR: external health check did not return UP (got $healthState). See above for the tunnel/service/relay states." -ForegroundColor Red
+        if ($result.HealthState -ne 'UP') {
+            Write-Host "ERROR: external health check did not return UP (got $($result.HealthState)). See above for the tunnel/service/relay states." -ForegroundColor Red
             exit $ExitCode.ExternalAccess
         }
     }
