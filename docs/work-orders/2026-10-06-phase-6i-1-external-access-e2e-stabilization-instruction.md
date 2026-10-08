@@ -1651,3 +1651,106 @@ New standing constraints recorded from this addendum (apply to all remaining Pha
   become necessary, implementation stops and this is reported rather than decided unilaterally.
 
 여기까지다.
+
+## Addendum 2 (2026-10-07) — Named Tunnel confirmed, Cloudflare-specific setup script requested
+
+Verbatim follow-up: the user confirmed Cloudflare Named Tunnel as the transport (not ipTIME
+WireGuard, not Spring exposed directly, origin = external-relay only, 3 existing quick tunnels
+kept until Named Tunnel E2E succeeds, no paid Cloudflare features), and requested a single
+idempotent command, `scripts\windows\external\setup-running-ai-external-access.ps1`, to perform
+the entire Cloudflare Named Tunnel + Windows Service setup, stopping at any point requiring real
+browser interaction (`cloudflared tunnel login`) rather than guessing or bypassing it. Implemented
+in commit `19776a2` (`RunningAI.CloudflaredSetup.ps1`, the orchestrator script, and
+`Test-CloudflaredSetup.ps1`, 26 checks) - see progress note 2 for the full result.
+
+## Addendum 3 (2026-10-09) — Transport pivoted to Tailscale Funnel
+
+Verbatim follow-up, received before the Cloudflare path's live `cloudflared tunnel login`/hostname
+step was ever run by the user:
+
+> RunningAI Phase 6I-1 external transport를 Cloudflare Named Tunnel에서
+> Tailscale Funnel로 전환한다.
+>
+> 이유:
+> - 별도 도메인을 구매하지 않는다.
+> - 월 유료 인프라 0원을 유지한다.
+> - Tailscale Funnel의 stable *.ts.net HTTPS hostname을 사용한다.
+> - ipTIME/WireGuard/port-forwarding은 사용하지 않는다.
+> - Main PC 관리 작업은 직접 PC에서 수행한다.
+>
+> 기존 완료 작업은 보존:
+> - tools/external-relay relocation
+> - existing /today-workout contract
+> - Bearer token auth
+> - Node regression tests
+> - external relay lifecycle scripts
+> - PowerShell tests
+> - legacy relay는 cutover 전까지 유지
+>
+> Cloudflare-specific implementation은 더 진행하지 않는다.
+> 기존 Cloudflare setup script/docs는 삭제하지 말고 historical/deferred 상태로 남기거나
+> 명확히 deprecated/deferred 표시한다.
+>
+> 새 최종 사용자 UX:
+>
+> .\scripts\windows\external\setup-running-ai-tailscale-funnel.ps1
+>
+> 요구사항:
+>
+> 1. idempotent/resumable.
+> 2. Tailscale 설치 여부 검사.
+> 3. 설치되어 있지 않으면 자동 설치 가능 여부를 검토하고,
+>    불확실하면 공식 설치 안내 후 STOP.
+> 4. tailscale status로 로그인 상태 검사.
+> 5. 로그인 안 되어 있으면 `tailscale up` 실행.
+>    browser/user interaction이 필요한 순간 정확히 안내하고 STOP/대기.
+> 6. Funnel prerequisites를 검사:
+>    - supported Tailscale version
+>    - MagicDNS
+>    - HTTPS
+>    - Funnel enablement
+> 7. external relay가 127.0.0.1:17845에서 healthy인지 확인.
+> 8. Funnel target은 반드시 127.0.0.1:17845.
+> 9. Spring 8080과 Garmin connector 8765는 절대 Funnel에 직접 노출하지 않는다.
+> 10. `tailscale funnel --bg http://127.0.0.1:17845`
+>     형태를 현재 CLI 문법에 맞게 사용.
+> 11. Funnel hostname을 자동 감지하고 저장.
+> 12. /health와 /today-workout 외부 HTTPS 검증.
+> 13. 기존 Bearer token auth를 그대로 보존.
+> 14. 인증 없이 /today-workout이 성공하면 FAIL.
+> 15. unsafe methods/paths는 relay contract대로 차단.
+> 16. secret/token은 console/log/Git/docs에 출력 금지.
+> 17. Funnel은 public endpoint이므로 relay auth가 mandatory임을 문서화.
+> 18. Windows reboot 후 Funnel config가 유지되는지 공식 Tailscale 동작을 확인하고,
+>     필요하면 최소한의 startup integration만 추가.
+> 19. 기존 quick Cloudflare tunnel은 Tailscale E2E 성공 전까지 종료하지 않는다.
+> 20. 실제 Garmin 265 + LTE/5G + reboot acceptance 전까지
+>     PHASE_6I_1_EXTERNAL_ACCESS_E2E_READY 선언 금지.
+>
+> 테스트:
+> - PowerShell regression 유지
+> - relay Node regression 유지
+> - new Tailscale setup tests 추가
+> - DryRun은 실제 Tailscale/Funnel 상태 변경 0
+> - no secrets
+> - no Spring server changes
+>
+> 먼저 구현/테스트까지만 하고,
+> 실제 `tailscale up` 또는 Funnel enablement처럼 사용자 browser interaction이 필요한 지점에서
+> STOP해서 정확한 명령을 알려줘.
+
+New standing constraints recorded from this addendum:
+
+- Cloudflare Named Tunnel work (`RunningAI.CloudflaredSetup.ps1`,
+  `setup-running-ai-external-access.ps1`, `Test-CloudflaredSetup.ps1`) is DEFERRED, not deleted -
+  kept as a historical/fallback reference, clearly marked, in case Tailscale Funnel does not work
+  out.
+- The 3 pre-existing ad hoc Cloudflare quick-tunnel processes stay running and untouched until a
+  real Tailscale Funnel end-to-end run succeeds (same "do not disrupt a possibly-still-in-use
+  path" principle as every prior transport decision in this phase).
+- Funnel has no equivalent of Cloudflare Access: the relay's own Bearer-token check on
+  `/today-workout` is now the ONLY auth boundary for the public endpoint, not one layer among
+  several - this must be documented, not merely true in passing.
+- Exact current Tailscale CLI syntax was verified against Tailscale's own published docs
+  (tailscale.com/kb/1223/funnel, /kb/1080/cli, /kb/1242/tailscale-serve) rather than assumed from
+  training-data memory alone, given how much CLI surface has changed across Tailscale versions.

@@ -1,5 +1,11 @@
 # Phase 6I-1 — External Access E2E Stabilization — Progress note 1
 
+> **2026-10-09 update: the transport decision changed.** Cloudflare Named Tunnel (confirmed
+> 2026-10-07, implemented 2026-10-07/08) was pivoted to **Tailscale Funnel** on 2026-10-09 (no
+> domain purchase, zero ongoing cost). The Cloudflare setup script/docs are kept, not deleted, as
+> historical/fallback reference - see progress note 2 for the current state and
+> `scripts/windows/external/setup-running-ai-tailscale-funnel.ps1` for the current transport.
+
 Status: **IN PROGRESS, not READY.** This note covers only the infrastructure-neutral relay
 relocation/hardening step (addendum instruction, 2026-10-06). No Cloudflare, no tunnel, no DNS,
 no Access, no transport decision - all explicitly on hold per that instruction. Do not read this
