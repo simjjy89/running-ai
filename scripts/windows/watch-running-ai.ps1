@@ -69,7 +69,7 @@ try {
     Update-HistoryWindow -History $history -Now $now -WindowMinutes $WindowMinutes
 
     $observe = { Get-RuntimeObservation -ConnectorPort $ConnectorPort -SpringPort $SpringPort -RecheckDelaySec $RecheckDelaySec }
-    $states = Get-ComponentStates (& $observe)
+    $states = Get-ComponentStates (& $observe) -ConnectorPort $ConnectorPort
     $plan = Get-RecoveryPlan -States $states -History $history -Now $now -HistoryAvailable $state.Available -WindowMinutes $WindowMinutes -MaxRestarts $MaxRestarts
     $hint = Get-GarminHintFromLog -Now $now
 
@@ -97,7 +97,7 @@ try {
     }
 
     # Final picture (after any recovery) for the status file.
-    $finalStates = if ($steps.Count -gt 0) { Get-ComponentStates (& $observe) } else { $states }
+    $finalStates = if ($steps.Count -gt 0) { Get-ComponentStates (& $observe) -ConnectorPort $ConnectorPort } else { $states }
     $finalPlan = if ($steps.Count -gt 0) { Get-RecoveryPlan -States $finalStates -History $history -Now $now -HistoryAvailable $state.Available -WindowMinutes $WindowMinutes -MaxRestarts $MaxRestarts } else { $plan }
     $blocked = @($finalPlan.Blocked)
     foreach ($b in $blocked) { Write-WatchdogLog -Component $b.Component -State $finalStates[$b.Component].State -Reason $b.Reason -Action 'NONE' -Result 'NOT_TOUCHED' }

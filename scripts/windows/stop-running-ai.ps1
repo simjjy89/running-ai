@@ -16,12 +16,14 @@
 [CmdletBinding()]
 param(
     [switch]$StopDatabase,
+    [int]$ConnectorPort = 8765,
     [int]$SpringTimeoutSec = 30,
     [int]$ConnectorTimeoutSec = 15,
     [int]$RelayTimeoutSec = 15
 )
 
 . "$PSScriptRoot\RunningAI.Common.ps1"
+. "$PSScriptRoot\RunningAI.ConnectorOwnership.ps1"
 . "$PSScriptRoot\external\RunningAI.ExternalRelay.Common.ps1"
 
 function Stop-Component {
@@ -36,10 +38,37 @@ function Stop-Component {
     Write-Step "${Label}: stopped ($how, PID $tracked)"
 }
 
+# Garmin connector-specific (Phase 6I-1.7B-1): the venv launcher Write-PidFile records may not be
+# the process that actually holds the TCP port (see RunningAI.ConnectorOwnership.ps1). Stop-Component
+# above (unchanged, still used for Spring/relay) only ever stops the single tracked PID, so it was
+# never safe here - an unhealthy-but-tracked-gone orphan child would survive it, still holding the
+# port, while Remove-PidFile made it look stopped.
+function Stop-GarminConnectorComponent {
+    param([int]$Port, [int]$TimeoutSec)
+    $tracked = Read-PidFile 'garmin-connector'
+    $ownership = Get-RunningAiConnectorOwnership -Port $Port -TrackedPid $tracked -Markers (Get-ConnectorMarkers)
+    if ($ownership.Verdict -eq 'DOWN') {
+        Write-Step 'Garmin connector: not running under RunningAI control (nothing to stop)'
+        Remove-PidFile 'garmin-connector'
+        return
+    }
+    if ($ownership.ManagedPids.Count -eq 0) {
+        Write-Step "Garmin connector: NOT stopped - ownership could not be verified (verdict=$($ownership.Verdict)); refusing to touch an unidentified process on port $Port."
+        return
+    }
+    $result = Stop-RunningAiConnectorManaged -Ownership $ownership -Port $Port -TimeoutSec $TimeoutSec
+    Remove-PidFile 'garmin-connector'
+    if ($result.RemainingPids.Count -gt 0) {
+        Write-Step "Garmin connector: $($result.Result) - PID(s) $($result.RemainingPids -join ', ') still alive, port $Port freed=$($result.PortFreed)"
+    } else {
+        Write-Step "Garmin connector: stopped ($($result.Result), verdict $($ownership.Verdict), managed PID(s) $($ownership.ManagedPids -join ', '))"
+    }
+}
+
 try {
     Stop-Component 'External relay' 'external-relay' (Get-ExternalRelayMarkers) $RelayTimeoutSec
     Stop-Component 'Spring Boot' 'spring' (Get-SpringMarkers) $SpringTimeoutSec
-    Stop-Component 'Garmin connector' 'garmin-connector' (Get-ConnectorMarkers) $ConnectorTimeoutSec
+    Stop-GarminConnectorComponent -Port $ConnectorPort -TimeoutSec $ConnectorTimeoutSec
 
     if ($StopDatabase) {
         $compose = Join-Path (Get-RepoRoot) 'docker-compose.yml'

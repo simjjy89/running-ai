@@ -34,6 +34,7 @@ param(
 )
 
 . "$PSScriptRoot\RunningAI.Common.ps1"
+. "$PSScriptRoot\RunningAI.ConnectorOwnership.ps1"
 . "$PSScriptRoot\external\RunningAI.ExternalRelay.Common.ps1"
 $root = Get-RepoRoot
 $started = Get-Date
@@ -66,11 +67,13 @@ function Find-SpringJar {
 }
 
 function Stop-NewConnectorOnFailure {
+    param([int]$ConnectorPort = 8765)
     if ($startedConnector) {
-        $tracked = Get-TrackedProcessId 'garmin-connector' (Get-ConnectorMarkers)
+        $tracked = Read-PidFile 'garmin-connector'
         if ($tracked) {
             Write-Step 'Spring did not start: stopping the connector started by this run (database left running).'
-            Stop-TrackedProcess -ProcessId $tracked -Markers (Get-ConnectorMarkers) -TimeoutSec 15 | Out-Null
+            $ownership = Get-RunningAiConnectorOwnership -Port $ConnectorPort -TrackedPid $tracked -Markers (Get-ConnectorMarkers)
+            Stop-RunningAiConnectorManaged -Ownership $ownership -Port $ConnectorPort -TimeoutSec 15 | Out-Null
             Remove-PidFile 'garmin-connector'
         }
     }
@@ -127,6 +130,15 @@ try {
     # ---- 3. Garmin connector -----------------------------------------------------------
     if (Test-ConnectorHealth $ConnectorPort) {
         Write-Step "Garmin connector: UP on 127.0.0.1:$ConnectorPort (already running, not restarted)"
+        # Best-effort ownership-metadata refresh (Phase 6I-1.7B-1): this connector was not started by
+        # this run, so we only have its tracked PID file to go on. When that PID is alive and ours,
+        # capture the current launcher/listener pairing so a FUTURE run (after this launcher exits)
+        # can recognize an orphaned listener instead of mislabeling it DEGRADED/FOREIGN_PROCESS. Never
+        # fatal, never touches the .pid file itself, never runs when the tracked PID is missing/stale.
+        $existingTracked = Get-TrackedProcessId 'garmin-connector' (Get-ConnectorMarkers)
+        if ($existingTracked) {
+            try { Set-RunningAiConnectorOwnerMetaFromLive -LauncherPid $existingTracked -Port $ConnectorPort | Out-Null } catch { }
+        }
     } else {
         if (Test-PortInUse $ConnectorPort) {
             Stop-WithError $ExitCode.Connector "Port $ConnectorPort is in use but is not a healthy Garmin connector. Free the port or pass -ConnectorPort."
@@ -158,9 +170,13 @@ try {
             -Abort { if ($proc.HasExited) { "exited with code $($proc.ExitCode)" } }
         if (-not $ready) {
             $why = if ($proc.HasExited) { "The process exited with code $($proc.ExitCode)." } else { "No healthy response within $ConnectorTimeoutSec seconds." }
-            Stop-NewConnectorOnFailure
+            Stop-NewConnectorOnFailure -ConnectorPort $ConnectorPort
             Stop-WithError $ExitCode.Connector "Garmin connector health endpoint did not become ready. $why See .runtime\logs\garmin-connector.err.log"
         }
+        # Capture ownership ground truth at the one moment both the launcher and the real listener
+        # (which may be a different PID - Phase 6I-1.7A) are guaranteed alive and freshly created.
+        # Best-effort: a failure here never fails this already-successful start.
+        try { Set-RunningAiConnectorOwnerMetaFromLive -LauncherPid $proc.Id -Port $ConnectorPort | Out-Null } catch { }
         Write-Step "Garmin connector: UP on 127.0.0.1:$ConnectorPort (PID $($proc.Id))"
     }
 
@@ -175,7 +191,7 @@ try {
         Write-Step "Spring Boot: UP on port $SpringPort (already running, not restarted)"
     } else {
         if (Test-PortInUse $SpringPort) {
-            Stop-NewConnectorOnFailure
+            Stop-NewConnectorOnFailure -ConnectorPort $ConnectorPort
             Stop-WithError $ExitCode.Spring "Port $SpringPort is in use but /actuator/health is not UP. Free the port or set SERVER_PORT."
         }
         $jar = Find-SpringJar
@@ -189,7 +205,7 @@ try {
             } finally { Pop-Location }
             $jar = Find-SpringJar
             if ($buildExit -ne 0 -or -not $jar) {
-                Stop-NewConnectorOnFailure
+                Stop-NewConnectorOnFailure -ConnectorPort $ConnectorPort
                 Stop-WithError $ExitCode.Java 'Spring Boot jar build failed. See .runtime\logs\gradle-bootjar.log'
             }
         }
@@ -223,7 +239,7 @@ try {
             $why = if ($spring.HasExited) { "The process exited with code $($spring.ExitCode)." } else { "No UP response within $SpringTimeoutSec seconds." }
             if (-not $spring.HasExited) { Stop-TrackedProcess -ProcessId $spring.Id -Markers (Get-SpringMarkers) -TimeoutSec 20 | Out-Null }
             Remove-PidFile 'spring'
-            Stop-NewConnectorOnFailure
+            Stop-NewConnectorOnFailure -ConnectorPort $ConnectorPort
             Stop-WithError $ExitCode.Spring "Spring Boot health endpoint did not become ready. $why See .runtime\logs\spring.err.log and spring.out.log"
         }
         Write-Step "Spring Boot: UP on port $SpringPort (PID $($spring.Id))"

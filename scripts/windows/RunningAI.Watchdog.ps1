@@ -11,6 +11,7 @@
 # only touches processes whose command line proves they belong to this repository.
 
 . "$PSScriptRoot\RunningAI.Common.ps1"
+. "$PSScriptRoot\RunningAI.ConnectorOwnership.ps1"
 . "$PSScriptRoot\external\RunningAI.ExternalRelay.Common.ps1"
 
 $script:Components = @('docker', 'postgres', 'connector', 'spring')   # dependency order
@@ -207,8 +208,32 @@ function Get-ProcessComponentState {
     return (New-State 'DOWN' 'PROCESS_DEAD')
 }
 
+# Connector-specific classifier (Phase 6I-1.7B-1). Identical to Get-ProcessComponentState for every
+# case that function already handled correctly (healthy, tracked-and-alive, nothing on the port) -
+# and ONLY when $Port is supplied does it resolve the one case the plain PID-file check cannot:
+# health failing, tracked PID gone/foreign, but something IS on the port. Instead of always guessing
+# FOREIGN_PROCESS there, it runs the ownership model to tell a genuine foreign process apart from our
+# own orphaned listener (see RunningAI.ConnectorOwnership.ps1), reusing the SAME 'UNHEALTHY'/
+# 'DEGRADED' state vocabulary Get-RecoveryPlan already understands - no restart-policy change, only a
+# more accurate Reason feeding into it. $Port omitted (the default) reproduces the exact legacy
+# behavior byte-for-byte, which is what every existing hand-built Observation in tests still gets.
+function Get-ConnectorComponentState {
+    param([bool]$Health, [bool]$PortUsed, $ManagedPid, $Port = $null)
+    if ($Health) { return (New-State 'UP') }
+    if ($ManagedPid) { return (New-State 'UNHEALTHY' 'PROCESS_ALIVE_HEALTH_FAILING') }
+    if (-not $PortUsed) { return (New-State 'DOWN' 'PROCESS_DEAD') }
+    if ($null -eq $Port) { return (New-State 'DEGRADED' 'FOREIGN_PROCESS') }   # legacy fallback, unchanged
+
+    $ownership = Get-RunningAiConnectorOwnership -Port $Port -TrackedPid (Read-PidFile 'garmin-connector') -Markers (Get-ConnectorMarkers)
+    switch ($ownership.Verdict) {
+        'ORPHANED_MANAGED_PROCESS' { return (New-State 'UNHEALTHY' 'ORPHANED_MANAGED_PROCESS') }
+        'UNKNOWN_OWNER'            { return (New-State 'DEGRADED' 'UNKNOWN_OWNER') }
+        default                    { return (New-State 'DEGRADED' 'FOREIGN_PROCESS') }
+    }
+}
+
 function Get-ComponentStates {
-    param([Parameter(Mandatory)]$Observation)
+    param([Parameter(Mandatory)]$Observation, $ConnectorPort = $null)
     $o = $Observation
     $states = [ordered]@{}
     $states['docker'] = switch ($o.Docker) {
@@ -225,7 +250,7 @@ function Get-ComponentStates {
             default     { New-State 'UNKNOWN' 'HEALTH_UNREADABLE' }
         }
     }
-    $states['connector'] = Get-ProcessComponentState $o.ConnectorHealth $o.ConnectorPortUsed $o.ConnectorPid
+    $states['connector'] = Get-ConnectorComponentState $o.ConnectorHealth $o.ConnectorPortUsed $o.ConnectorPid $ConnectorPort
     $states['spring']    = Get-ProcessComponentState $o.SpringHealth $o.SpringPortUsed $o.SpringPid
     $states['external-relay'] = Get-ProcessComponentState $o.ExternalRelayHealth $o.ExternalRelayPortUsed $o.ExternalRelayPid
     return $states
@@ -368,8 +393,14 @@ function Invoke-RecoveryAction {
     param([Parameter(Mandatory)]$Action, [int]$ConnectorPort = 8765, [int]$SpringPort = 8080)
     if ($Action.PreStop) {
         if ($Action.Component -eq 'connector') {
-            $tracked = Get-TrackedProcessId 'garmin-connector' (Get-ConnectorMarkers)
-            if ($tracked) { Stop-TrackedProcess -ProcessId $tracked -Markers (Get-ConnectorMarkers) -TimeoutSec 15 | Out-Null; Remove-PidFile 'garmin-connector' }
+            # Phase 6I-1.7B-1: ownership-aware stop, not the plain tracked-PID stop. This is the path
+            # that reaches an ORPHANED_MANAGED_PROCESS (tracked launcher already gone, its listener
+            # child still holding the port) - Get-TrackedProcessId alone would see nothing to stop and
+            # silently leave the port occupied, so the subsequent restart's bind would fail.
+            $tracked = Read-PidFile 'garmin-connector'
+            $ownership = Get-RunningAiConnectorOwnership -Port $ConnectorPort -TrackedPid $tracked -Markers (Get-ConnectorMarkers)
+            if ($ownership.ManagedPids.Count -gt 0) { Stop-RunningAiConnectorManaged -Ownership $ownership -Port $ConnectorPort -TimeoutSec 15 | Out-Null }
+            Remove-PidFile 'garmin-connector'
         } elseif ($Action.Component -eq 'external-relay') {
             $tracked = Get-TrackedProcessId 'external-relay' (Get-ExternalRelayMarkers)
             if ($tracked) { Stop-TrackedProcess -ProcessId $tracked -Markers (Get-ExternalRelayMarkers) -TimeoutSec 15 | Out-Null; Remove-PidFile 'external-relay' }
