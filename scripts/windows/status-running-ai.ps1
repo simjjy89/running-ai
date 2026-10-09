@@ -12,12 +12,21 @@
 [CmdletBinding()]
 param(
     [int]$ConnectorPort = 8765,
-    [int]$SpringPort = $(if ($env:SERVER_PORT) { [int]$env:SERVER_PORT } else { 8080 })
+    [int]$SpringPort = 8080
 )
 
 . "$PSScriptRoot\RunningAI.Common.ps1"
 . "$PSScriptRoot\external\RunningAI.ExternalRelay.Common.ps1"
 . "$PSScriptRoot\external\RunningAI.TailscaleSetup.ps1"
+
+# Loaded here (same reasoning as start-/watch-running-ai.ps1) so a canonical .env SERVER_PORT is
+# honoured even when this script is run standalone, with no parent that already loaded .env - see
+# Resolve-RunningAiSpringPort in RunningAI.Common.ps1 for why this must precede the port read.
+# RUNNING_AI_TEST_ENV_ROOT is a test-only escape hatch (mirrors RUNNING_AI_TEST_RUNTIME_DIR);
+# never set outside a test.
+$envRoot = if ($env:RUNNING_AI_TEST_ENV_ROOT) { $env:RUNNING_AI_TEST_ENV_ROOT } else { Get-RepoRoot }
+Initialize-DotEnvForThisProcess -Root $envRoot
+if (-not $PSBoundParameters.ContainsKey('SpringPort')) { $SpringPort = Resolve-RunningAiSpringPort }
 
 function Format-Row { param([string]$Name, [string]$Value) Write-Host ("{0,-16} {1}" -f $Name, $Value) }
 

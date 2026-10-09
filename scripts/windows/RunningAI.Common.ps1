@@ -240,6 +240,29 @@ function Initialize-DotEnvForThisProcess {
     }
 }
 
+# ---- Spring port resolution (Phase 6I-1.6C) ---------------------------------------------------
+# Single source of truth for start-/watch-/status-running-ai.ps1's -SpringPort parameter.
+# PowerShell parameter DEFAULT EXPRESSIONS evaluate at bind time, before a script body can call
+# Initialize-DotEnvForThisProcess - so a parameter default that reads $env:SERVER_PORT directly
+# can never see a port that is configured only in the repo-root .env (live-reproduced, Phase
+# 6I-1.6: a canonical .env SERVER_PORT value was silently ignored because of this ordering).
+# Callers must declare "-SpringPort" with the plain literal default 8080 (for help text and
+# direct-caller back-compat), call Initialize-DotEnvForThisProcess first, and then call this
+# function ONLY when the caller did not explicitly pass -SpringPort
+# ($PSBoundParameters.ContainsKey('SpringPort') is false) - this keeps the existing precedence
+# "explicit param > existing process env > .env > 8080" intact while moving the env read to
+# after .env has had a chance to fill a gap. Throws (via Stop-WithError) on a SERVER_PORT value
+# that is not a valid TCP port, instead of silently coercing or ignoring it.
+function Resolve-RunningAiSpringPort {
+    param([string]$EnvValue = $env:SERVER_PORT)
+    if ([string]::IsNullOrWhiteSpace($EnvValue)) { return 8080 }
+    $parsed = 0
+    if (-not [int]::TryParse($EnvValue, [ref]$parsed) -or $parsed -lt 1 -or $parsed -gt 65535) {
+        Stop-WithError $ExitCode.Usage "SERVER_PORT='$EnvValue' is not a valid TCP port (1-65535)."
+    }
+    return $parsed
+}
+
 # ---- UTF-8-safe JSON HTTP requests (Phase 6H-7.2) --------------------------------------------
 # Windows PowerShell 5.1's Invoke-RestMethod can mangle non-ASCII text on BOTH sides of a request:
 #  - REQUEST: handing a .NET string to -Body directly sends bytes that depend on the console/output

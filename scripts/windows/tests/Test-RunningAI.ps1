@@ -566,6 +566,123 @@ Check 'start-running-ai.ps1 loads .env before any component step and never passe
     ($javaArgsLine -notmatch 'PASSWORD|API_KEY|TOKEN')
 }
 
+# ---- Phase 6I-1.6C: Spring port resolution -----------------------------------------------------
+# Resolve-RunningAiSpringPort itself (pure function, no process spawn needed for these).
+
+Check 'Resolve-RunningAiSpringPort defaults to 8080 when SERVER_PORT is unset' {
+    (Resolve-RunningAiSpringPort -EnvValue $null) -eq 8080
+}
+
+Check 'Resolve-RunningAiSpringPort returns a valid SERVER_PORT value' {
+    (Resolve-RunningAiSpringPort -EnvValue '18080') -eq 18080
+}
+
+Check 'Resolve-RunningAiSpringPort trims whitespace around a valid value' {
+    (Resolve-RunningAiSpringPort -EnvValue '  18080  ') -eq 18080
+}
+
+Check 'Resolve-RunningAiSpringPort rejects a non-numeric SERVER_PORT' {
+    try { Resolve-RunningAiSpringPort -EnvValue 'not-a-port'; $false }
+    catch { $_.Exception.Message -match 'not a valid TCP port' }
+}
+
+Check 'Resolve-RunningAiSpringPort rejects an out-of-range SERVER_PORT (0 and 70000)' {
+    $zeroRejected = $false; $tooBigRejected = $false
+    try { Resolve-RunningAiSpringPort -EnvValue '0' } catch { $zeroRejected = $_.Exception.Message -match 'not a valid TCP port' }
+    try { Resolve-RunningAiSpringPort -EnvValue '70000' } catch { $tooBigRejected = $_.Exception.Message -match 'not a valid TCP port' }
+    $zeroRejected -and $tooBigRejected
+}
+
+# ---- source-order checks: none of start-/watch-/status-running-ai.ps1 may read $env:SERVER_PORT
+# in their own parameter DEFAULT EXPRESSION (which evaluates before .env can be loaded) - the
+# literal default must be the plain integer 8080, with the real resolution deferred to after
+# Initialize-DotEnvForThisProcess via Resolve-RunningAiSpringPort, guarded by
+# $PSBoundParameters.ContainsKey('SpringPort') so an explicit caller-supplied port is never
+# second-guessed.
+foreach ($entry in @(
+    @{ File = 'start-running-ai.ps1'; DotenvAnchor = "Write-Step 'Docker daemon: RUNNING'" },
+    @{ File = 'watch-running-ai.ps1'; DotenvAnchor = '$now = Get-Date' },
+    @{ File = 'status-running-ai.ps1'; DotenvAnchor = 'function Format-Row' }
+)) {
+    Check "$($entry.File): -SpringPort param default never reads `$env:SERVER_PORT directly" {
+        $text = Get-Content (Join-Path $scripts $entry.File) -Raw
+        ($text -match '\[int\]\$SpringPort\s*=\s*8080\s*[,)]') -and
+            (-not ($text -match '\[int\]\$SpringPort\s*=\s*\$\(if\s*\(\$env:SERVER_PORT\)'))
+    }
+
+    Check "$($entry.File): .env loads, then SpringPort is re-resolved only when not explicitly passed, before any port is used" {
+        $text = Get-Content (Join-Path $scripts $entry.File) -Raw
+        $dotenvIdx = $text.IndexOf('Initialize-DotEnvForThisProcess')
+        # The literal code line ("= Resolve-RunningAiSpringPort"), not the bare function name -
+        # the explanatory comment above each call site also mentions the function by name, which
+        # would otherwise match first and sit textually before Initialize-DotEnvForThisProcess.
+        $resolveIdx = $text.IndexOf('= Resolve-RunningAiSpringPort')
+        $guardIdx = $text.IndexOf("ContainsKey('SpringPort')")
+        $anchorIdx = $text.IndexOf($entry.DotenvAnchor)
+        ($dotenvIdx -ge 0) -and ($resolveIdx -gt $dotenvIdx) -and ($guardIdx -ge 0) -and ($guardIdx -lt $resolveIdx) -and
+            ($anchorIdx -ge 0) -and ($resolveIdx -lt $anchorIdx)
+    }
+}
+
+# ---- behavioral: all three scripts resolve the SAME port, loaded correctly in an isolated
+# STANDALONE CHILD PROCESS (matching how the Scheduled Task invokes watch-running-ai.ps1, with no
+# parent that already loaded .env) - using status-running-ai.ps1 as the spawn target since it is
+# the only one of the three that is read-only/safe to actually execute for real (no Docker/Spring
+# mutation). RUNNING_AI_TEST_RUNTIME_DIR keeps PID-file reads off the real .runtime;
+# RUNNING_AI_TEST_ENV_ROOT keeps the .env off the real repo-root one - never a copy of the real
+# production .env.
+function Invoke-StatusScriptIsolated {
+    param([hashtable]$ProcessEnv = @{}, [string]$EnvFileContent = $null, [string[]]$ExtraArgs = @())
+    $runtimeTemp = Join-Path $env:TEMP "selftest-status-runtimedir-$([guid]::NewGuid().ToString('N'))"
+    $envDir = Join-Path $env:TEMP "selftest-status-envroot-$([guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Force $runtimeTemp | Out-Null
+    New-Item -ItemType Directory -Force $envDir | Out-Null
+    if ($EnvFileContent) { Set-Content -LiteralPath (Join-Path $envDir '.env') -Value $EnvFileContent -Encoding utf8 }
+    try {
+        $psExe = (Get-Command powershell.exe).Source
+        $scriptPath = Join-Path $scripts 'status-running-ai.ps1'
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $psExe
+        $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File $(Quote-Argument $scriptPath) $($ExtraArgs -join ' ')"
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.EnvironmentVariables['RUNNING_AI_TEST_RUNTIME_DIR'] = $runtimeTemp
+        $psi.EnvironmentVariables['RUNNING_AI_TEST_ENV_ROOT'] = $envDir
+        foreach ($k in $ProcessEnv.Keys) { $psi.EnvironmentVariables[$k] = $ProcessEnv[$k] }
+        $proc = New-Object System.Diagnostics.Process
+        $proc.StartInfo = $psi
+        [void]$proc.Start()
+        $stdout = $proc.StandardOutput.ReadToEnd()
+        $stderr = $proc.StandardError.ReadToEnd()
+        $proc.WaitForExit(30000) | Out-Null
+        [pscustomobject]@{ StdOut = $stdout; StdErr = $stderr }
+    } finally {
+        Remove-Item -Recurse -Force $runtimeTemp -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force $envDir -ErrorAction SilentlyContinue
+    }
+}
+
+Check 'status-running-ai.ps1 (isolated standalone process): no explicit param, no process env -> uses .env SERVER_PORT' {
+    $r = Invoke-StatusScriptIsolated -EnvFileContent 'SERVER_PORT=18080'
+    ($r.StdOut -match 'Spring\s+DOWN port 18080') -or ($r.StdOut -match 'Spring\s+UP port 18080')
+}
+
+Check 'status-running-ai.ps1 (isolated standalone process): existing process env SERVER_PORT wins over .env' {
+    $r = Invoke-StatusScriptIsolated -ProcessEnv @{ SERVER_PORT = '9999' } -EnvFileContent 'SERVER_PORT=18080'
+    ($r.StdOut -match 'port 9999') -and (-not ($r.StdOut -match 'port 18080'))
+}
+
+Check 'status-running-ai.ps1 (isolated standalone process): explicit -SpringPort wins over everything' {
+    $r = Invoke-StatusScriptIsolated -ProcessEnv @{ SERVER_PORT = '9999' } -EnvFileContent 'SERVER_PORT=18080' -ExtraArgs @('-SpringPort', '7777')
+    ($r.StdOut -match 'port 7777') -and (-not ($r.StdOut -match 'port 9999')) -and (-not ($r.StdOut -match 'port 18080'))
+}
+
+Check 'status-running-ai.ps1 (isolated standalone process): no .env, no process env -> default 8080' {
+    $r = Invoke-StatusScriptIsolated
+    $r.StdOut -match 'port 8080'
+}
+
 Check 'stop script never removes volumes' {
     # code only: drop the comment-based help block and # comments (which mention the forbidden command)
     $text = (Get-Content (Join-Path $scripts 'stop-running-ai.ps1') -Raw) -replace '(?s)<#.*?#>', '' -replace '(?m)^\s*#.*$', ''

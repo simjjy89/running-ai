@@ -30,7 +30,7 @@ param(
     [switch]$DryRun,
     [switch]$NoRecovery,
     [int]$ConnectorPort = 8765,
-    [int]$SpringPort = $(if ($env:SERVER_PORT) { [int]$env:SERVER_PORT } else { 8080 }),
+    [int]$SpringPort = 8080,
     [int]$RecheckDelaySec = 10,
     [int]$WindowMinutes = 10,
     [int]$MaxRestarts = 3,
@@ -46,6 +46,15 @@ try {
     $hash = [BitConverter]::ToString([Security.Cryptography.SHA1]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes((Get-RepoRoot).ToLowerInvariant()))).Replace('-', '').Substring(0, 12)
     $mutex = New-Object System.Threading.Mutex($false, "Local\RunningAI-Watchdog-$hash")
     if (-not $mutex.WaitOne(0)) { Write-Step 'Another watchdog run is in progress; skipping.'; exit $ExitCode.Ok }
+
+    # Loaded here (same as start-running-ai.ps1's own step 0) because this script is often
+    # spawned standalone by the Scheduled Task, with no parent that already loaded .env - see
+    # Resolve-RunningAiSpringPort in RunningAI.Common.ps1 for why this must run before resolving
+    # $SpringPort from $env:SERVER_PORT. RUNNING_AI_TEST_ENV_ROOT is a test-only escape hatch
+    # (mirrors RUNNING_AI_TEST_RUNTIME_DIR); never set outside a test.
+    $envRoot = if ($env:RUNNING_AI_TEST_ENV_ROOT) { $env:RUNNING_AI_TEST_ENV_ROOT } else { Get-RepoRoot }
+    Initialize-DotEnvForThisProcess -Root $envRoot
+    if (-not $PSBoundParameters.ContainsKey('SpringPort')) { $SpringPort = Resolve-RunningAiSpringPort }
 
     $now = Get-Date
     $writeFiles = -not $DryRun

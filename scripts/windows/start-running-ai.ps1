@@ -26,7 +26,7 @@
 param(
     [switch]$Build,
     [int]$ConnectorPort = 8765,
-    [int]$SpringPort = $(if ($env:SERVER_PORT) { [int]$env:SERVER_PORT } else { 8080 }),
+    [int]$SpringPort = 8080,
     [int]$DockerTimeoutSec = 120,
     [int]$PostgresTimeoutSec = 120,
     [int]$ConnectorTimeoutSec = 30,
@@ -84,8 +84,14 @@ try {
     # Loaded into this process's own environment first (existing process env wins, .env only
     # fills gaps) so every child started below -- connector and Spring alike -- inherits it the
     # same way a manually-set $env:... variable would. See RunningAI.Common.ps1 for why Spring's
-    # own ".env[.properties]" config import is not relied on for this.
-    Initialize-DotEnvForThisProcess -Root $root
+    # own ".env[.properties]" config import is not relied on for this. RUNNING_AI_TEST_ENV_ROOT is
+    # a test-only escape hatch (mirrors RUNNING_AI_TEST_RUNTIME_DIR) so a test can supply a
+    # disposable .env without touching the real repo-root one or redirecting $root itself (which
+    # still must point at the real repo for docker-compose.yml/server paths); never set outside a
+    # test.
+    $envRoot = if ($env:RUNNING_AI_TEST_ENV_ROOT) { $env:RUNNING_AI_TEST_ENV_ROOT } else { $root }
+    Initialize-DotEnvForThisProcess -Root $envRoot
+    if (-not $PSBoundParameters.ContainsKey('SpringPort')) { $SpringPort = Resolve-RunningAiSpringPort }
 
     # ---- 1. Docker -------------------------------------------------------------------
     if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
