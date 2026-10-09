@@ -112,27 +112,46 @@ function Write-WatchdogLog {
 function Get-DefaultProbes {
     param([int]$ConnectorPort, [int]$SpringPort, [int]$RelayPort)
     $compose = Join-Path (Get-RepoRoot) 'docker-compose.yml'
+    # .GetNewClosure() gives each probe its own copy of $ConnectorPort/$SpringPort/$RelayPort/
+    # $compose so they keep working after Get-DefaultProbes returns - but a closure's new session
+    # state chains straight up to the GLOBAL scope, NOT to the scope where this file was
+    # dot-sourced. When this script is invoked directly (".\watch-running-ai.ps1", as an operator
+    # or a test would) rather than via "powershell -File" (as the Scheduled Task does), that
+    # dot-sourced scope is NOT global, so a closure calling a helper FUNCTION by name - Quote-
+    # Argument, Invoke-NativeText, Test-ConnectorHealth, Test-PortInUse, Test-SpringHealth,
+    # Test-ExternalRelayHealth - throws "term '<name>' is not recognized" (live-reproduced).
+    # Closures resolve captured VARIABLES fine, so every helper function this file's closures need
+    # is captured as a variable (${function:Name}) here, outside the closures, and invoked with
+    # "& $var" instead of by name - sidestepping the scope-chain resolution entirely rather than
+    # relying on how the script happens to be invoked.
+    $quoteArgumentFn       = ${function:Quote-Argument}
+    $invokeNativeTextFn    = ${function:Invoke-NativeText}
+    $testConnectorHealthFn = ${function:Test-ConnectorHealth}
+    $testSpringHealthFn    = ${function:Test-SpringHealth}
+    $testExternalRelayHealthFn = ${function:Test-ExternalRelayHealth}
+    $testPortInUseFn       = ${function:Test-PortInUse}
     @{
         Docker = {
             if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { return 'NO_CLI' }
             if ((Invoke-NativeQuiet 'docker' 'info') -eq 0) { 'UP' } else { 'DOWN' }
         }
         Postgres = {
-            $cid = (Invoke-NativeText 'docker' "compose -f $(Quote-Argument $compose) ps -a -q postgres").Trim()
+            $composeArg = & $quoteArgumentFn $compose
+            $cid = (& $invokeNativeTextFn 'docker' "compose -f $composeArg ps -a -q postgres").Trim()
             if (-not $cid) { return 'stopped' }
-            $text = (Invoke-NativeText 'docker' "inspect -f {{.State.Running}}/{{.State.Health.Status}} $cid").Trim()
+            $text = (& $invokeNativeTextFn 'docker' "inspect -f {{.State.Running}}/{{.State.Health.Status}} $cid").Trim()
             if ($text -notmatch '^(true|false)/(\w*)') { return 'unknown' }
             if ($Matches[1] -eq 'false') { return 'stopped' }
             switch ($Matches[2]) { 'healthy' { 'healthy' } 'unhealthy' { 'unhealthy' } 'starting' { 'starting' } default { 'unknown' } }
         }.GetNewClosure()
-        ConnectorHealth   = { Test-ConnectorHealth $ConnectorPort }.GetNewClosure()
-        ConnectorPortUsed = { Test-PortInUse $ConnectorPort }.GetNewClosure()
+        ConnectorHealth   = { & $testConnectorHealthFn $ConnectorPort }.GetNewClosure()
+        ConnectorPortUsed = { & $testPortInUseFn $ConnectorPort }.GetNewClosure()
         ConnectorPid      = { Get-TrackedProcessId 'garmin-connector' (Get-ConnectorMarkers) }
-        SpringHealth      = { Test-SpringHealth $SpringPort }.GetNewClosure()
-        SpringPortUsed    = { Test-PortInUse $SpringPort }.GetNewClosure()
+        SpringHealth      = { & $testSpringHealthFn $SpringPort }.GetNewClosure()
+        SpringPortUsed    = { & $testPortInUseFn $SpringPort }.GetNewClosure()
         SpringPid         = { Get-TrackedProcessId 'spring' (Get-SpringMarkers) }
-        ExternalRelayHealth   = { Test-ExternalRelayHealth $RelayPort }.GetNewClosure()
-        ExternalRelayPortUsed = { Test-PortInUse $RelayPort }.GetNewClosure()
+        ExternalRelayHealth   = { & $testExternalRelayHealthFn $RelayPort }.GetNewClosure()
+        ExternalRelayPortUsed = { & $testPortInUseFn $RelayPort }.GetNewClosure()
         ExternalRelayPid      = { Get-TrackedProcessId 'external-relay' (Get-ExternalRelayMarkers) }
     }
 }

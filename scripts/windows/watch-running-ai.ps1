@@ -66,7 +66,7 @@ try {
 
     if ($DryRun) {
         Write-Host 'DRY RUN - nothing is executed and no files are written.'
-        foreach ($c in $script:Components) { Write-Host ("{0,-10} {1,-10} {2}" -f $c, $states[$c].State, $states[$c].Reason) }
+        foreach ($c in $script:AllTrackedComponents) { Write-Host ("{0,-10} {1,-10} {2}" -f $c, $states[$c].State, $states[$c].Reason) }
         if ($hint) { Write-Host "Garmin hint : $hint (informational; never causes a restart)" }
         if (-not $state.Available) { Write-Host "State       : $($state.Note) -> no recovery this tick (fail safe)" }
         if ($plan.Actions.Count -eq 0) { Write-Host 'Planned actions: none' }
@@ -95,9 +95,9 @@ try {
     $overall = Get-OverallState -States $finalStates -Blocked $blocked -GarminHint $hint
 
     $budget = [ordered]@{}
-    foreach ($c in $script:Components) { $budget[$c] = Get-RestartCount -History $history -Component $c -Now $now -WindowMinutes $WindowMinutes }
+    foreach ($c in $script:AllTrackedComponents) { $budget[$c] = Get-RestartCount -History $history -Component $c -Now $now -WindowMinutes $WindowMinutes }
     $componentStatus = [ordered]@{}
-    foreach ($c in $script:Components) { $componentStatus[$c] = $finalStates[$c].State }
+    foreach ($c in $script:AllTrackedComponents) { $componentStatus[$c] = $finalStates[$c].State }
     $lastAction = if ($steps.Count -gt 0) { ($steps | ForEach-Object { "$($_.Action):$($_.Result)" }) -join ',' } else { 'NONE' }
 
     Write-JsonAtomic -Path $script:StatusPath -Object ([ordered]@{

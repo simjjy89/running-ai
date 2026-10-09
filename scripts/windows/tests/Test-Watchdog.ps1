@@ -405,6 +405,51 @@ Check 'new artifacts are git-ignored' {
     try { @(git check-ignore '.runtime/watchdog-state.json' '.runtime/watchdog-status.json' '.runtime/logs/watchdog.log' '.runtime/watchdog-state.json.corrupt').Count -eq 4 } finally { Pop-Location }
 }
 
+# ---- Phase 6I-1.1 regression lock-ins ---------------------------------------------------------
+
+# Live-reproduced bug: a probe built by Get-DefaultProbes and wrapped in .GetNewClosure() calls a
+# dot-sourced helper FUNCTION (Quote-Argument, Invoke-NativeText, Test-ConnectorHealth, ...) by
+# name. A closure's new session state chains to GLOBAL, not to the scope this file was dot-sourced
+# into, so when watch-running-ai.ps1 is invoked DIRECTLY (as an operator would: ".\watch-running-
+# ai.ps1", or here "powershell -Command '& path -DryRun'") rather than via "powershell -File" (as
+# the Scheduled Task does), that scope is not global and the helper call throws "term '<name>' is
+# not recognized". -File hides this entirely, so the regression test must avoid -File and must
+# exercise the REAL (non-injected) probes, not the mocked $Probes used everywhere else in this file.
+Check 'dry run via direct invocation (not -File) exercises the real default probes without a closure scope regression' {
+    $script = Join-Path $scripts 'watch-running-ai.ps1'
+    $out = (powershell -NoProfile -Command "& '$script' -DryRun -RecheckDelaySec 0" 2>&1 | Out-String)
+    $exit = $LASTEXITCODE
+    ($exit -eq 0) -and ($out -match 'DRY RUN') -and ($out -notmatch 'is not recognized') -and ($out -notmatch 'ERROR:')
+}
+
+# Live-reproduced bug: $script:Components (the 4-component dependency chain) was used instead of
+# $script:AllTrackedComponents for the DryRun component listing and for the status JSON's
+# "components"/"restartBudget.used" maps, so external-relay (Phase 6I-1.1, an INDEPENDENT
+# component - see $script:IndependentComponents) silently never appeared in any of them.
+Check 'DryRun component listing includes external-relay' {
+    $script = Join-Path $scripts 'watch-running-ai.ps1'
+    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $script -DryRun -RecheckDelaySec 0 | Out-String
+    $out -match '(?m)^external-relay\s'
+}
+
+Check 'status JSON components and restartBudget.used include external-relay (normal, no-recovery run)' {
+    $temp = Join-Path $env:TEMP "selftest-watchdog-statusdir-$([guid]::NewGuid().ToString('N'))"
+    $originalEnv = $env:RUNNING_AI_TEST_RUNTIME_DIR
+    $env:RUNNING_AI_TEST_RUNTIME_DIR = $temp
+    try {
+        $script = Join-Path $scripts 'watch-running-ai.ps1'
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $script -NoRecovery -RecheckDelaySec 0 | Out-Null
+        $statusPath = Join-Path $temp 'watchdog-status.json'
+        if (-not (Test-Path -LiteralPath $statusPath)) { throw 'watchdog-status.json was not written' }
+        $status = ConvertFrom-Json (Get-Content -LiteralPath $statusPath -Raw)
+        ($status.components.PSObject.Properties.Name -contains 'external-relay') -and
+        ($status.restartBudget.used.PSObject.Properties.Name -contains 'external-relay')
+    } finally {
+        $env:RUNNING_AI_TEST_RUNTIME_DIR = $originalEnv
+        Remove-Item -Recurse -Force $temp -ErrorAction SilentlyContinue
+    }
+}
+
 if ($failures.Count) {
     Write-Host ("{0} check(s) failed: {1}" -f $failures.Count, ($failures -join '; ')) -ForegroundColor Red
     exit 1
