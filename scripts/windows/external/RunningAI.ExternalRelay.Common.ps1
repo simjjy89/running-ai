@@ -18,7 +18,12 @@
 
 Set-StrictMode -Version Latest
 
-$script:RelayDir = Join-Path $script:RepoRoot 'tools\external-relay'
+# RUNNING_AI_TEST_RELAY_DIR is a test-only escape hatch, mirroring RUNNING_AI_TEST_RUNTIME_DIR in
+# RunningAI.Common.ps1: it lets a test point start-/stop-/status-external-relay.ps1 at a disposable
+# fake relay directory (its own config.json/secrets/server.js) - including for a spawned CHILD
+# process, which inherits environment variables but not this process's in-memory $script:RelayDir -
+# without ever touching the real tools\external-relay directory. Never set this outside a test.
+$script:RelayDir = if ($env:RUNNING_AI_TEST_RELAY_DIR) { $env:RUNNING_AI_TEST_RELAY_DIR } else { Join-Path $script:RepoRoot 'tools\external-relay' }
 
 function Get-ExternalRelayMarkers { @('server.js', $script:RelayDir) }
 

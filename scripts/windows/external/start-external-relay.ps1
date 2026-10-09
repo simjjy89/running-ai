@@ -29,6 +29,19 @@ param(
 if (-not $PSBoundParameters.ContainsKey('Port')) { $Port = Get-ExternalRelayConfiguredPort }
 
 try {
+    # Load the repo-root .env into THIS process before anything that spawns node: this script runs
+    # standalone, in its own process (the Watchdog Scheduled Task invokes it in a process separate
+    # from start-running-ai.ps1, which is the only other caller that happened to load .env already),
+    # so it cannot assume a parent already did this. Start-Process below inherits this process's
+    # full environment block, so INTERVALS_ICU_API_KEY (and any other .env-only key) reaches the
+    # relay child exactly the same way a manually-set $env:... variable would. Existing process env
+    # still wins over .env (see RunningAI.Common.ps1) - this never forces an override, only fills a
+    # gap a parent process left empty. RUNNING_AI_TEST_ENV_ROOT is a test-only escape hatch (mirrors
+    # RUNNING_AI_TEST_RUNTIME_DIR) so a test can supply a disposable .env without touching the real
+    # repo-root one; never set outside a test.
+    $envRoot = if ($env:RUNNING_AI_TEST_ENV_ROOT) { $env:RUNNING_AI_TEST_ENV_ROOT } else { Get-RepoRoot }
+    Initialize-DotEnvForThisProcess -Root $envRoot
+
     if (Test-ExternalRelayHealth $Port) {
         Write-Step "External relay: UP on 127.0.0.1:$Port (already running, not restarted)"
         exit $ExitCode.Ok

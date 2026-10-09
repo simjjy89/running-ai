@@ -234,6 +234,172 @@ Check 'status-external-relay.ps1: reports managed/PID when tracked, unmanaged wh
         ($results.Down -match 'DOWN')
 }
 
+# ---- Phase 6I-1.1: standalone .env loading -----------------------------------------------------
+# These exercise the REAL start-external-relay.ps1 as a spawned child process, with a disposable
+# fake relay directory (RUNNING_AI_TEST_RELAY_DIR) standing in for tools\external-relay and a
+# disposable .env root (RUNNING_AI_TEST_ENV_ROOT) standing in for the repo root - never the real
+# tools\external-relay or the real repo-root .env. The fake server.js is NOT the real relay: it
+# only answers /health and a test-only /env-check that reports whether INTERVALS_ICU_API_KEY
+# reached ITS process environment, and its length - never the value itself, and no network call.
+
+function New-FakeRelayDir {
+    param([Parameter(Mandatory)][int]$Port)
+    $dir = Join-Path $env:TEMP "selftest-relaydir-$([guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Force $dir | Out-Null
+    New-Item -ItemType Directory -Force (Join-Path $dir 'secrets') | Out-Null
+    Set-Content -LiteralPath (Join-Path $dir 'config.json') -Value (@{ port = $Port } | ConvertTo-Json) -Encoding ascii
+    Set-Content -LiteralPath (Join-Path $dir 'secrets\watch-token.json') -Value '{"token":"selftest-token-not-a-real-credential"}' -Encoding ascii
+    $serverJsLines = @(
+        "const http = require('http');",
+        "const fs = require('fs');",
+        "const path = require('path');",
+        "const BOM = String.fromCharCode(0xFEFF);",
+        "let cfgRaw = fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8');",
+        "if (cfgRaw.charAt(0) === BOM) { cfgRaw = cfgRaw.slice(1); }",
+        "const cfg = JSON.parse(cfgRaw);",
+        "http.createServer((req, res) => {",
+        "  if (req.url === '/health') {",
+        "    res.writeHead(200, { 'Content-Type': 'application/json' });",
+        "    return res.end(JSON.stringify({ status: 'ok' }));",
+        "  }",
+        "  if (req.url === '/env-check') {",
+        "    const v = process.env.INTERVALS_ICU_API_KEY || '';",
+        "    res.writeHead(200, { 'Content-Type': 'application/json' });",
+        "    return res.end(JSON.stringify({ hasKey: v.length > 0, length: v.length }));",
+        "  }",
+        "  res.writeHead(404);",
+        "  res.end();",
+        "}).listen(cfg.port, '127.0.0.1');"
+    )
+    Set-Content -LiteralPath (Join-Path $dir 'server.js') -Value $serverJsLines -Encoding ascii
+    return $dir
+}
+
+# Runs $Body with RUNNING_AI_TEST_RUNTIME_DIR and RUNNING_AI_TEST_RELAY_DIR both pointed at fresh
+# throwaway directories (so a spawned child start-external-relay.ps1 never touches the real
+# .runtime or tools\external-relay), stops whatever PID it tracked under 'external-relay', and
+# restores every environment variable / $script: var it touched - INTERVALS_ICU_API_KEY included,
+# since several checks below deliberately set or clear it on THIS process to prove what a spawned
+# child does or does not inherit.
+function Invoke-WithIsolatedRelay {
+    param([Parameter(Mandatory)][int]$Port, [Parameter(Mandatory)][scriptblock]$Body)
+    $originalRuntimeEnv = $env:RUNNING_AI_TEST_RUNTIME_DIR
+    $originalRuntimeVar = $script:RuntimeDir
+    $originalRelayEnv = $env:RUNNING_AI_TEST_RELAY_DIR
+    $originalRelayVar = $script:RelayDir
+    $originalApiKey = $env:INTERVALS_ICU_API_KEY
+    $runtimeTemp = Join-Path $env:TEMP "selftest-relay-runtimedir-$([guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Force (Join-Path $runtimeTemp 'logs') | Out-Null   # start-*.ps1 never creates this itself; a real run always already has it
+    $relayDir = New-FakeRelayDir -Port $Port
+    $env:RUNNING_AI_TEST_RUNTIME_DIR = $runtimeTemp
+    $script:RuntimeDir = $runtimeTemp
+    $env:RUNNING_AI_TEST_RELAY_DIR = $relayDir
+    $script:RelayDir = $relayDir
+    try { & $Body }
+    finally {
+        $tracked = Get-TrackedProcessId 'external-relay' (Get-ExternalRelayMarkers)
+        if ($tracked) { Stop-Process -Id $tracked -Force -ErrorAction SilentlyContinue }
+        $env:RUNNING_AI_TEST_RUNTIME_DIR = $originalRuntimeEnv
+        $script:RuntimeDir = $originalRuntimeVar
+        $env:RUNNING_AI_TEST_RELAY_DIR = $originalRelayEnv
+        $script:RelayDir = $originalRelayVar
+        if ($null -eq $originalApiKey) { Remove-Item Env:INTERVALS_ICU_API_KEY -ErrorAction SilentlyContinue }
+        else { $env:INTERVALS_ICU_API_KEY = $originalApiKey }
+        Remove-Item -Recurse -Force $runtimeTemp -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force $relayDir -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-StartExternalRelayChild {
+    param([Parameter(Mandatory)][int]$Port, [Parameter(Mandatory)][string]$EnvRoot)
+    $psExe = (Get-Command powershell.exe).Source
+    $scriptPath = Join-Path $external 'start-external-relay.ps1'
+    $out = [System.IO.Path]::GetTempFileName()
+    $err = [System.IO.Path]::GetTempFileName()
+    try {
+        $saved = $env:RUNNING_AI_TEST_ENV_ROOT
+        $env:RUNNING_AI_TEST_ENV_ROOT = $EnvRoot
+        try {
+            # Deliberately NOT "-Wait": when this child actually spawns node (the whole point of
+            # these checks), node inherits this process's own redirected stdout/stderr FILE handles
+            # (Start-Process/CreateProcess marks them inheritable), and because node is left running
+            # detached, it keeps those handles open forever - which makes Start-Process -Wait's
+            # WaitForExit() block indefinitely (live-reproduced: every other check here is safe only
+            # because its fake listener answers /health immediately, so start-external-relay.ps1
+            # returns BEFORE ever spawning node). Polling HasExited instead depends only on the
+            # process's own exit, never on who else holds a handle to its output files.
+            $proc = Start-Process -FilePath $psExe -ArgumentList @(
+                '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$scriptPath`"", '-Port', "$Port"
+            ) -WindowStyle Hidden -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
+            $exited = Wait-Until -TimeoutSec 30 -PollSec 1 -Test { $proc.HasExited }
+            if (-not $exited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue; throw "start-external-relay.ps1 child (PID $($proc.Id)) did not exit within 30s" }
+        } finally { $env:RUNNING_AI_TEST_ENV_ROOT = $saved }
+        # $proc.ExitCode is unreliable here: a Process object from Start-Process -PassThru without
+        # -Wait does not reliably expose it even after HasExited is true. Callers assert on StdOut
+        # content instead (every code path below prints an unambiguous marker line).
+        [pscustomobject]@{
+            StdOut   = Get-Content -LiteralPath $out -Raw -ErrorAction SilentlyContinue
+            StdErr   = Get-Content -LiteralPath $err -Raw -ErrorAction SilentlyContinue
+        }
+    } finally {
+        Remove-Item -LiteralPath $out -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $err -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-EnvCheck {
+    param([Parameter(Mandatory)][int]$Port)
+    $body = Get-HttpBody "http://127.0.0.1:$Port/env-check"
+    if (-not $body) { return $null }
+    try { return ($body | ConvertFrom-Json) } catch { return $null }
+}
+
+Check 'start-external-relay.ps1: a standalone child with no inherited key picks up INTERVALS_ICU_API_KEY from a repo/test .env' {
+    Invoke-WithIsolatedRelay -Port 18911 -Body {
+        Remove-Item Env:INTERVALS_ICU_API_KEY -ErrorAction SilentlyContinue
+        $envDir = Join-Path $env:TEMP "selftest-envroot-$([guid]::NewGuid().ToString('N'))"
+        New-Item -ItemType Directory -Force $envDir | Out-Null
+        try {
+            $secret = "dotenv-$([guid]::NewGuid().ToString('N'))"   # 9 + 32 chars, never asserted on by value elsewhere
+            Set-Content -LiteralPath (Join-Path $envDir '.env') -Value "INTERVALS_ICU_API_KEY=$secret" -Encoding utf8
+            $result = Invoke-StartExternalRelayChild -Port 18911 -EnvRoot $envDir
+            $check = Get-EnvCheck -Port 18911
+            ($result.StdOut -match 'External relay: UP') -and $check -and $check.hasKey -and ($check.length -eq $secret.Length) -and
+                (-not ($result.StdOut -match [regex]::Escape($secret))) -and (-not ($result.StdErr -match [regex]::Escape($secret)))
+        } finally { Remove-Item -Recurse -Force $envDir -ErrorAction SilentlyContinue }
+    }
+}
+
+Check 'start-external-relay.ps1: an existing process-env INTERVALS_ICU_API_KEY is never overridden by .env (precedence lock-in)' {
+    Invoke-WithIsolatedRelay -Port 18912 -Body {
+        $fromProcess = "procenv-$([guid]::NewGuid().ToString('N'))"
+        $env:INTERVALS_ICU_API_KEY = $fromProcess
+        $envDir = Join-Path $env:TEMP "selftest-envroot-$([guid]::NewGuid().ToString('N'))"
+        New-Item -ItemType Directory -Force $envDir | Out-Null
+        try {
+            Set-Content -LiteralPath (Join-Path $envDir '.env') -Value 'INTERVALS_ICU_API_KEY=from-dotenv-should-be-ignored' -Encoding utf8
+            $result = Invoke-StartExternalRelayChild -Port 18912 -EnvRoot $envDir
+            $check = Get-EnvCheck -Port 18912
+            ($result.StdOut -match 'External relay: UP') -and $check -and $check.hasKey -and ($check.length -eq $fromProcess.Length)
+        } finally { Remove-Item -Recurse -Force $envDir -ErrorAction SilentlyContinue }
+    }
+}
+
+Check 'start-external-relay.ps1: an already-healthy relay is still not restarted now that .env loading runs first (idempotency regression)' {
+    Invoke-WithIsolatedRelay -Port 18913 -Body {
+        $pending = Start-FakeJsonListener -Port 18913 -Json '{"status":"ok"}'
+        try {
+            Write-PidFile 'external-relay' $PID
+            $envDir = Join-Path $env:TEMP "selftest-envroot-$([guid]::NewGuid().ToString('N'))"
+            New-Item -ItemType Directory -Force $envDir | Out-Null
+            try {
+                $result = Invoke-StartExternalRelayChild -Port 18913 -EnvRoot $envDir
+                ($result.StdOut -match 'already running, not restarted')
+            } finally { Remove-Item -Recurse -Force $envDir -ErrorAction SilentlyContinue }
+        } finally { Stop-FakeJsonListener $pending }
+    }
+}
+
 Write-Host ''
 if ($failures.Count -gt 0) {
     Write-Host "FAILED: $($failures.Count) check(s) failed." -ForegroundColor Red
