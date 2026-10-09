@@ -9,7 +9,14 @@
   its existing token store (run "python -m garmin_connector login" once, by hand, on this PC).
   The Garmin scheduler is not forced on: it follows RUNNING_AI_GARMIN_SCHEDULER_ENABLED.
 
-  Exit codes: 0 ok | 10 Docker | 11 PostgreSQL | 12 connector | 13 Java/build | 14 Spring | 1 other.
+  Phase 6I-1.1: the external relay (tools/external-relay, 127.0.0.1:17845) is ensured healthy
+  last, after Spring. It has no dependency on Spring's business API and is architecturally
+  independent - a relay failure is reported (and changes the exit code) but never rolls back an
+  already-healthy Docker/PostgreSQL/connector/Spring, and a Spring failure never attempts to
+  start the relay (deliberately not nested inside the Spring step).
+
+  Exit codes: 0 ok | 10 Docker | 11 PostgreSQL | 12 connector | 13 Java/build | 14 Spring |
+  15 external relay | 1 other.
 
 .PARAMETER Build
   Rebuild the Spring jar (gradlew bootJar) even when one exists. Without it the jar is built
@@ -27,6 +34,7 @@ param(
 )
 
 . "$PSScriptRoot\RunningAI.Common.ps1"
+. "$PSScriptRoot\external\RunningAI.ExternalRelay.Common.ps1"
 $root = Get-RepoRoot
 $started = Get-Date
 $startedConnector = $false
@@ -206,7 +214,24 @@ try {
         Write-Step "Spring Boot: UP on port $SpringPort (PID $($spring.Id))"
     }
 
+    # ---- 6. External relay (independent of Spring - never blocks on it, never blocked by it) -----
+    $relayPort = Get-ExternalRelayConfiguredPort
+    $relayFailed = $false
+    if (Test-ExternalRelayHealth $relayPort) {
+        Write-Step "External relay: UP on 127.0.0.1:$relayPort (already running, not restarted)"
+    } else {
+        & (Join-Path $PSScriptRoot 'external\start-external-relay.ps1') | ForEach-Object { Write-Host $_ }
+        if ($LASTEXITCODE -ne 0) {
+            Write-Step "External relay: FAILED to start (exit $LASTEXITCODE) - Docker/PostgreSQL/connector/Spring above are unaffected and left running. See .runtime\logs\external-relay.err.log"
+            $relayFailed = $true
+        }
+    }
+
     $seconds = [int]((Get-Date) - $started).TotalSeconds
+    if ($relayFailed) {
+        Write-Step "RunningAI core runtime is up (${seconds}s), but the external relay failed - see above."
+        exit $ExitCode.ExternalRelay
+    }
     Write-Step "RunningAI runtime is up (${seconds}s). Check details with scripts\windows\status-running-ai.ps1"
     exit $ExitCode.Ok
 } catch {

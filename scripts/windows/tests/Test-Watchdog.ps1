@@ -24,9 +24,11 @@ function Check {
 
 function New-Obs {
     param($Docker = 'UP', $Postgres = 'healthy', [bool]$ConnectorHealth = $true, [bool]$ConnectorPort = $true, $ConnectorPid = $null,
-          [bool]$SpringHealth = $true, [bool]$SpringPort = $true, $SpringPid = $null)
+          [bool]$SpringHealth = $true, [bool]$SpringPort = $true, $SpringPid = $null,
+          [bool]$RelayHealth = $true, [bool]$RelayPort = $true, $RelayPid = $null)
     [pscustomobject]@{ Docker = $Docker; Postgres = $Postgres; ConnectorHealth = $ConnectorHealth; ConnectorPortUsed = $ConnectorPort
-        ConnectorPid = $ConnectorPid; SpringHealth = $SpringHealth; SpringPortUsed = $SpringPort; SpringPid = $SpringPid }
+        ConnectorPid = $ConnectorPid; SpringHealth = $SpringHealth; SpringPortUsed = $SpringPort; SpringPid = $SpringPid
+        ExternalRelayHealth = $RelayHealth; ExternalRelayPortUsed = $RelayPort; ExternalRelayPid = $RelayPid }
 }
 function New-TempDir { $d = Join-Path ([IO.Path]::GetTempPath()) ('ra-wd-' + [guid]::NewGuid().ToString('N')); New-Item -ItemType Directory $d | Out-Null; $d }
 $now = Get-Date
@@ -107,6 +109,66 @@ Check 'process alive but health failing -> UNHEALTHY -> graceful RESTART with pr
 Check 'multiple failures are recovered strictly in dependency order' {
     $plan = Plan (New-Obs -Postgres 'stopped' -ConnectorHealth $false -ConnectorPort $false -SpringHealth $false -SpringPort $false)
     (($plan.Actions | ForEach-Object { $_.Component }) -join ',') -eq 'postgres,connector,spring'
+}
+
+# ---- external relay: independent of the core chain (Phase 6I-1.1) -----------------------------
+
+Check 'relay DOWN -> exactly one START_EXTERNAL_RELAY action' {
+    $plan = Plan (New-Obs -RelayHealth $false -RelayPort $false -RelayPid $null)
+    $relayActions = @($plan.Actions | Where-Object { $_.Component -eq 'external-relay' })
+    $relayActions.Count -eq 1 -and $relayActions[0].Action -eq 'START_EXTERNAL_RELAY' -and -not $relayActions[0].PreStop
+}
+
+Check 'relay process alive but health failing -> UNHEALTHY -> RESTART_EXTERNAL_RELAY with pre-stop' {
+    $plan = Plan (New-Obs -RelayHealth $false -RelayPort $true -RelayPid 5150)
+    $relayActions = @($plan.Actions | Where-Object { $_.Component -eq 'external-relay' })
+    $relayActions.Count -eq 1 -and $relayActions[0].Action -eq 'RESTART_EXTERNAL_RELAY' -and $relayActions[0].PreStop
+}
+
+Check 'foreign process owns the relay port: DEGRADED, never an action (no kill, no silent replace)' {
+    $obs = New-Obs -RelayHealth $false -RelayPort $true -RelayPid $null
+    $states = Get-ComponentStates $obs
+    $plan = Plan $obs
+    $states['external-relay'].State -eq 'DEGRADED' -and $states['external-relay'].Reason -eq 'FOREIGN_PROCESS' -and
+    (@($plan.Actions | Where-Object { $_.Component -eq 'external-relay' })).Count -eq 0 -and
+    ($plan.Blocked | Where-Object { $_.Component -eq 'external-relay' }).Reason -eq 'FOREIGN_PROCESS'
+}
+
+Check 'Spring DOWN/blocked (foreign process) does not block the relay''s own recovery action' {
+    $plan = Plan (New-Obs -SpringHealth $false -SpringPort $true -SpringPid $null -RelayHealth $false -RelayPort $false -RelayPid $null)
+    ($plan.Blocked | Where-Object { $_.Component -eq 'spring' }).Reason -eq 'FOREIGN_PROCESS' -and
+    (@($plan.Actions | Where-Object { $_.Component -eq 'external-relay' -and $_.Action -eq 'START_EXTERNAL_RELAY' })).Count -eq 1
+}
+
+Check 'relay DOWN/blocked (foreign process) does not block docker/postgres/connector/spring recovery' {
+    $plan = Plan (New-Obs -Docker 'DOWN' -Postgres 'unknown' -ConnectorHealth $false -ConnectorPort $false -SpringHealth $false -SpringPort $false -RelayHealth $false -RelayPort $true -RelayPid $null)
+    ($plan.Blocked | Where-Object { $_.Component -eq 'external-relay' }).Reason -eq 'FOREIGN_PROCESS' -and
+    (($plan.Actions | Where-Object { $_.Component -ne 'external-relay' } | ForEach-Object { $_.Component }) -join ',') -eq 'docker,connector,spring'
+}
+
+Check 'relay restart budget: 3 recent restarts block the 4th, independent of the core chain''s own budget' {
+    $h = New-EmptyHistory
+    1..3 | ForEach-Object { Add-RestartRecord -History $h -Component 'external-relay' -Now $now.AddMinutes(-$_) }
+    $plan = Plan (New-Obs -RelayHealth $false -RelayPort $false -RelayPid $null) $h
+    (@($plan.Actions | Where-Object { $_.Component -eq 'external-relay' })).Count -eq 0 -and
+    ($plan.Blocked | Where-Object { $_.Component -eq 'external-relay' }).Reason -eq 'RESTART_BUDGET_EXCEEDED' -and
+    # the core chain's own budget is a completely separate counter - still free to act
+    (@($plan.Actions | Where-Object { $_.Component -eq 'spring' })).Count -eq 0   # spring is healthy here, nothing to assert beyond no crash
+}
+
+Check 'executor recovers a down relay via the injected Runner, independent of core-chain state' {
+    $calls = New-Object System.Collections.Generic.List[string]
+    $h = New-EmptyHistory
+    $result = Invoke-WatchdogRecovery -Observe { New-Obs -RelayHealth $false -RelayPort $false -RelayPid $null } `
+        -Runner { param($a) $calls.Add($a.Action); $true } -History $h -HistoryAvailable $true -Now $now -MaxSteps 2
+    (-not $result.Failed) -and ($calls -contains 'START_EXTERNAL_RELAY')
+}
+
+Check 'Invoke-RecoveryAction routes external-relay to its own dedicated script, never the full orchestrator (source check)' {
+    $src = Get-Content -LiteralPath (Join-Path $scripts 'RunningAI.Watchdog.ps1') -Raw
+    $fnStart = $src.IndexOf('function Invoke-RecoveryAction')
+    $fn = $src.Substring($fnStart)
+    $fn.Contains("if (`$Action.Component -eq 'external-relay')") -and $fn.Contains('external\start-external-relay.ps1')
 }
 
 # ---- restart budget ---------------------------------------------------------------------------
@@ -210,14 +272,16 @@ Check 'wrong-shaped state JSON is also treated as corrupt' {
 Check 'health is re-checked once when the process is alive: transient failure is not persistent' {
     $n = @{ c = 0 }
     $probes = @{ Docker = { 'UP' }; Postgres = { 'healthy' }; ConnectorPid = { 1234 }; ConnectorHealth = { $n.c++; $n.c -ge 2 }
-                 ConnectorPortUsed = { $true }; SpringPid = { $null }; SpringHealth = { $true }; SpringPortUsed = { $true } }
+                 ConnectorPortUsed = { $true }; SpringPid = { $null }; SpringHealth = { $true }; SpringPortUsed = { $true }
+                 ExternalRelayPid = { $null }; ExternalRelayHealth = { $true }; ExternalRelayPortUsed = { $true } }
     $obs = Get-RuntimeObservation -RecheckDelaySec 1 -Probes $probes
     $obs.ConnectorHealth -and $n.c -eq 2
 }
 
 Check 'persistent health failure with a live process is classified UNHEALTHY' {
     $probes = @{ Docker = { 'UP' }; Postgres = { 'healthy' }; ConnectorPid = { 1234 }; ConnectorHealth = { $false }
-                 ConnectorPortUsed = { $true }; SpringPid = { $null }; SpringHealth = { $true }; SpringPortUsed = { $true } }
+                 ConnectorPortUsed = { $true }; SpringPid = { $null }; SpringHealth = { $true }; SpringPortUsed = { $true }
+                 ExternalRelayPid = { $null }; ExternalRelayHealth = { $true }; ExternalRelayPortUsed = { $true } }
     (Get-ComponentStates (Get-RuntimeObservation -RecheckDelaySec 1 -Probes $probes))['connector'].State -eq 'UNHEALTHY'
 }
 

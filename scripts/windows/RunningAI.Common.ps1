@@ -8,13 +8,19 @@
 Set-StrictMode -Version Latest
 
 $script:RepoRoot     = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$script:RuntimeDir   = Join-Path $script:RepoRoot '.runtime'
+# RUNNING_AI_TEST_RUNTIME_DIR is a test-only escape hatch: it lets a test isolate PID-file/log
+# operations into a throwaway directory - including for a spawned CHILD process (start-/stop-/
+# status-*.ps1 invoked via Start-Process), which inherits environment variables but not this
+# process's in-memory $script:RuntimeDir - without ever reading or writing the real .runtime
+# folder, which may be tracking a real, currently-running managed process. Never set this outside
+# a test.
+$script:RuntimeDir   = if ($env:RUNNING_AI_TEST_RUNTIME_DIR) { $env:RUNNING_AI_TEST_RUNTIME_DIR } else { Join-Path $script:RepoRoot '.runtime' }
 $script:LogDir       = Join-Path $script:RuntimeDir 'logs'
 $script:ConnectorDir = Join-Path $script:RepoRoot 'tools\garmin-connector'
 $script:ServerDir    = Join-Path $script:RepoRoot 'server'
 
 # Exit codes shared by start/stop/status so a Scheduled Task result identifies the failing layer.
-$script:ExitCode = @{ Ok = 0; Docker = 10; Postgres = 11; Connector = 12; Java = 13; Spring = 14; Usage = 2; Other = 1; WatchdogError = 20; RecoveryFailed = 21; Cloudflared = 22; ExternalAccess = 23 }
+$script:ExitCode = @{ Ok = 0; Docker = 10; Postgres = 11; Connector = 12; Java = 13; Spring = 14; ExternalRelay = 15; Usage = 2; Other = 1; WatchdogError = 20; RecoveryFailed = 21; Cloudflared = 22; ExternalAccess = 23 }
 
 function Get-RepoRoot { $script:RepoRoot }
 

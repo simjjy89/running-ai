@@ -108,6 +108,132 @@ Check 'start-external-relay.ps1 refuses to start a second process on an unhealth
     } finally { $listener.Stop() }
 }
 
+# ---- Phase 6I-1.1: isolated PID-file tests ----------------------------------------------------
+# RUNNING_AI_TEST_RUNTIME_DIR redirects .runtime (PID files, logs) to a throwaway temp directory
+# for the duration of each test below - set as an ENVIRONMENT VARIABLE (not just $script:RuntimeDir)
+# specifically so a SPAWNED CHILD PROCESS (these tests invoke the real start-/stop-/
+# status-external-relay.ps1 via Start-Process, which dot-source RunningAI.Common.ps1 fresh in
+# their own process) also sees the redirect - without this, a child process would read/write the
+# REAL .runtime\external-relay.pid, which may be tracking a real, currently-running production
+# relay. Always restored in `finally`, both the env var and this process's own $script:RuntimeDir.
+
+function Invoke-WithIsolatedRuntimeDir {
+    param([Parameter(Mandatory)][scriptblock]$Body)
+    $originalEnv = $env:RUNNING_AI_TEST_RUNTIME_DIR
+    $originalScriptVar = $script:RuntimeDir
+    $temp = Join-Path $env:TEMP "selftest-relay-runtimedir-$([guid]::NewGuid().ToString('N'))"
+    $env:RUNNING_AI_TEST_RUNTIME_DIR = $temp
+    $script:RuntimeDir = $temp
+    try { & $Body } finally {
+        $env:RUNNING_AI_TEST_RUNTIME_DIR = $originalEnv
+        $script:RuntimeDir = $originalScriptVar
+        Remove-Item -Recurse -Force $temp -ErrorAction SilentlyContinue
+    }
+}
+
+Check 'start-external-relay.ps1: an already-healthy MANAGED target is never restarted (duplicate start 0)' {
+    Invoke-WithIsolatedRuntimeDir {
+        $pending = Start-FakeJsonListener -Port 18906 -Json '{"status":"ok"}'
+        try {
+            Write-PidFile 'external-relay' $PID   # any real, currently-running PID is enough to exist
+            $psExe = (Get-Command powershell.exe).Source
+            $scriptPath = Join-Path $external 'start-external-relay.ps1'
+            $out = [System.IO.Path]::GetTempFileName()
+            $proc = Start-Process -FilePath $psExe -ArgumentList @(
+                '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$scriptPath`"", '-Port', '18906'
+            ) -WindowStyle Hidden -PassThru -Wait -RedirectStandardOutput $out -RedirectStandardError ([System.IO.Path]::GetTempFileName())
+            $text = Get-Content -LiteralPath $out -Raw
+            ($proc.ExitCode -eq 0) -and ($text -match 'already running, not restarted')
+        } finally { Stop-FakeJsonListener $pending }
+    }
+}
+
+Check 'start-external-relay.ps1: an already-healthy FOREIGN (untracked) target is never killed or replaced' {
+    Invoke-WithIsolatedRuntimeDir {
+        $pending = Start-FakeJsonListener -Port 18907 -Json '{"status":"ok"}'
+        try {
+            # Deliberately no PID file at all - this simulates a healthy relay RunningAI never started.
+            $psExe = (Get-Command powershell.exe).Source
+            $scriptPath = Join-Path $external 'start-external-relay.ps1'
+            $out = [System.IO.Path]::GetTempFileName()
+            $proc = Start-Process -FilePath $psExe -ArgumentList @(
+                '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$scriptPath`"", '-Port', '18907'
+            ) -WindowStyle Hidden -PassThru -Wait -RedirectStandardOutput $out -RedirectStandardError ([System.IO.Path]::GetTempFileName())
+            $text = Get-Content -LiteralPath $out -Raw
+            ($proc.ExitCode -eq 0) -and ($text -match 'already running, not restarted') -and
+                (-not (Test-Path -LiteralPath (Get-PidFilePath 'external-relay')))   # never claimed it as managed
+        } finally { Stop-FakeJsonListener $pending }
+    }
+}
+
+Check 'stop-external-relay.ps1: only kills a process whose live command line actually matches ours - a look-alike is left running' {
+    Invoke-WithIsolatedRuntimeDir {
+        # A real, harmless dummy process whose command line does NOT contain 'server.js' or this
+        # repository's tools\external-relay path - Get-ExternalRelayMarkers must reject it.
+        $dummy = Start-Process -FilePath (Get-Command powershell.exe).Source -ArgumentList '-NoProfile -Command "Start-Sleep -Seconds 60"' -WindowStyle Hidden -PassThru
+        try {
+            Write-PidFile 'external-relay' $dummy.Id
+            $psExe = (Get-Command powershell.exe).Source
+            $scriptPath = Join-Path $external 'stop-external-relay.ps1'
+            $out = [System.IO.Path]::GetTempFileName()
+            $proc = Start-Process -FilePath $psExe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$scriptPath`"") `
+                -WindowStyle Hidden -PassThru -Wait -RedirectStandardOutput $out -RedirectStandardError ([System.IO.Path]::GetTempFileName())
+            $text = Get-Content -LiteralPath $out -Raw
+            $stillRunning = [bool](Get-Process -Id $dummy.Id -ErrorAction SilentlyContinue)
+            ($proc.ExitCode -eq 0) -and ($text -match 'not running under RunningAI control') -and $stillRunning
+        } finally {
+            Stop-Process -Id $dummy.Id -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Check 'status-external-relay.ps1: reports managed/PID when tracked, unmanaged when healthy-but-untracked, DOWN when nothing listens' {
+    $results = Invoke-WithIsolatedRuntimeDir {
+        $r = [ordered]@{}
+
+        $pending = Start-FakeJsonListener -Port 18908 -Json '{"status":"ok"}'
+        # A dummy process whose COMMAND LINE actually contains both markers ('server.js' and the
+        # relay directory) - Get-TrackedProcessId validates the live command line, not just PID
+        # existence, so a PID file pointing at a process that does not genuinely match (e.g. this
+        # test's own $PID) is correctly treated as stale and removed. The markers are embedded as a
+        # harmless leading comment line so they appear verbatim in the process's command line.
+        $cmdText = "# $((Get-ExternalRelayMarkers) -join ' ')`nStart-Sleep -Seconds 60"
+        $lookalike = Start-Process -FilePath (Get-Command powershell.exe).Source -ArgumentList @('-NoProfile', '-Command', $cmdText) -WindowStyle Hidden -PassThru
+        try {
+            Write-PidFile 'external-relay' $lookalike.Id
+            $out1 = [System.IO.Path]::GetTempFileName()
+            Start-Process -FilePath (Get-Command powershell.exe).Source -ArgumentList @(
+                '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$(Join-Path $external 'status-external-relay.ps1')`"", '-Port', '18908'
+            ) -WindowStyle Hidden -Wait -RedirectStandardOutput $out1 -RedirectStandardError ([System.IO.Path]::GetTempFileName())
+            $r.Managed = Get-Content -LiteralPath $out1 -Raw
+        } finally {
+            Stop-FakeJsonListener $pending
+            Stop-Process -Id $lookalike.Id -Force -ErrorAction SilentlyContinue
+        }
+
+        Remove-PidFile 'external-relay'
+        $pending2 = Start-FakeJsonListener -Port 18909 -Json '{"status":"ok"}'
+        try {
+            $out2 = [System.IO.Path]::GetTempFileName()
+            Start-Process -FilePath (Get-Command powershell.exe).Source -ArgumentList @(
+                '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$(Join-Path $external 'status-external-relay.ps1')`"", '-Port', '18909'
+            ) -WindowStyle Hidden -Wait -RedirectStandardOutput $out2 -RedirectStandardError ([System.IO.Path]::GetTempFileName())
+            $r.Unmanaged = Get-Content -LiteralPath $out2 -Raw
+        } finally { Stop-FakeJsonListener $pending2 }
+
+        $out3 = [System.IO.Path]::GetTempFileName()
+        Start-Process -FilePath (Get-Command powershell.exe).Source -ArgumentList @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$(Join-Path $external 'status-external-relay.ps1')`"", '-Port', '18910'
+        ) -WindowStyle Hidden -Wait -RedirectStandardOutput $out3 -RedirectStandardError ([System.IO.Path]::GetTempFileName())
+        $r.Down = Get-Content -LiteralPath $out3 -Raw
+
+        $r
+    }
+    ($results.Managed -match 'UP' -and $results.Managed -match 'managed') -and
+        ($results.Unmanaged -match 'UP' -and $results.Unmanaged -match 'not started by RunningAI') -and
+        ($results.Down -match 'DOWN')
+}
+
 Write-Host ''
 if ($failures.Count -gt 0) {
     Write-Host "FAILED: $($failures.Count) check(s) failed." -ForegroundColor Red

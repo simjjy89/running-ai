@@ -1,10 +1,13 @@
 <#
 .SYNOPSIS
   One-screen status of the RunningAI runtime. Read-only and safe: it calls only the connector
-  /health, Spring /actuator/health and GET /api/v1/garmin/sync/status. No Garmin login, no
-  Garmin activity fetch, no token access.
+  /health, Spring /actuator/health, GET /api/v1/garmin/sync/status, the external relay's own
+  /health, and (read-only) the Tailscale Windows Service state and `tailscale funnel status`.
+  No Garmin login, no Garmin activity fetch, no token access, and this command NEVER changes the
+  Funnel configuration - "status" means read, nothing more, even for the Tailscale/Funnel rows.
 
-  Exit code 0 when Docker, PostgreSQL, the connector and Spring are all up; 1 otherwise.
+  Exit code 0 when Docker, PostgreSQL, the connector, Spring and the external relay are all up;
+  1 otherwise.
 #>
 [CmdletBinding()]
 param(
@@ -13,6 +16,8 @@ param(
 )
 
 . "$PSScriptRoot\RunningAI.Common.ps1"
+. "$PSScriptRoot\external\RunningAI.ExternalRelay.Common.ps1"
+. "$PSScriptRoot\external\RunningAI.TailscaleSetup.ps1"
 
 function Format-Row { param([string]$Name, [string]$Value) Write-Host ("{0,-16} {1}" -f $Name, $Value) }
 
@@ -50,6 +55,31 @@ $springPid = Get-TrackedProcessId 'spring' (Get-SpringMarkers)
 $detail = if ($springPid) { " (managed, PID $springPid)" } elseif ($springUp) { ' (not started by RunningAI scripts)' } else { '' }
 Format-Row 'Spring' ($(if ($springUp) { 'UP' } else { 'DOWN' }) + " port $SpringPort$detail")
 if (-not $springUp) { $allUp = $false }
+
+# External relay (independent of Spring - reported here for a complete picture, but
+# start/stop/watchdog never couple its state to Spring's)
+$relayPort = Get-ExternalRelayConfiguredPort
+$relayUp = Test-ExternalRelayHealth $relayPort
+$relayPid = Get-TrackedProcessId 'external-relay' (Get-ExternalRelayMarkers)
+$detail = if ($relayPid) { " (managed, PID $relayPid)" } elseif ($relayUp) { ' (not started by RunningAI scripts)' } else { '' }
+Format-Row 'ExternalRelay' ($(if ($relayUp) { 'UP' } else { 'DOWN' }) + " 127.0.0.1:$relayPort$detail")
+if (-not $relayUp) { $allUp = $false }
+
+# Tailscale / Funnel - read-only. Never installs, logs in, enables Funnel, or changes any config.
+$tailscaleExe = Get-RunningAiTailscaleExe
+if (-not $tailscaleExe) {
+    Format-Row 'Tailscale' 'NOT INSTALLED'
+} else {
+    $tsService = Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*Tailscale*' -or $_.DisplayName -like '*Tailscale*' } | Select-Object -First 1
+    if ($tsService) { Format-Row 'Tailscale' "$($tsService.Status) (service '$($tsService.Name)', start type $($tsService.StartType))" }
+    else { Format-Row 'Tailscale' 'service not found' }
+
+    $funnelStatusOut = (Invoke-RunningAiTailscaleCommand -Exe $tailscaleExe -Arguments @('funnel', 'status')).StdOut
+    $funnelTarget = "http://127.0.0.1:$relayPort"
+    $funnelConfigured = Test-RunningAiFunnelAlreadyServingTarget -StatusOutput $funnelStatusOut -Target $funnelTarget
+    $funnelHostname = if ($funnelConfigured) { Find-RunningAiFunnelHostname $funnelStatusOut } else { $null }
+    Format-Row 'Funnel' $(if ($funnelConfigured) { "configured -> https://$funnelHostname" } else { "not configured for $funnelTarget" })
+}
 
 # SchedulerConfig: Spring has no scheduler status API, so this only reflects the environment of THIS shell.
 # It does not prove what the running Spring process was started with.

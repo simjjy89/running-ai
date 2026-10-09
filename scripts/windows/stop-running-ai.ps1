@@ -1,13 +1,14 @@
 <#
 .SYNOPSIS
-  Stops the RunningAI runtime: Spring Boot first, then the Garmin connector.
-  PostgreSQL is left running (data is never removed) unless -StopDatabase is given.
+  Stops the RunningAI runtime: the external relay first (it is the public-facing component),
+  then Spring Boot, then the Garmin connector. PostgreSQL is left running (data is never removed)
+  unless -StopDatabase is given.
 
 .DESCRIPTION
   Only processes recorded by start-running-ai.ps1 (.runtime\*.pid) whose live command line still
   matches this repository are touched; legacy RunningAI processes and unrelated PIDs are ignored.
-  Shutdown is graceful (Ctrl+C -> Spring shutdown hooks / uvicorn); a forced kill is used only
-  after the timeout. "docker compose down -v" is never run.
+  Shutdown is graceful (Ctrl+C -> Spring shutdown hooks / uvicorn / the relay's own SIGINT
+  handler); a forced kill is used only after the timeout. "docker compose down -v" is never run.
 
 .PARAMETER StopDatabase
   Also runs "docker compose stop" (containers stop, the data volume is kept).
@@ -16,10 +17,12 @@
 param(
     [switch]$StopDatabase,
     [int]$SpringTimeoutSec = 30,
-    [int]$ConnectorTimeoutSec = 15
+    [int]$ConnectorTimeoutSec = 15,
+    [int]$RelayTimeoutSec = 15
 )
 
 . "$PSScriptRoot\RunningAI.Common.ps1"
+. "$PSScriptRoot\external\RunningAI.ExternalRelay.Common.ps1"
 
 function Stop-Component {
     param([string]$Label, [string]$PidName, [string[]]$Markers, [int]$TimeoutSec)
@@ -34,6 +37,7 @@ function Stop-Component {
 }
 
 try {
+    Stop-Component 'External relay' 'external-relay' (Get-ExternalRelayMarkers) $RelayTimeoutSec
     Stop-Component 'Spring Boot' 'spring' (Get-SpringMarkers) $SpringTimeoutSec
     Stop-Component 'Garmin connector' 'garmin-connector' (Get-ConnectorMarkers) $ConnectorTimeoutSec
 
