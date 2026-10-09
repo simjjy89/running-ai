@@ -153,6 +153,81 @@ Check 'Test-RunningAiFunnelAlreadyServingTarget false for empty status (nothing 
     -not (Test-RunningAiFunnelAlreadyServingTarget -StatusOutput '' -Target 'http://127.0.0.1:17845')
 }
 
+# ---- Invoke-RunningAiFunnelEnsureEnabled (2026-10-09 console-inheritance fix) -------------------
+#
+# A fake "tailscale.exe" stand-in: a .cmd file (a real executable file ProcessStartInfo can launch
+# directly) whose only job is `type` a state file's current contents - letting each test control
+# exactly what `funnel status` reports, including simulating the status changing between the
+# pre-enable check and the post-enable recheck (by having the test's own -EnableInteractive
+# scriptblock rewrite the state file, exactly as a real `tailscale funnel --bg` enabling Funnel
+# would change what a real `tailscale funnel status` reports afterward). This never touches a real
+# tailscale.exe, a real tailnet, or any real console/browser interaction.
+
+function New-FakeTailscaleStub {
+    $dir = Join-Path $env:TEMP "faketailscale-$([guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Force $dir | Out-Null
+    $stateFile = Join-Path $dir 'state.txt'
+    Set-Content -LiteralPath $stateFile -Value 'nothing configured yet' -Encoding ascii
+    $cmdPath = Join-Path $dir 'faketailscale.cmd'
+    Set-Content -LiteralPath $cmdPath -Value @('@echo off', "type `"$stateFile`"", 'exit /b 0') -Encoding ascii
+    [pscustomobject]@{ Dir = $dir; StateFile = $stateFile; Exe = $cmdPath }
+}
+
+$fakeTarget = 'http://127.0.0.1:17845'
+
+Check 'Invoke-RunningAiFunnelEnsureEnabled: an already-served target never runs the interactive enable' {
+    $fake = New-FakeTailscaleStub
+    try {
+        Set-Content -LiteralPath $fake.StateFile -Value "https://my-pc.tailnet-name.ts.net (Funnel on)`nproxy $fakeTarget" -Encoding ascii
+        $enableCalls = [ref]0
+        $result = Invoke-RunningAiFunnelEnsureEnabled -Exe $fake.Exe -Target $fakeTarget -EnableInteractive { $enableCalls.Value++; 0 }
+        ($result.AlreadyServing -eq $true) -and ($result.Enabled -eq $false) -and ($enableCalls.Value -eq 0) -and
+            ($result.Hostname -eq 'my-pc.tailnet-name.ts.net')
+    } finally { Remove-Item -Recurse -Force $fake.Dir -ErrorAction SilentlyContinue }
+}
+
+Check 'Invoke-RunningAiFunnelEnsureEnabled: a missing target runs the interactive enable exactly once and re-verifies via status' {
+    $fake = New-FakeTailscaleStub
+    try {
+        $enableCalls = [ref]0
+        $result = Invoke-RunningAiFunnelEnsureEnabled -Exe $fake.Exe -Target $fakeTarget -EnableInteractive {
+            $enableCalls.Value++
+            Set-Content -LiteralPath $fake.StateFile -Value "https://my-pc.tailnet-name.ts.net (Funnel on)`nproxy $fakeTarget" -Encoding ascii
+            0
+        }
+        ($result.AlreadyServing -eq $false) -and ($result.Enabled -eq $true) -and ($enableCalls.Value -eq 1) -and
+            ($result.Hostname -eq 'my-pc.tailnet-name.ts.net')
+    } finally { Remove-Item -Recurse -Force $fake.Dir -ErrorAction SilentlyContinue }
+}
+
+Check 'Invoke-RunningAiFunnelEnsureEnabled: a non-zero interactive-enable exit code is fail-closed, never re-verified further' {
+    $fake = New-FakeTailscaleStub
+    try {
+        $result = Invoke-RunningAiFunnelEnsureEnabled -Exe $fake.Exe -Target $fakeTarget -EnableInteractive { 7 }
+        ($result.AlreadyServing -eq $false) -and ($result.Enabled -eq $false) -and ($result.ExitCode -eq 7) -and (-not $result.Hostname)
+    } finally { Remove-Item -Recurse -Force $fake.Dir -ErrorAction SilentlyContinue }
+}
+
+Check 'Invoke-RunningAiFunnelEnsureEnabled: a zero exit code is NOT trusted alone - the post-enable status recheck is mandatory' {
+    $fake = New-FakeTailscaleStub
+    try {
+        # The interactive step claims success (returns 0) but never actually updates what
+        # `funnel status` reports - the function must not take the enable command's own exit
+        # code as sufficient proof on its own.
+        $result = Invoke-RunningAiFunnelEnsureEnabled -Exe $fake.Exe -Target $fakeTarget -EnableInteractive { 0 }
+        ($result.AlreadyServing -eq $false) -and ($result.Enabled -eq $false) -and (-not $result.Hostname)
+    } finally { Remove-Item -Recurse -Force $fake.Dir -ErrorAction SilentlyContinue }
+}
+
+Check 'setup-running-ai-tailscale-funnel.ps1: the Funnel-failure exit is inside step 6, strictly before step 7 (.env write) - source order' {
+    $content = Get-Content -LiteralPath (Join-Path $external 'setup-running-ai-tailscale-funnel.ps1') -Raw
+    $step6Index = $content.IndexOf('# ---- 6. Funnel enable')
+    $step7Index = $content.IndexOf('# ---- 7. save hostname')
+    $step6Region = $content.Substring($step6Index, $step7Index - $step6Index)
+    ($step6Index -ge 0) -and ($step7Index -gt $step6Index) -and
+        ($step6Region -match [regex]::Escape('exit $ExitCode.ExternalAccess'))
+}
+
 # ---- orchestrator -DryRun safety (real script, real machine, zero changes) --------------------
 
 Check 'setup-running-ai-tailscale-funnel.ps1 parses without errors' {

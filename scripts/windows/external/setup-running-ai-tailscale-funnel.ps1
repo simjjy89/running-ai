@@ -193,33 +193,39 @@ Enable "MagicDNS", then re-run this script.
     Step "Checking whether Funnel already serves $target"
     $resolvedHostname = $null
     if ($tailscale -and -not $DryRun) {
-        $funnelStatus = (Invoke-RunningAiTailscaleCommand -Exe $tailscale -Arguments @('funnel', 'status')).StdOut
-        if (Test-RunningAiFunnelAlreadyServingTarget -StatusOutput $funnelStatus -Target $target) {
-            Write-Step 'Funnel already serves this target - reusing.'
-            $resolvedHostname = Find-RunningAiFunnelHostname $funnelStatus
-        } else {
-            $enable = Invoke-RunningAiTailscaleCommand -Exe $tailscale -Arguments @('funnel', '--bg', $target)
-            if ($enable.ExitCode -ne 0) {
-                Write-Host "ERROR: `"tailscale funnel --bg $target`" failed:`n$($enable.StdOut)$($enable.StdErr)" -ForegroundColor Red
-                Write-Host 'This is Tailscale''s own diagnostic - it usually names exactly what is missing (HTTPS, the' -ForegroundColor Red
-                Write-Host 'Funnel node attribute in your tailnet policy, etc.) and often an admin-console link to fix' -ForegroundColor Red
-                Write-Host 'it. Address what it says, then re-run this script.' -ForegroundColor Red
-                exit $ExitCode.ExternalAccess
-            }
+        $funnelResult = Invoke-RunningAiFunnelEnsureEnabled -Exe $tailscale -Target $target -EnableInteractive {
+            Write-Host ''
+            Write-Host 'Funnel is not yet enabled for this target. About to run:' -ForegroundColor Yellow
+            Write-Host "  & `"$tailscale`" funnel --bg $target" -ForegroundColor Yellow
+            Write-Host 'If this is the first time Funnel has been enabled for this tailnet/device, Tailscale may' -ForegroundColor Yellow
+            Write-Host 'print a web-approval URL and wait for you to open it and approve - do that if it appears.' -ForegroundColor Yellow
+            Write-Host 'This command returns automatically once that is done (or immediately if Funnel is already' -ForegroundColor Yellow
+            Write-Host 'approved for this tailnet).' -ForegroundColor Yellow
+            Write-Host ''
+            & $tailscale funnel --bg $target
+            $LASTEXITCODE
+        }
+
+        if ($funnelResult.AlreadyServing) {
+            Write-Step 'Funnel already serves this target - reusing (no interactive enable run).'
+        } elseif ($funnelResult.Enabled) {
             $script:TailscaleWrites++
-            $resolvedHostname = Find-RunningAiFunnelHostname ($enable.StdOut + $enable.StdErr)
-            if (-not $resolvedHostname) {
-                $funnelStatus = (Invoke-RunningAiTailscaleCommand -Exe $tailscale -Arguments @('funnel', 'status')).StdOut
-                $resolvedHostname = Find-RunningAiFunnelHostname $funnelStatus
-            }
-            if (-not $resolvedHostname) {
-                $resolvedHostname = Find-RunningAiTailscaleSelfDnsName (Get-RunningAiTailscaleStatusJsonOrEmpty -Exe $tailscale)
-            }
-            if (-not $resolvedHostname) {
-                Write-Host "ERROR: Funnel was enabled but its public hostname could not be determined from Tailscale's own output." -ForegroundColor Red
-                exit $ExitCode.ExternalAccess
-            }
-            Write-Step "Funnel enabled -> https://$resolvedHostname"
+            Write-Step "Funnel enabled and re-verified via 'tailscale funnel status'."
+        } else {
+            Write-Host "ERROR: Funnel enable failed or could not be confirmed by a 'tailscale funnel status' recheck (exit code $($funnelResult.ExitCode))." -ForegroundColor Red
+            Write-Host 'See the output above (if the interactive enable ran) for Tailscale''s own diagnostic - common' -ForegroundColor Red
+            Write-Host 'causes are the Funnel node attribute not yet granted in your tailnet policy, or HTTPS not' -ForegroundColor Red
+            Write-Host 'enabled. Address what it says, then re-run this script.' -ForegroundColor Red
+            exit $ExitCode.ExternalAccess
+        }
+
+        $resolvedHostname = $funnelResult.Hostname
+        if (-not $resolvedHostname) {
+            $resolvedHostname = Find-RunningAiTailscaleSelfDnsName (Get-RunningAiTailscaleStatusJsonOrEmpty -Exe $tailscale)
+        }
+        if (-not $resolvedHostname) {
+            Write-Host "ERROR: Funnel is serving the target but its public hostname could not be determined from Tailscale's own output." -ForegroundColor Red
+            exit $ExitCode.ExternalAccess
         }
     } elseif ($DryRun) {
         Write-Step "DRY RUN: would run `"tailscale funnel --bg $target`" if not already serving it"

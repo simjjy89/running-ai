@@ -143,3 +143,51 @@ function Test-RunningAiFunnelAlreadyServingTarget {
     param([Parameter(Mandatory)][AllowEmptyString()][string]$StatusOutput, [Parameter(Mandatory)][string]$Target)
     $StatusOutput.Contains($Target)
 }
+
+# Ensures Funnel serves $Target, fail-closed, without ever trying to read or auto-approve a
+# first-time web-approval prompt:
+#   1. `tailscale funnel status` (UTF-8-safe, non-interactive) - if $Target is already being
+#      served, returns immediately. The interactive enable path below is never reached on an
+#      already-configured target (a re-run must not re-trigger it).
+#   2. Otherwise runs $EnableInteractive exactly once - the caller's scriptblock MUST inherit the
+#      real console (never Invoke-RunningAiTailscaleCommand/redirected), because the very first
+#      Funnel enable for a tailnet/device can require the operator to open a web-approval URL
+#      Tailscale prints live; redirecting that output would buffer it until the process exits,
+#      which can never happen if Tailscale itself is waiting on that approval. $EnableInteractive
+#      must return the enable command's own exit code (typically via $LASTEXITCODE right after
+#      `& $tailscale funnel --bg $target`).
+#   3. A non-zero exit from $EnableInteractive is fail-closed immediately - never re-verified,
+#      never retried automatically.
+#   4. On a zero exit, re-queries `tailscale funnel status` (UTF-8-safe) again and only trusts
+#      the enable as real if THAT confirms the target is being served - the enable command's own
+#      exit code is never trusted alone.
+# Returns @{ AlreadyServing; Enabled; ExitCode; Hostname }. Exactly one of AlreadyServing/Enabled
+# is true on success; both are false on any failure (ExitCode carries the non-zero code, or 1 for
+# a "reported success but status disagrees" inconsistency).
+function Invoke-RunningAiFunnelEnsureEnabled {
+    param(
+        [Parameter(Mandatory)][string]$Exe,
+        [Parameter(Mandatory)][string]$Target,
+        [Parameter(Mandatory)][scriptblock]$EnableInteractive
+    )
+    $statusOut = (Invoke-RunningAiTailscaleCommand -Exe $Exe -Arguments @('funnel', 'status')).StdOut
+    if (Test-RunningAiFunnelAlreadyServingTarget -StatusOutput $statusOut -Target $Target) {
+        return [pscustomobject]@{
+            AlreadyServing = $true
+            Enabled        = $false
+            ExitCode       = 0
+            Hostname       = (Find-RunningAiFunnelHostname $statusOut)
+        }
+    }
+
+    $enableExitCode = & $EnableInteractive
+    if ($enableExitCode -ne 0) {
+        return [pscustomobject]@{ AlreadyServing = $false; Enabled = $false; ExitCode = $enableExitCode; Hostname = $null }
+    }
+
+    $recheck = (Invoke-RunningAiTailscaleCommand -Exe $Exe -Arguments @('funnel', 'status')).StdOut
+    if (-not (Test-RunningAiFunnelAlreadyServingTarget -StatusOutput $recheck -Target $Target)) {
+        return [pscustomobject]@{ AlreadyServing = $false; Enabled = $false; ExitCode = 1; Hostname = $null }
+    }
+    return [pscustomobject]@{ AlreadyServing = $false; Enabled = $true; ExitCode = 0; Hostname = (Find-RunningAiFunnelHostname $recheck) }
+}
