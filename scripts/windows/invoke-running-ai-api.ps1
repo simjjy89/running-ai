@@ -5,9 +5,11 @@
 
 .DESCRIPTION
   A thin wrapper over Invoke-RunningAiJsonRequest (RunningAI.Common.ps1): never hands a raw
-  .NET string to Invoke-RestMethod's -Body. Prints no secret: this script never reads .env, an
-  API key or a Garmin/Intervals credential, and the caller is responsible for not passing one in
-  -Body.
+  .NET string to Invoke-RestMethod's -Body. Prints no secret: this script never loads .env into
+  its process environment or reads an API key or a Garmin/Intervals credential from it - the only
+  thing it ever reads from .env is the single SERVER_PORT key (file content only, via
+  Get-RunningAiEnvFileValue, never Set-Item), to pick -BaseUrl's default when not explicitly
+  passed. The caller is responsible for not passing a secret in -Body.
 
 .PARAMETER Method
   HTTP method: GET, POST, PUT or DELETE.
@@ -39,6 +41,8 @@ param(
 )
 
 . "$PSScriptRoot\RunningAI.Common.ps1"
+
+if (-not $PSBoundParameters.ContainsKey('BaseUrl')) { $BaseUrl = Get-RunningAiDefaultSpringBaseUrl }
 
 $uri = $BaseUrl.TrimEnd('/') + '/' + $Path.TrimStart('/')
 Invoke-RunningAiJsonRequest -Method $Method -Uri $uri -Body $Body -TimeoutSec $TimeoutSec

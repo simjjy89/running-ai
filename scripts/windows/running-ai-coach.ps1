@@ -54,6 +54,8 @@ param(
 . "$PSScriptRoot\RunningAI.Common.ps1"
 . "$PSScriptRoot\RunningAI.CoachOperator.ps1"
 
+if (-not $PSBoundParameters.ContainsKey('BaseUrl')) { $BaseUrl = Get-RunningAiDefaultSpringBaseUrl }
+
 $generateOnlyParams = 'Date', 'AvailableMinutes', 'Environment', 'Goal', 'GoalFile', 'UserFeedback', 'PainOrFatigueFeedback'
 $generateParamsGiven = @($PSBoundParameters.Keys | Where-Object { $_ -in $generateOnlyParams })
 

@@ -33,6 +33,8 @@ param(
 . "$PSScriptRoot\RunningAI.Common.ps1"
 . "$PSScriptRoot\RunningAI.CoachOperator.ps1"
 
+if (-not $PSBoundParameters.ContainsKey('BaseUrl')) { $BaseUrl = Get-RunningAiDefaultSpringBaseUrl }
+
 if (-not (Test-RunningAiHealthy -BaseUrl $BaseUrl)) {
     Write-Host "RunningAI is not reachable/healthy at $BaseUrl. Start it first (start-running-ai.ps1) and retry."
     exit 1

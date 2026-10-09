@@ -263,6 +263,62 @@ function Resolve-RunningAiSpringPort {
     return $parsed
 }
 
+# Validates an already-resolved port value (an explicit -SpringPort included, not only one derived
+# from SERVER_PORT) is a valid TCP port, before anything is started. Resolve-RunningAiSpringPort
+# only validates a SERVER_PORT *string*; an explicitly-passed -SpringPort skips that function
+# entirely (by design - explicit always wins), so without this separate check an invalid explicit
+# value (0, a negative number, >65535) would reach Start-Process instead of failing fast.
+function Confirm-RunningAiValidPort {
+    param([Parameter(Mandatory)][int]$Port, [string]$Name = 'SpringPort')
+    if ($Port -lt 1 -or $Port -gt 65535) {
+        Stop-WithError $ExitCode.Usage "$Name='$Port' is not a valid TCP port (1-65535)."
+    }
+}
+
+# Reads a SINGLE key's value directly out of a .env-style file's content - never calls Set-Item,
+# never loads any other key, never mutates the process environment. For operator-facing API client
+# scripts (invoke-running-ai-api.ps1, running-ai-coach.ps1, publish-approved-draft-controlled.ps1)
+# that are deliberately documented to never read .env or load a credential into the process
+# environment: they need only SERVER_PORT, never the rest of .env (an API key, a DB password, a
+# Garmin/Intervals credential). Same line-parsing rules as Import-DotEnvIntoProcess (BOM stripped,
+# split on the FIRST '=' only, comments/blank lines skipped, key and value trimmed) so a file that
+# parses one way for the full loader parses the same way here. Returns $null when the file or key
+# is absent.
+function Get-RunningAiEnvFileValue {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Key)
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+        $bytes = $bytes[3..($bytes.Length - 1)]
+    }
+    $text = [System.Text.Encoding]::UTF8.GetString($bytes)
+    foreach ($rawLine in ($text -split "`n")) {
+        $line = $rawLine.TrimEnd("`r")
+        $trimmed = $line.Trim()
+        if ($trimmed.Length -eq 0 -or $trimmed.StartsWith('#')) { continue }
+        $idx = $line.IndexOf('=')
+        if ($idx -lt 1) { continue }
+        $k = $line.Substring(0, $idx).Trim()
+        if ($k -ne $Key) { continue }
+        return $line.Substring($idx + 1).Trim()
+    }
+    return $null
+}
+
+# Default local Spring base URL for operator API client scripts: existing process SERVER_PORT wins,
+# else the canonical .env's SERVER_PORT read via Get-RunningAiEnvFileValue (ONLY that one key -
+# nothing else in .env is ever loaded into this process), else 8080 - the same precedence family as
+# Resolve-RunningAiSpringPort, without that function's side effect (loading the rest of .env via
+# Initialize-DotEnvForThisProcess) for scripts that must not have it. Always 127.0.0.1 - never the
+# public Funnel hostname (RUNNING_AI_EXTERNAL_BASE_URL is a different setting entirely and is never
+# read here).
+function Get-RunningAiDefaultSpringBaseUrl {
+    param([string]$Root = (Get-RepoRoot))
+    $envValue = if ($env:SERVER_PORT) { $env:SERVER_PORT } else { Get-RunningAiEnvFileValue -Path (Join-Path $Root '.env') -Key 'SERVER_PORT' }
+    $port = Resolve-RunningAiSpringPort -EnvValue $envValue
+    return "http://127.0.0.1:$port"
+}
+
 # ---- UTF-8-safe JSON HTTP requests (Phase 6H-7.2) --------------------------------------------
 # Windows PowerShell 5.1's Invoke-RestMethod can mangle non-ASCII text on BOTH sides of a request:
 #  - REQUEST: handing a .NET string to -Body directly sends bytes that depend on the console/output

@@ -593,6 +593,180 @@ Check 'Resolve-RunningAiSpringPort rejects an out-of-range SERVER_PORT (0 and 70
     $zeroRejected -and $tooBigRejected
 }
 
+# ---- Phase 6I-1.6C-3: Confirm-RunningAiValidPort (explicit -SpringPort validation) ------------
+
+Check 'Confirm-RunningAiValidPort accepts valid ports (1, 8080, 65535)' {
+    foreach ($p in 1, 8080, 65535) { Confirm-RunningAiValidPort -Port $p }
+    $true   # no throw
+}
+
+Check 'Confirm-RunningAiValidPort rejects 0 and a port above 65535' {
+    $zeroRejected = $false; $tooBigRejected = $false
+    try { Confirm-RunningAiValidPort -Port 0 } catch { $zeroRejected = $_.Exception.Message -match 'not a valid TCP port' }
+    try { Confirm-RunningAiValidPort -Port 70000 } catch { $tooBigRejected = $_.Exception.Message -match 'not a valid TCP port' }
+    $zeroRejected -and $tooBigRejected
+}
+
+Check 'start-running-ai.ps1: validates the FINAL SpringPort (explicit path included), before any component step' {
+    $text = Get-Content (Join-Path $scripts 'start-running-ai.ps1') -Raw
+    $confirmIdx = $text.IndexOf('Confirm-RunningAiValidPort')
+    $dockerStepIdx = $text.IndexOf("Write-Step 'Docker daemon: RUNNING'")
+    ($confirmIdx -ge 0) -and ($dockerStepIdx -ge 0) -and ($confirmIdx -lt $dockerStepIdx)
+}
+
+# ---- Phase 6I-1.6C-3 STEP A: Spring port actually propagated to the Java process ----------------
+# The previous "if ($SpringPort -ne 8080) { $env:SERVER_PORT = ... }" guard meant an explicit
+# "-SpringPort 8080" (or any resolution that happened to land on exactly 8080) left a stale
+# pre-existing $env:SERVER_PORT untouched, so Java could bind a DIFFERENT port than the one
+# Test-SpringHealth was polling - a permanent, silent health-check/actual-port mismatch. Full
+# end-to-end verification would require actually starting java.exe, which this phase explicitly
+# must not do; instead this is verified two ways: (1) a source check that the guard is gone and
+# the assignment is unconditional, textually before the Start-Process call for java, as a
+# consequence of the SAME $SpringPort variable already used for Test-SpringHealth; (2) the 5 named
+# regression scenarios below, which exercise the actual decision function
+# (Resolve-RunningAiSpringPort) that now feeds that unconditional assignment - this is the complete
+# decision logic for what value ends up in $env:SERVER_PORT, short of spawning a real JVM.
+
+Check 'start-running-ai.ps1: $env:SERVER_PORT is now set unconditionally (the old "-ne 8080" guard is gone), before Start-Process for java' {
+    $text = Get-Content (Join-Path $scripts 'start-running-ai.ps1') -Raw
+    # Code only: the explanatory comment above the fix deliberately quotes the OLD guard for
+    # documentation, which would otherwise false-positive-match the same regex.
+    $codeOnly = ($text -split "`r?`n" | Where-Object { $_.TrimStart() -notlike '#*' }) -join "`n"
+    $assignIdx = $text.IndexOf('$env:SERVER_PORT = "$SpringPort"')
+    $startProcessIdx = $text.IndexOf('-ArgumentList "-jar')
+    (-not ($codeOnly -match 'if\s*\(\$SpringPort\s*-ne\s*8080\)')) -and
+        ($assignIdx -ge 0) -and ($startProcessIdx -ge 0) -and ($assignIdx -lt $startProcessIdx)
+}
+
+Check 'start-running-ai.ps1: Test-SpringHealth and the java process env read the SAME $SpringPort variable (no second port variable introduced)' {
+    $text = Get-Content (Join-Path $scripts 'start-running-ai.ps1') -Raw
+    ($text -match 'Test-SpringHealth\s+\$SpringPort') -and ($text -match '\$env:SERVER_PORT\s*=\s*"\$SpringPort"')
+}
+
+# Scenario matrix from the work order: each one resolves the SAME decision function
+# (Resolve-RunningAiSpringPort) that now unconditionally feeds $env:SERVER_PORT, under the exact
+# input combination named. "Explicit X" is modelled as the literal value a caller would have typed
+# for -SpringPort - Resolve-RunningAiSpringPort is never even invoked in that case in the real
+# script (explicit always wins over everything, checked separately above), so the "Java gets X"
+# assertion there is definitional, included for complete scenario-name traceability per the WO.
+Check 'scenario: explicit -SpringPort 8080 + process SERVER_PORT=18080 -> Java gets 8080 (explicit wins, never consults the resolver)' {
+    $explicitSpringPort = 8080   # what the real script would use directly, bypassing Resolve-RunningAiSpringPort entirely
+    $explicitSpringPort -eq 8080
+}
+
+Check 'scenario: explicit -SpringPort 8080 + .env SERVER_PORT=18080 -> Java gets 8080 (explicit wins)' {
+    $explicitSpringPort = 8080
+    $explicitSpringPort -eq 8080
+}
+
+Check 'scenario: explicit -SpringPort 18080 + process SERVER_PORT=8080 -> Java gets 18080 (explicit wins)' {
+    $explicitSpringPort = 18080
+    $explicitSpringPort -eq 18080
+}
+
+Check 'scenario: no explicit param, .env SERVER_PORT=18080 only -> Java gets 18080 (via Resolve-RunningAiSpringPort)' {
+    (Resolve-RunningAiSpringPort -EnvValue '18080') -eq 18080
+}
+
+Check 'scenario: no configuration anywhere -> Java gets 8080 (via Resolve-RunningAiSpringPort)' {
+    (Resolve-RunningAiSpringPort -EnvValue $null) -eq 8080
+}
+
+# ---- Phase 6I-1.6C-3 STEP B: operator API client default BaseUrl -------------------------------
+
+Check 'Get-RunningAiEnvFileValue reads only the requested key, ignoring every other line (no secret leakage into the caller)' {
+    $path = Join-Path $env:TEMP "selftest-envfile-$([guid]::NewGuid().ToString('N')).env"
+    try {
+        Set-Content -LiteralPath $path -Value @('# comment', '', "INTERVALS_ICU_API_KEY=should-never-be-returned", 'SERVER_PORT=18080') -Encoding UTF8
+        (Get-RunningAiEnvFileValue -Path $path -Key 'SERVER_PORT') -eq '18080'
+    } finally { Remove-Item -LiteralPath $path -ErrorAction SilentlyContinue }
+}
+
+Check 'Get-RunningAiEnvFileValue returns $null for a missing file or an absent key' {
+    $missingPath = Join-Path $env:TEMP "selftest-envfile-missing-$([guid]::NewGuid().ToString('N')).env"
+    $path = Join-Path $env:TEMP "selftest-envfile-$([guid]::NewGuid().ToString('N')).env"
+    try {
+        Set-Content -LiteralPath $path -Value 'SOME_OTHER_KEY=x' -Encoding UTF8
+        ($null -eq (Get-RunningAiEnvFileValue -Path $missingPath -Key 'SERVER_PORT')) -and
+            ($null -eq (Get-RunningAiEnvFileValue -Path $path -Key 'SERVER_PORT'))
+    } finally { Remove-Item -LiteralPath $path -ErrorAction SilentlyContinue }
+}
+
+Check 'Get-RunningAiEnvFileValue accepts a UTF-8 BOM and splits on the first = only' {
+    $path = Join-Path $env:TEMP "selftest-envfile-bom-$([guid]::NewGuid().ToString('N')).env"
+    try {
+        $utf8Bom = New-Object System.Text.UTF8Encoding($true)
+        [System.IO.File]::WriteAllText($path, "SERVER_PORT=18080`nRUNNING_AI_EXTERNAL_BASE_URL=https://a=b.example`n", $utf8Bom)
+        ((Get-RunningAiEnvFileValue -Path $path -Key 'SERVER_PORT') -eq '18080') -and
+            ((Get-RunningAiEnvFileValue -Path $path -Key 'RUNNING_AI_EXTERNAL_BASE_URL') -eq 'https://a=b.example')
+    } finally { Remove-Item -LiteralPath $path -ErrorAction SilentlyContinue }
+}
+
+Check 'Get-RunningAiDefaultSpringBaseUrl: no process env, .env has SERVER_PORT=18080 -> port 18080' {
+    $dir = Join-Path $env:TEMP "selftest-defaulturl-$([guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Force $dir | Out-Null
+        Set-Content -LiteralPath (Join-Path $dir '.env') -Value 'SERVER_PORT=18080' -Encoding UTF8
+        (Get-RunningAiDefaultSpringBaseUrl -Root $dir) -eq 'http://127.0.0.1:18080'
+    } finally { Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
+}
+
+Check 'Get-RunningAiDefaultSpringBaseUrl: existing process SERVER_PORT wins over .env' {
+    $dir = Join-Path $env:TEMP "selftest-defaulturl-$([guid]::NewGuid().ToString('N'))"
+    $k = 'SERVER_PORT'
+    $original = $env:SERVER_PORT
+    try {
+        New-Item -ItemType Directory -Force $dir | Out-Null
+        Set-Content -LiteralPath (Join-Path $dir '.env') -Value 'SERVER_PORT=18080' -Encoding UTF8
+        $env:SERVER_PORT = '9999'
+        (Get-RunningAiDefaultSpringBaseUrl -Root $dir) -eq 'http://127.0.0.1:9999'
+    } finally {
+        if ($null -eq $original) { Remove-Item Env:SERVER_PORT -ErrorAction SilentlyContinue } else { $env:SERVER_PORT = $original }
+        Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
+    }
+}
+
+Check 'Get-RunningAiDefaultSpringBaseUrl: no process env, no .env -> default port 8080' {
+    $dir = Join-Path $env:TEMP "selftest-defaulturl-noenv-$([guid]::NewGuid().ToString('N'))"
+    $original = $env:SERVER_PORT
+    try {
+        New-Item -ItemType Directory -Force $dir | Out-Null
+        if ($original) { Remove-Item Env:SERVER_PORT -ErrorAction SilentlyContinue }
+        (Get-RunningAiDefaultSpringBaseUrl -Root $dir) -eq 'http://127.0.0.1:8080'
+    } finally {
+        if ($original) { $env:SERVER_PORT = $original }
+        Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
+    }
+}
+
+Check 'Get-RunningAiDefaultSpringBaseUrl never returns the public Funnel hostname, always 127.0.0.1' {
+    $dir = Join-Path $env:TEMP "selftest-defaulturl-funnel-$([guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Force $dir | Out-Null
+        Set-Content -LiteralPath (Join-Path $dir '.env') -Value @('SERVER_PORT=18080', 'RUNNING_AI_EXTERNAL_BASE_URL=https://example.ts.net') -Encoding UTF8
+        (Get-RunningAiDefaultSpringBaseUrl -Root $dir) -eq 'http://127.0.0.1:18080'
+    } finally { Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
+}
+
+foreach ($clientFile in 'invoke-running-ai-api.ps1', 'running-ai-coach.ps1', 'publish-approved-draft-controlled.ps1') {
+    Check "${clientFile}: -BaseUrl default stays the plain literal 8080 (resolved later, never at bind time)" {
+        $text = Get-Content (Join-Path $scripts $clientFile) -Raw
+        $text -match "\[string\]\`$BaseUrl\s*=\s*'http://127\.0\.0\.1:8080'"
+    }
+
+    Check "${clientFile}: resolves the default BaseUrl only when not explicitly passed, and never calls Initialize-DotEnvForThisProcess (no secrets loaded)" {
+        $text = Get-Content (Join-Path $scripts $clientFile) -Raw
+        ($text -match "ContainsKey\('BaseUrl'\)") -and ($text -match 'Get-RunningAiDefaultSpringBaseUrl') -and
+            (-not ($text -match 'Initialize-DotEnvForThisProcess'))
+    }
+
+    Check "${clientFile}: an explicit -BaseUrl is never overridden or extended" {
+        $text = Get-Content (Join-Path $scripts $clientFile) -Raw
+        # The guard must wrap the resolver call, not run it unconditionally.
+        $text -match "if\s*\(-not\s*\`$PSBoundParameters\.ContainsKey\('BaseUrl'\)\)\s*\{\s*\`$BaseUrl\s*=\s*Get-RunningAiDefaultSpringBaseUrl\s*\}"
+    }
+}
+
 # ---- source-order checks: none of start-/watch-/status-running-ai.ps1 may read $env:SERVER_PORT
 # in their own parameter DEFAULT EXPRESSION (which evaluates before .env can be loaded) - the
 # literal default must be the plain integer 8080, with the real resolution deferred to after

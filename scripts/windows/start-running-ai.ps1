@@ -92,6 +92,7 @@ try {
     $envRoot = if ($env:RUNNING_AI_TEST_ENV_ROOT) { $env:RUNNING_AI_TEST_ENV_ROOT } else { $root }
     Initialize-DotEnvForThisProcess -Root $envRoot
     if (-not $PSBoundParameters.ContainsKey('SpringPort')) { $SpringPort = Resolve-RunningAiSpringPort }
+    Confirm-RunningAiValidPort -Port $SpringPort -Name 'SpringPort'
 
     # ---- 1. Docker -------------------------------------------------------------------
     if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
@@ -195,7 +196,15 @@ try {
 
         # ---- 5. Spring Boot -------------------------------------------------------------
         if (-not $env:GARMIN_CONNECTOR_URL) { $env:GARMIN_CONNECTOR_URL = "http://127.0.0.1:$ConnectorPort" }
-        if ($SpringPort -ne 8080) { $env:SERVER_PORT = "$SpringPort" }
+        # Always propagate the final resolved $SpringPort to the Java process, unconditionally -
+        # not only when it differs from the literal 8080. The previous "if ($SpringPort -ne 8080)"
+        # guard left a stale pre-existing $env:SERVER_PORT (e.g. "18080" from .env or an ancestor
+        # process) in place whenever $SpringPort itself resolved to exactly 8080 (such as an
+        # explicit "-SpringPort 8080"), so Java would bind the stale port while Test-SpringHealth
+        # below keeps polling the real $SpringPort (8080) - a permanent health-check/actual-port
+        # mismatch. $SpringPort is the single value already used for the health check above and
+        # below; it must be the same value Java actually receives, with no exception.
+        $env:SERVER_PORT = "$SpringPort"
         if (-not $env:DB_PASSWORD -and -not (Test-Path (Join-Path $root '.env'))) {
             Write-Warning 'Neither DB_PASSWORD nor a repository-root .env is set; the local profile will try an empty database password.'
         }
