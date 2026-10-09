@@ -48,6 +48,37 @@ function Invoke-NativeText {
     return (cmd /c "`"$Exe`" $Arguments 2>&1" | Out-String)
 }
 
+# Runs a native executable with stdout/stderr captured and decoded as UTF-8, regardless of the
+# console's own codepage. Windows PowerShell 5.1's native-command pipeline capture (`& exe args`,
+# `Invoke-NativeText`'s `cmd /c ... 2>&1 | Out-String`) decodes using [Console]::OutputEncoding -
+# the system OEM/ANSI codepage by default on a non-UTF-8 console - which corrupts any non-ASCII
+# bytes a well-behaved UTF-8-emitting tool actually wrote (live-reproduced: `tailscale status
+# --json`'s Korean Self.DisplayName field became invalid JSON once captured that way). This talks
+# to the child process directly via ProcessStartInfo with an explicit UTF-8 decoder instead, so
+# the result is correct independent of whatever codepage the calling console happens to be in.
+# Returns stdout/stderr separately (never merged) so a caller can log the small, safe one (stderr
+# is almost always plain diagnostic text) without being tempted to dump a stdout payload that may
+# carry personal/profile data.
+function Invoke-RunningAiUtf8Process {
+    param([Parameter(Mandatory)][string]$FilePath, [string[]]$ArgumentList = @())
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $FilePath
+    $psi.Arguments = (($ArgumentList | ForEach-Object { Quote-Argument $_ }) -join ' ')
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+    $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+    [void]$proc.Start()
+    $stdout = $proc.StandardOutput.ReadToEnd()
+    $stderr = $proc.StandardError.ReadToEnd()
+    $proc.WaitForExit()
+    [pscustomobject]@{ ExitCode = $proc.ExitCode; StdOut = $stdout; StdErr = $stderr }
+}
+
 function Quote-Argument { param([string]$Value) if ($Value -match '[\s"]') { '"' + ($Value -replace '"', '\"') + '"' } else { $Value } }
 
 # ---- Java 21 discovery (Phase 6H-8) -----------------------------------------------------------

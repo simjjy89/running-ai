@@ -63,10 +63,15 @@ Check 'Test-RunningAiTailscaleVersionSupported rejects unparseable output' {
 
 # ---- status --json parsing -------------------------------------------------------------------
 
-$runningJson = '{"BackendState":"Running","Self":{"DNSName":"my-pc.tailnet-name.ts.net."},"CurrentTailnet":{"MagicDNSEnabled":true}}'
+$runningJson = '{"BackendState":"Running","Self":{"Online":true,"DNSName":"my-pc.tailnet-name.ts.net."},"CurrentTailnet":{"MagicDNSEnabled":true}}'
 $needsLoginJson = '{"BackendState":"NeedsLogin"}'
+$runningButOfflineJson = '{"BackendState":"Running","Self":{"Online":false,"DNSName":"my-pc.tailnet-name.ts.net."}}'
+# A real fixture shape (field values anonymised, structure preserved) - a Korean DisplayName sits
+# right next to the fields this module actually reads, so a regression in UTF-8 handling anywhere
+# in the pipeline (not just the process-invocation layer) would show up as a parse failure here.
+$runningWithKoreanDisplayNameJson = '{"BackendState":"Running","Self":{"Online":true,"DisplayName":"김재진","HostName":"MAIN-PC","DNSName":"main-pc.tailnet-name.ts.net."},"CurrentTailnet":{"Name":"tailnet-name.ts.net","MagicDNSEnabled":true}}'
 
-Check 'Test-RunningAiTailscaleLoggedIn is true for BackendState=Running' {
+Check 'Test-RunningAiTailscaleLoggedIn is true for BackendState=Running + Self.Online=true' {
     Test-RunningAiTailscaleLoggedIn $runningJson
 }
 
@@ -74,8 +79,22 @@ Check 'Test-RunningAiTailscaleLoggedIn is false for BackendState=NeedsLogin' {
     -not (Test-RunningAiTailscaleLoggedIn $needsLoginJson)
 }
 
+Check 'Test-RunningAiTailscaleLoggedIn is false when BackendState=Running but Self.Online=false' {
+    -not (Test-RunningAiTailscaleLoggedIn $runningButOfflineJson)
+}
+
+Check 'Test-RunningAiTailscaleLoggedIn is false when Self.Online is missing entirely (never assumed true)' {
+    -not (Test-RunningAiTailscaleLoggedIn '{"BackendState":"Running","Self":{"DNSName":"x.ts.net"}}')
+}
+
 Check 'Test-RunningAiTailscaleLoggedIn is false for unparseable/empty input, never throws' {
     (-not (Test-RunningAiTailscaleLoggedIn '')) -and (-not (Test-RunningAiTailscaleLoggedIn 'not json'))
+}
+
+Check 'Test-RunningAiTailscaleLoggedIn, Test-RunningAiTailscaleMagicDnsEnabled and Find-RunningAiTailscaleSelfDnsName all parse correctly with a Korean DisplayName present elsewhere in the JSON' {
+    (Test-RunningAiTailscaleLoggedIn $runningWithKoreanDisplayNameJson) -and
+    ((Test-RunningAiTailscaleMagicDnsEnabled $runningWithKoreanDisplayNameJson) -eq $true) -and
+    ((Find-RunningAiTailscaleSelfDnsName $runningWithKoreanDisplayNameJson) -eq 'main-pc.tailnet-name.ts.net')
 }
 
 Check 'Test-RunningAiTailscaleMagicDnsEnabled reads true from CurrentTailnet.MagicDNSEnabled' {
@@ -96,6 +115,20 @@ Check 'Find-RunningAiTailscaleSelfDnsName strips the trailing dot' {
 
 Check 'Find-RunningAiTailscaleSelfDnsName returns null when Self/DNSName is absent' {
     $null -eq (Find-RunningAiTailscaleSelfDnsName '{"BackendState":"Running"}')
+}
+
+# ---- UTF-8-safe command invocation (Phase 6I-1 mojibake fix) ---------------------------------
+
+Check 'Invoke-RunningAiTailscaleCommand delegates to the UTF-8-safe invoker (never a plain pipeline capture)' {
+    $result = Invoke-RunningAiTailscaleCommand -Exe (Get-Command powershell.exe).Source -Arguments @('-NoProfile', '-Command', 'exit 0')
+    $result.ExitCode -eq 0
+}
+
+Check 'Get-RunningAiTailscaleStatusJson returns $null (not a throw) when the exe exits non-zero' {
+    $fakeExe = (Get-Command powershell.exe).Source
+    # "status --json" isn't a valid powershell.exe argument pair, so this exercises the real
+    # non-zero-exit path end to end without needing a real tailscale.exe stand-in.
+    $null -eq (Get-RunningAiTailscaleStatusJson -Exe $fakeExe)
 }
 
 # ---- funnel output parsing ---------------------------------------------------------------------

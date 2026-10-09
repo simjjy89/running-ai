@@ -376,6 +376,35 @@ Check 'Quote-Argument quotes only when needed' {
     (Quote-Argument 'C:\a b\c.jar') -eq '"C:\a b\c.jar"' -and (Quote-Argument 'C:\ab\c.jar') -eq 'C:\ab\c.jar'
 }
 
+Check 'Invoke-RunningAiUtf8Process decodes Korean (and other non-ASCII) stdout correctly regardless of console codepage (Phase 6I-1 regression: tailscale status --json Self.DisplayName)' {
+    # The child writes raw UTF-8 bytes directly to its own stdout stream, bypassing ITS OWN
+    # console encoding entirely - this is what a well-behaved Go binary (tailscale.exe,
+    # cloudflared.exe) does when its stdout is redirected to a pipe rather than a real console.
+    # Before this function existed, capturing that through PowerShell 5.1's native pipeline
+    # (& exe args 2>&1) decoded using [Console]::OutputEncoding instead - on a non-UTF-8 console
+    # this corrupted the bytes into mojibake, which is exactly what broke
+    # tailscale status --json parsing (a Korean Self.DisplayName made the whole JSON invalid).
+    $childScriptPath = Join-Path $env:TEMP "selftest-utf8-child-$([guid]::NewGuid().ToString('N')).ps1"
+    try {
+        $jsonLine = '$bytes = [Text.Encoding]::UTF8.GetBytes(''{"ok":true,"name":"' + [char]0xD55C + [char]0xAE00 + ' DisplayName ' + [char]0xD14C + [char]0xC2A4 + [char]0xD2B8 + '"}'')'
+        Set-Content -LiteralPath $childScriptPath -Value @(
+            $jsonLine,
+            '$out = [Console]::OpenStandardOutput()',
+            '$out.Write($bytes, 0, $bytes.Length)',
+            '$out.Flush()'
+        ) -Encoding utf8
+        $result = Invoke-RunningAiUtf8Process -FilePath (Get-Command powershell.exe).Source -ArgumentList @('-NoProfile', '-File', $childScriptPath)
+        $parsed = $result.StdOut | ConvertFrom-Json
+        $expectedName = [string]([char]0xD55C) + [string]([char]0xAE00) + ' DisplayName ' + [string]([char]0xD14C) + [string]([char]0xC2A4) + [string]([char]0xD2B8)
+        ($result.ExitCode -eq 0) -and ($parsed.ok -eq $true) -and ($parsed.name -eq $expectedName)
+    } finally { Remove-Item $childScriptPath -Force -ErrorAction SilentlyContinue }
+}
+
+Check 'Invoke-RunningAiUtf8Process captures stdout and stderr separately and reports a non-zero exit code' {
+    $result = Invoke-RunningAiUtf8Process -FilePath (Get-Command powershell.exe).Source -ArgumentList @('-NoProfile', '-Command', '[Console]::Error.WriteLine("diag message"); exit 3')
+    ($result.ExitCode -eq 3) -and ($result.StdErr -match 'diag message') -and (-not $result.StdOut)
+}
+
 Check 'scheduled task installer -DryRun registers nothing and uses this repository' {
     $before = @(Get-ScheduledTask -TaskName 'RunningAI-Startup' -ErrorAction SilentlyContinue).Count
     $out = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $scripts 'install-running-ai-scheduled-task.ps1') -DryRun | Out-String

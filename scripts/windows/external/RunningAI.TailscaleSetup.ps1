@@ -18,6 +18,18 @@
       set in the Tailscale admin console. Rather than guess at exact error text, this library
       only checks what is reliably knowable from the CLI (version, login state, MagicDNS flag)
       and lets the live `tailscale funnel` command's own diagnostic surface everything else.
+
+  2026-10-09 fix: every `tailscale ...` invocation here goes through Invoke-RunningAiTailscaleCommand
+  (RunningAI.Common.ps1's Invoke-RunningAiUtf8Process), never a plain `& tailscale ... 2>&1`
+  pipeline capture. Live-reproduced bug: on a Windows PowerShell 5.1 console whose codepage is not
+  UTF-8, capturing tailscale.exe's stdout through the pipeline decodes it using
+  [Console]::OutputEncoding (the system codepage), which corrupts the Korean Self.DisplayName
+  field inside `tailscale status --json` into mojibake - turning the JSON itself invalid and
+  making ConvertFrom-Json fail, which this setup script then misread as "not logged in." The one
+  deliberate exception is `tailscale up`: it must stay attached to the real console (inherited,
+  not redirected) because its interactive browser-auth flow needs the operator to see the
+  auth URL and the command to block in real time - redirecting it would buffer all output until
+  the process exits, which is exactly backwards for an interactive login.
 #>
 
 Set-StrictMode -Version Latest
@@ -31,6 +43,26 @@ function Get-RunningAiTailscaleExe {
         if ($p -and (Test-Path -LiteralPath $p)) { return $p }
     }
     return $null
+}
+
+# The one place every non-interactive `tailscale ...` call goes through: UTF-8-safe stdout/stderr,
+# so a non-ASCII field (a Korean DisplayName, for example) never corrupts the output. Never logs
+# the raw StdOut itself (status --json can carry personal profile fields) - callers extract and
+# log only specific derived values.
+function Invoke-RunningAiTailscaleCommand {
+    param([Parameter(Mandatory)][string]$Exe, [Parameter(Mandatory)][string[]]$Arguments)
+    Invoke-RunningAiUtf8Process -FilePath $Exe -ArgumentList $Arguments
+}
+
+# Runs `tailscale status --json` through the UTF-8-safe invoker and returns the raw JSON text on
+# success, or $null on a non-zero exit (the caller decides whether/how to surface $StdErr - never
+# automatically dumped, since it is printed straight to the console by the caller only when it
+# actually needs diagnosing).
+function Get-RunningAiTailscaleStatusJson {
+    param([Parameter(Mandatory)][string]$Exe)
+    $result = Invoke-RunningAiTailscaleCommand -Exe $Exe -Arguments @('status', '--json')
+    if ($result.ExitCode -ne 0) { return $null }
+    return $result.StdOut
 }
 
 # Parses the first line of `tailscale version` output (e.g. "1.104.1" or "1.104.1-t1234abcde")
@@ -51,13 +83,21 @@ function Test-RunningAiTailscaleVersionSupported {
     return $parsed -ge $script:RunningAiTailscaleMinVersion
 }
 
-# `tailscale status --json`'s "BackendState" field: "Running" means logged in and connected;
-# "NeedsLogin"/"Stopped"/anything else means `tailscale up` is still required.
+# Logged in AND connected: `tailscale status --json`'s "BackendState" must be "Running" (anything
+# else - "NeedsLogin", "Stopped", ... - means `tailscale up` is still required) AND "Self.Online"
+# must be true (BackendState can read "Running" for a moment before the daemon has actually
+# established connectivity - Online is the stronger, more specific signal). Self.Online missing
+# entirely is treated as not-yet-connected, never assumed true.
 function Test-RunningAiTailscaleLoggedIn {
     param([Parameter(Mandatory)][AllowEmptyString()][string]$StatusJson)
     try {
         $parsed = $StatusJson | ConvertFrom-Json
-        return $parsed.BackendState -eq 'Running'
+        if ($parsed.BackendState -ne 'Running') { return $false }
+        $self = $parsed.PSObject.Properties['Self']
+        if (-not $self -or -not $self.Value) { return $false }
+        $online = $self.Value.PSObject.Properties['Online']
+        if (-not $online) { return $false }
+        return [bool]$online.Value
     } catch { return $false }
 }
 

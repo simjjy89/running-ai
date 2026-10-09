@@ -69,10 +69,13 @@ $script:TailscaleWrites = 0
 
 function Step { param([string]$Message) Write-Step "[step] $Message" }
 
-function Invoke-RunningAiTailscale {
-    param([Parameter(Mandatory)][string]$Exe, [Parameter(Mandatory)][string[]]$Arguments)
-    $output = & $Exe @Arguments 2>&1 | Out-String
-    return @{ ExitCode = $LASTEXITCODE; Output = $output }
+# Null-coalesces Get-RunningAiTailscaleStatusJson's failure case to '' so every downstream parser
+# (which all accept an empty string safely) never has to separately handle $null.
+function Get-RunningAiTailscaleStatusJsonOrEmpty {
+    param([Parameter(Mandatory)][string]$Exe)
+    $json = Get-RunningAiTailscaleStatusJson -Exe $Exe
+    if ($null -eq $json) { return '' }
+    return $json
 }
 
 try {
@@ -110,13 +113,13 @@ Install it manually from https://tailscale.com/download/windows, then re-run thi
     # ---- 2. version ----------------------------------------------------------------------------
     Step 'Checking the installed Tailscale version'
     if ($tailscale) {
-        $versionOut = (& $tailscale version 2>&1 | Out-String)
-        if (-not (Test-RunningAiTailscaleVersionSupported $versionOut)) {
-            Write-Host "ERROR: Tailscale version is too old for Funnel (needs >= 1.38.3). Got:`n$versionOut" -ForegroundColor Red
+        $versionResult = Invoke-RunningAiTailscaleCommand -Exe $tailscale -Arguments @('version')
+        if (-not (Test-RunningAiTailscaleVersionSupported $versionResult.StdOut)) {
+            Write-Host "ERROR: Tailscale version is too old for Funnel (needs >= 1.38.3). Got:`n$($versionResult.StdOut)" -ForegroundColor Red
             Write-Host 'Upgrade with: winget upgrade --id Tailscale.Tailscale -e' -ForegroundColor Red
             exit $ExitCode.Other
         }
-        Write-Step "Version OK: $(($versionOut -split "`r?`n")[0].Trim())"
+        Write-Step "Version OK: $(($versionResult.StdOut -split "`r?`n")[0].Trim())"
     } elseif ($DryRun) {
         Write-Step 'DRY RUN: would check the installed version (>= 1.38.3)'
     }
@@ -125,8 +128,7 @@ Install it manually from https://tailscale.com/download/windows, then re-run thi
     Step 'Checking Tailscale login state'
     $loggedIn = $false
     if ($tailscale) {
-        $statusJson = (& $tailscale status --json 2>&1 | Out-String)
-        $loggedIn = Test-RunningAiTailscaleLoggedIn $statusJson
+        $loggedIn = Test-RunningAiTailscaleLoggedIn (Get-RunningAiTailscaleStatusJsonOrEmpty -Exe $tailscale)
     }
     if (-not $loggedIn) {
         if ($DryRun) {
@@ -139,23 +141,23 @@ Install it manually from https://tailscale.com/download/windows, then re-run thi
             Write-Host 'Open it, log in, and approve this device. The command returns automatically once' -ForegroundColor Yellow
             Write-Host 'authentication completes; this script continues automatically after that.' -ForegroundColor Yellow
             Write-Host ''
+            # Deliberately NOT Invoke-RunningAiTailscaleCommand: this one must inherit the real
+            # console (see the file-header note) so the operator sees the auth URL in real time.
             & $tailscale up
-            $statusJson = (& $tailscale status --json 2>&1 | Out-String)
-            if (-not (Test-RunningAiTailscaleLoggedIn $statusJson)) {
+            if (-not (Test-RunningAiTailscaleLoggedIn (Get-RunningAiTailscaleStatusJsonOrEmpty -Exe $tailscale))) {
                 Write-Host 'ERROR: still not logged in after "tailscale up" - it did not complete. Re-run this script to try again.' -ForegroundColor Red
                 exit $ExitCode.Other
             }
             $script:TailscaleWrites++
         }
     } else {
-        Write-Step 'Already logged in and connected (BackendState=Running)'
+        Write-Step 'Already logged in and connected (BackendState=Running, Self.Online=true)'
     }
 
     # ---- 4. MagicDNS -----------------------------------------------------------------------------
     Step 'Checking MagicDNS is enabled for this tailnet'
     if ($tailscale -and -not $DryRun) {
-        $statusJson = (& $tailscale status --json 2>&1 | Out-String)
-        $magicDns = Test-RunningAiTailscaleMagicDnsEnabled $statusJson
+        $magicDns = Test-RunningAiTailscaleMagicDnsEnabled (Get-RunningAiTailscaleStatusJsonOrEmpty -Exe $tailscale)
         if ($magicDns -eq $false) {
             Write-Host @'
 ERROR: MagicDNS is not enabled for this tailnet. This is a tailnet-wide setting only an admin can
@@ -191,28 +193,27 @@ Enable "MagicDNS", then re-run this script.
     Step "Checking whether Funnel already serves $target"
     $resolvedHostname = $null
     if ($tailscale -and -not $DryRun) {
-        $funnelStatus = (& $tailscale funnel status 2>&1 | Out-String)
+        $funnelStatus = (Invoke-RunningAiTailscaleCommand -Exe $tailscale -Arguments @('funnel', 'status')).StdOut
         if (Test-RunningAiFunnelAlreadyServingTarget -StatusOutput $funnelStatus -Target $target) {
             Write-Step 'Funnel already serves this target - reusing.'
             $resolvedHostname = Find-RunningAiFunnelHostname $funnelStatus
         } else {
-            $enable = Invoke-RunningAiTailscale -Exe $tailscale -Arguments @('funnel', '--bg', $target)
+            $enable = Invoke-RunningAiTailscaleCommand -Exe $tailscale -Arguments @('funnel', '--bg', $target)
             if ($enable.ExitCode -ne 0) {
-                Write-Host "ERROR: `"tailscale funnel --bg $target`" failed:`n$($enable.Output)" -ForegroundColor Red
+                Write-Host "ERROR: `"tailscale funnel --bg $target`" failed:`n$($enable.StdOut)$($enable.StdErr)" -ForegroundColor Red
                 Write-Host 'This is Tailscale''s own diagnostic - it usually names exactly what is missing (HTTPS, the' -ForegroundColor Red
                 Write-Host 'Funnel node attribute in your tailnet policy, etc.) and often an admin-console link to fix' -ForegroundColor Red
                 Write-Host 'it. Address what it says, then re-run this script.' -ForegroundColor Red
                 exit $ExitCode.ExternalAccess
             }
             $script:TailscaleWrites++
-            $resolvedHostname = Find-RunningAiFunnelHostname $enable.Output
+            $resolvedHostname = Find-RunningAiFunnelHostname ($enable.StdOut + $enable.StdErr)
             if (-not $resolvedHostname) {
-                $funnelStatus = (& $tailscale funnel status 2>&1 | Out-String)
+                $funnelStatus = (Invoke-RunningAiTailscaleCommand -Exe $tailscale -Arguments @('funnel', 'status')).StdOut
                 $resolvedHostname = Find-RunningAiFunnelHostname $funnelStatus
             }
             if (-not $resolvedHostname) {
-                $statusJson = (& $tailscale status --json 2>&1 | Out-String)
-                $resolvedHostname = Find-RunningAiTailscaleSelfDnsName $statusJson
+                $resolvedHostname = Find-RunningAiTailscaleSelfDnsName (Get-RunningAiTailscaleStatusJsonOrEmpty -Exe $tailscale)
             }
             if (-not $resolvedHostname) {
                 Write-Host "ERROR: Funnel was enabled but its public hostname could not be determined from Tailscale's own output." -ForegroundColor Red
