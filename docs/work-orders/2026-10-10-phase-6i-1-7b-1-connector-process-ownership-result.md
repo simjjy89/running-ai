@@ -145,11 +145,12 @@ All run to completion, zero failures, after this work:
 
 ## 10. Commit SHA
 
-(recorded after commit - see below)
+`55ff037` (`fix(windows): track Garmin connector process ownership safely`, on top of `f6a2135`)
 
 ## 11. main-3 / origin/main-3 상태
 
-(recorded after push - see below)
+Pushed as a plain fast-forward (`f6a2135..55ff037`), no merge commit, no force push. Canonical `main`
+was never merged or pushed to - only `main-3` (the development worktree's branch).
 
 ## 12. 운영환경 불변 여부
 
