@@ -83,11 +83,11 @@ STEP 5의 8번(Force 직전 PID 재사용)은 5/6번과 동일한 `Test-RunningA
 
 ## 9. Commit SHA
 
-(커밋 후 기록)
+`4f7beb0` (`fix(windows): fail closed on unsafe connector recovery`, `8f622cd` 위)
 
 ## 10. main-3/origin/main-3 일치
 
-(Push 후 기록)
+Fast-forward only로 `origin/main-3`에 Push 완료, Merge Commit 없음, `origin/main`은 미변경.
 
 ## 11. 운영환경 불변
 
