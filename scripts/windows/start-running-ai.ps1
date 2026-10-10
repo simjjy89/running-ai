@@ -73,8 +73,15 @@ function Stop-NewConnectorOnFailure {
         if ($tracked) {
             Write-Step 'Spring did not start: stopping the connector started by this run (database left running).'
             $ownership = Get-RunningAiConnectorOwnership -Port $ConnectorPort -TrackedPid $tracked -Markers (Get-ConnectorMarkers)
-            Stop-RunningAiConnectorManaged -Ownership $ownership -Port $ConnectorPort -TimeoutSec 15 | Out-Null
-            Remove-PidFile 'garmin-connector'
+            $result = Stop-RunningAiConnectorManaged -Ownership $ownership -Port $ConnectorPort -TimeoutSec 15
+            # Only a fully confirmed stop (port free AND no managed PID left) clears the PID file -
+            # a partial/failed stop preserves it (and its .owner.json) so the next run can see what
+            # actually happened instead of silently believing a clean slate. Phase 6I-1.7B-1R.
+            if (Test-RunningAiConnectorStopWasClean -StopResult $result) {
+                Remove-PidFile 'garmin-connector'
+            } else {
+                Write-Step "Garmin connector stop did not fully succeed (result=$($result.Result), portFreed=$($result.PortFreed), remaining=$($result.RemainingPids -join ',')); PID file preserved."
+            }
         }
     }
 }
@@ -137,7 +144,7 @@ try {
         # fatal, never touches the .pid file itself, never runs when the tracked PID is missing/stale.
         $existingTracked = Get-TrackedProcessId 'garmin-connector' (Get-ConnectorMarkers)
         if ($existingTracked) {
-            try { Set-RunningAiConnectorOwnerMetaFromLive -LauncherPid $existingTracked -Port $ConnectorPort | Out-Null } catch { }
+            try { Set-RunningAiConnectorOwnerMetaFromLive -LauncherPid $existingTracked -Port $ConnectorPort -Markers (Get-ConnectorMarkers) | Out-Null } catch { }
         }
     } else {
         if (Test-PortInUse $ConnectorPort) {
@@ -176,7 +183,7 @@ try {
         # Capture ownership ground truth at the one moment both the launcher and the real listener
         # (which may be a different PID - Phase 6I-1.7A) are guaranteed alive and freshly created.
         # Best-effort: a failure here never fails this already-successful start.
-        try { Set-RunningAiConnectorOwnerMetaFromLive -LauncherPid $proc.Id -Port $ConnectorPort | Out-Null } catch { }
+        try { Set-RunningAiConnectorOwnerMetaFromLive -LauncherPid $proc.Id -Port $ConnectorPort -Markers (Get-ConnectorMarkers) | Out-Null } catch { }
         Write-Step "Garmin connector: UP on 127.0.0.1:$ConnectorPort (PID $($proc.Id))"
     }
 

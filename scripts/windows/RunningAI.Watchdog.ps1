@@ -219,7 +219,22 @@ function Get-ProcessComponentState {
 # behavior byte-for-byte, which is what every existing hand-built Observation in tests still gets.
 function Get-ConnectorComponentState {
     param([bool]$Health, [bool]$PortUsed, $ManagedPid, $Port = $null)
-    if ($Health) { return (New-State 'UP') }
+    if ($Health) {
+        # Phase 6I-1.7B-1R: a passing health check proves the connector answers HTTP correctly, not
+        # that ownership is confirmed - it is never, on its own, treated as "ownership verified". The
+        # existing behavior (no action taken while healthy, restart policy untouched) is preserved
+        # exactly: State/Reason stay 'UP'/'' regardless of what ownership resolves to. The verdict is
+        # attached as a separate, purely informational property for status reporting/diagnosis only -
+        # best-effort (never lets a diagnostic failure affect the State determination above it).
+        $state = New-State 'UP'
+        if ($null -ne $Port) {
+            try {
+                $ownership = Get-RunningAiConnectorOwnership -Port $Port -TrackedPid (Read-PidFile 'garmin-connector') -Markers (Get-ConnectorMarkers)
+                $state | Add-Member -NotePropertyName 'OwnershipVerdict' -NotePropertyValue $ownership.Verdict -Force
+            } catch { }
+        }
+        return $state
+    }
     if ($ManagedPid) { return (New-State 'UNHEALTHY' 'PROCESS_ALIVE_HEALTH_FAILING') }
     if (-not $PortUsed) { return (New-State 'DOWN' 'PROCESS_DEAD') }
     if ($null -eq $Port) { return (New-State 'DEGRADED' 'FOREIGN_PROCESS') }   # legacy fallback, unchanged
@@ -228,6 +243,7 @@ function Get-ConnectorComponentState {
     switch ($ownership.Verdict) {
         'ORPHANED_MANAGED_PROCESS' { return (New-State 'UNHEALTHY' 'ORPHANED_MANAGED_PROCESS') }
         'UNKNOWN_OWNER'            { return (New-State 'DEGRADED' 'UNKNOWN_OWNER') }
+        'DOWN'                     { return (New-State 'DOWN' 'PROCESS_DEAD') }
         default                    { return (New-State 'DEGRADED' 'FOREIGN_PROCESS') }
     }
 }
@@ -399,8 +415,22 @@ function Invoke-RecoveryAction {
             # silently leave the port occupied, so the subsequent restart's bind would fail.
             $tracked = Read-PidFile 'garmin-connector'
             $ownership = Get-RunningAiConnectorOwnership -Port $ConnectorPort -TrackedPid $tracked -Markers (Get-ConnectorMarkers)
-            if ($ownership.ManagedPids.Count -gt 0) { Stop-RunningAiConnectorManaged -Ownership $ownership -Port $ConnectorPort -TimeoutSec 15 | Out-Null }
-            Remove-PidFile 'garmin-connector'
+            if ($ownership.ManagedPids.Count -gt 0) {
+                $stopResult = Stop-RunningAiConnectorManaged -Ownership $ownership -Port $ConnectorPort -TimeoutSec 15
+                $cleanStop = Test-RunningAiConnectorStopWasClean -StopResult $stopResult
+                if ($cleanStop) {
+                    Remove-PidFile 'garmin-connector'
+                } else {
+                    # Phase 6I-1.7B-1R: a failed/partial pre-stop must never be followed by starting a
+                    # new connector anyway - the port may still be occupied by what we just failed to
+                    # clear. PID file and metadata are preserved (not touched above) so the next tick
+                    # sees the real state; this tick's recovery step is reported as failed, same as
+                    # any other failed action, rather than silently launching start-running-ai.ps1
+                    # straight into a bind-in-use failure.
+                    Write-Step "Garmin connector pre-stop did not fully succeed (result=$($stopResult.Result), portFreed=$($stopResult.PortFreed), remaining=$($stopResult.RemainingPids -join ',')); not starting a new connector this tick."
+                    return $false
+                }
+            }
         } elseif ($Action.Component -eq 'external-relay') {
             $tracked = Get-TrackedProcessId 'external-relay' (Get-ExternalRelayMarkers)
             if ($tracked) { Stop-TrackedProcess -ProcessId $tracked -Markers (Get-ExternalRelayMarkers) -TimeoutSec 15 | Out-Null; Remove-PidFile 'external-relay' }

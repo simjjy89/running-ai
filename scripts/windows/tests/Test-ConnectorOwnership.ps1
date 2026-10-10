@@ -335,12 +335,199 @@ Check 'Set-RunningAiConnectorOwnerMetaFromLive captures both PIDs at start time 
     $pair = Start-SelfTestPair
     $name = 'selftest-ownership-live-' + [guid]::NewGuid().ToString('N')
     try {
-        $captured = Set-RunningAiConnectorOwnerMetaFromLive -LauncherPid $pair.LauncherPid -Port $pair.Port -Name $name
+        $captured = Set-RunningAiConnectorOwnerMetaFromLive -LauncherPid $pair.LauncherPid -Port $pair.Port -Markers $testMarkers -Name $name
         Stop-Process -Id $pair.LauncherPid -Force -ErrorAction SilentlyContinue
         Start-Sleep -Milliseconds 300
         $o = Get-RunningAiConnectorOwnership -Port $pair.Port -TrackedPid $pair.LauncherPid -Markers $testMarkers -Name $name
         $captured -and ($o.Verdict -eq 'ORPHANED_MANAGED_PROCESS') -and (@($o.ManagedPids).Count -eq 1) -and (@($o.ManagedPids)[0] -eq $pair.ListenerPid)
     } finally { Remove-RunningAiOwnerMeta -Name $name; Stop-SelfTestPair $pair }
+}
+
+# ---- Phase 6I-1.7B-1R additions -----------------------------------------------------------------
+
+# STEP F #1/#2: Set-RunningAiConnectorOwnerMetaFromLive must refuse (and write nothing) when the
+# "listener" at the given port is not actually the launcher's child - covers both "unrelated listener"
+# and "parent relationship mismatch" in one scenario, since both independent single processes here are
+# each other's non-relatives by construction.
+Check 'Set-RunningAiConnectorOwnerMetaFromLive refuses an unrelated listener (no parent relationship), writes nothing' {
+    $a = Start-SelfTestSingleProcess
+    $b = Start-SelfTestSingleProcess
+    try {
+        $name = 'selftest-ownership-' + [guid]::NewGuid().ToString('N')
+        $captured = Set-RunningAiConnectorOwnerMetaFromLive -LauncherPid $a.LauncherPid -Port $b.Port -Markers $testMarkers -Name $name
+        (-not $captured) -and (-not (Test-Path (Get-RunningAiOwnerMetaPath $name)))
+    } finally { Stop-SelfTestPair $a; Stop-SelfTestPair $b }
+}
+
+# Same shape feeds Get-RunningAiConnectorOwnership directly: a tracked, alive, legitimately-ours
+# launcher whose port is answered by an unrelated (non-child) process must resolve to UNKNOWN_OWNER,
+# never LAUNCHER_CHILD - covers STEP F #2 (parent relationship mismatch) for the live-check path too.
+Check 'launcher/listener parent relationship mismatch is never accepted as LAUNCHER_CHILD' {
+    $a = Start-SelfTestSingleProcess
+    $b = Start-SelfTestSingleProcess
+    try {
+        $o = Get-RunningAiConnectorOwnership -Port $b.Port -TrackedPid $a.LauncherPid -Markers $testMarkers -Name ('selftest-ownership-' + [guid]::NewGuid().ToString('N'))
+        ($o.Verdict -ne 'LAUNCHER_CHILD') -and (@($o.ManagedPids).Count -eq 0)
+    } finally { Stop-SelfTestPair $a; Stop-SelfTestPair $b }
+}
+
+# STEP F #4: a sidecar whose recorded repoRoot does not match this invocation's repo root is rejected
+# outright - never used to re-identify an orphan, even if PID/port/creationDate all happen to agree.
+Check 'sidecar with a mismatched repoRoot is rejected (UNKNOWN_OWNER), never used as ORPHANED' {
+    $pair = Start-SelfTestPair
+    try {
+        $name = 'selftest-ownership-' + [guid]::NewGuid().ToString('N')
+        $listenerInfo = Get-RunningAiProcessInfo -ProcessId $pair.ListenerPid
+        $path = Get-RunningAiOwnerMetaPath $name
+        New-Item -ItemType Directory -Force (Split-Path $path -Parent) | Out-Null
+        $json = @{
+            version = 1; name = $name; port = $pair.Port; repoRoot = 'C:\a-different-repo-entirely'
+            recordedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+            launcher = $null
+            listener = @{ processId = $listenerInfo.ProcessId; creationDate = $listenerInfo.CreationDate.ToUniversalTime().ToString('o') }
+        } | ConvertTo-Json -Depth 6
+        [System.IO.File]::WriteAllText($path, $json, (New-Object System.Text.UTF8Encoding($false)))
+        try {
+            Stop-Process -Id $pair.LauncherPid -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Milliseconds 300
+            $o = Get-RunningAiConnectorOwnership -Port $pair.Port -TrackedPid $pair.LauncherPid -Markers $testMarkers -Name $name
+            ($o.Verdict -eq 'UNKNOWN_OWNER') -and (@($o.ManagedPids).Count -eq 0)
+        } finally { Remove-RunningAiOwnerMeta -Name $name }
+    } finally { Stop-SelfTestPair $pair }
+}
+
+# STEP F #5: a sidecar whose internal "name" field does not match the name it was looked up under
+# (e.g. a stray copy under the wrong filename) is likewise rejected, never trusted by coincidence.
+Check 'sidecar with a mismatched internal name is rejected (UNKNOWN_OWNER), never used as ORPHANED' {
+    $pair = Start-SelfTestPair
+    try {
+        $name = 'selftest-ownership-' + [guid]::NewGuid().ToString('N')
+        $listenerInfo = Get-RunningAiProcessInfo -ProcessId $pair.ListenerPid
+        $path = Get-RunningAiOwnerMetaPath $name
+        New-Item -ItemType Directory -Force (Split-Path $path -Parent) | Out-Null
+        $json = @{
+            version = 1; name = 'a-completely-different-component-name'; port = $pair.Port; repoRoot = $script:RepoRoot
+            recordedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+            launcher = $null
+            listener = @{ processId = $listenerInfo.ProcessId; creationDate = $listenerInfo.CreationDate.ToUniversalTime().ToString('o') }
+        } | ConvertTo-Json -Depth 6
+        [System.IO.File]::WriteAllText($path, $json, (New-Object System.Text.UTF8Encoding($false)))
+        try {
+            Stop-Process -Id $pair.LauncherPid -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Milliseconds 300
+            $o = Get-RunningAiConnectorOwnership -Port $pair.Port -TrackedPid $pair.LauncherPid -Markers $testMarkers -Name $name
+            ($o.Verdict -eq 'UNKNOWN_OWNER') -and (@($o.ManagedPids).Count -eq 0)
+        } finally { Remove-RunningAiOwnerMeta -Name $name }
+    } finally { Stop-SelfTestPair $pair }
+}
+
+# STEP F #10: an outright port-query failure (not the routine "nothing found" case) must resolve to
+# UNKNOWN_OWNER, never DOWN - an invalid port number forces Get-NetTCPConnection to fail for a
+# different reason than "no matching objects", which is exactly the distinction being tested.
+Check 'a port query failure (invalid port) resolves to UNKNOWN_OWNER, never DOWN' {
+    $q = Get-RunningAiListenerProcessIds -Port 99999
+    $o = Get-RunningAiConnectorOwnership -Port 99999 -TrackedPid $null -Markers $testMarkers -Name ('selftest-ownership-' + [guid]::NewGuid().ToString('N'))
+    (-not $q.Ok) -and ($o.Verdict -eq 'UNKNOWN_OWNER')
+}
+
+# STEP F #6/#7: an ownership picture that already changed before Stop-RunningAiConnectorManaged ever
+# signals anything - one of the two originally-managed PIDs no longer resolves at all - must abort as
+# 'ownership-changed' rather than silently proceeding against whatever subset still resolves. The
+# still-alive, still-valid PID must never be touched in this case.
+Check 'Stop-RunningAiConnectorManaged detects a managed PID missing before any signal is sent (ownership-changed)' {
+    $single = Start-SelfTestSingleProcess
+    try {
+        $fakeOwnership = [pscustomobject]@{ Verdict = 'LAUNCHER_CHILD'; LauncherPid = $single.LauncherPid; ListenerPid = 999999; ManagedPids = @($single.LauncherPid, 999999) }
+        $result = Stop-RunningAiConnectorManaged -Ownership $fakeOwnership -Port $single.Port -TimeoutSec 5 -Name ('selftest-ownership-' + [guid]::NewGuid().ToString('N'))
+        ($result.Result -eq 'ownership-changed') -and ([bool](Get-Process -Id $single.LauncherPid -ErrorAction SilentlyContinue))
+    } finally { Stop-SelfTestPair $single }
+}
+
+# STEP F #11/#12: the shared clean-stop policy (start-/stop-running-ai.ps1 and RunningAI.Watchdog.ps1
+# all call this instead of re-deriving the condition) must never call a result clean on RemainingPids
+# alone - PortFreed matters just as much, and 'refused'/'ownership-changed' are never clean regardless
+# of what RemainingPids happens to report.
+Check 'Test-RunningAiConnectorStopWasClean requires PortFreed, not RemainingPids=0 alone' {
+    $falselyEmpty = [pscustomobject]@{ Result = 'orphan-remaining'; PortFreed = $false; RemainingPids = @() }
+    $trulyClean = [pscustomobject]@{ Result = 'forced'; PortFreed = $true; RemainingPids = @() }
+    $refused = [pscustomobject]@{ Result = 'refused'; PortFreed = $true; RemainingPids = @() }
+    $ownershipChanged = [pscustomobject]@{ Result = 'ownership-changed'; PortFreed = $true; RemainingPids = @() }
+    (-not (Test-RunningAiConnectorStopWasClean -StopResult $falselyEmpty)) -and
+    (Test-RunningAiConnectorStopWasClean -StopResult $trulyClean) -and
+    (-not (Test-RunningAiConnectorStopWasClean -StopResult $refused)) -and
+    (-not (Test-RunningAiConnectorStopWasClean -StopResult $ownershipChanged))
+}
+
+# STEP F #13: source-level lock-in (same pattern as the existing "Invoke-RecoveryAction routes
+# external-relay to its own dedicated script" check) that the connector's PreStop branch gates on
+# Test-RunningAiConnectorStopWasClean and returns before ever reaching the start-running-ai.ps1
+# launch when the stop was not clean - a full process-level reproduction of a genuinely failed
+# pre-stop would require forcing a real, timed ownership change, which (like true PID reuse) cannot
+# be deterministically engineered against real OS processes.
+Check 'Invoke-RecoveryAction never starts a new connector after a non-clean connector pre-stop (source check)' {
+    $src = Get-Content (Join-Path $scripts 'RunningAI.Watchdog.ps1') -Raw
+    $fn = [regex]::Match($src, '(?s)function Invoke-RecoveryAction \{.*?\n\}\r?\n').Value
+    ($fn -match 'Test-RunningAiConnectorStopWasClean') -and
+    ($fn -match '(?s)Test-RunningAiConnectorStopWasClean.*?return \$false')
+}
+
+# STEP F #14: Send-CtrlC.ps1 must refuse (exit 2) rather than signal when a genuinely unmanaged
+# process shares the target's console - constructed by having a third "bystander" process explicitly
+# AttachConsole to the launcher's console (the only reliable way to force two unrelated processes to
+# share one console on demand, since the normal Start-Process launch pattern used elsewhere in this
+# suite does not by itself make a child share its parent's console - confirmed separately). The
+# bystander, and the real launcher/listener, must all remain untouched.
+Check 'Send-CtrlC.ps1 refuses to signal when an unmanaged process shares the console (bystander untouched)' {
+    $pair = Start-SelfTestPair
+    $bystander = $null
+    try {
+        $bystanderScript = Join-Path ([IO.Path]::GetTempPath()) ('selftest-ownership-bystander-' + [guid]::NewGuid().ToString('N') + '.ps1')
+        Set-Content -LiteralPath $bystanderScript -Encoding ascii -Value @'
+param([int]$TargetPid)
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class SelfTestAttach {
+    [DllImport("kernel32.dll")] public static extern bool FreeConsole();
+    [DllImport("kernel32.dll")] public static extern bool AttachConsole(uint pid);
+}
+"@
+# A process already attached to its own console cannot AttachConsole to another one
+# (ERROR_ACCESS_DENIED) without freeing its own console first.
+[SelfTestAttach]::FreeConsole() | Out-Null
+[SelfTestAttach]::AttachConsole([uint32]$TargetPid) | Out-Null
+while ($true) { Start-Sleep -Seconds 1 }
+'@
+        $bystander = Start-Process -FilePath $psExe -ArgumentList @('-NoProfile', '-WindowStyle', 'Hidden', '-File', $bystanderScript, '-TargetPid', $pair.LauncherPid) -WindowStyle Hidden -PassThru
+        Start-Sleep -Seconds 1   # let the bystander actually attach before we check
+
+        $helper = Join-Path $scripts 'Send-CtrlC.ps1'
+        $allowed = "$($pair.LauncherPid),$($pair.ListenerPid)"
+        $p = Start-Process -FilePath $psExe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $helper, '-ProcessId', $pair.LauncherPid, '-AllowedProcessIds', $allowed) -WindowStyle Hidden -PassThru -Wait
+        Start-Sleep -Milliseconds 500
+
+        ($p.ExitCode -eq 2) -and
+        ([bool](Get-Process -Id $pair.LauncherPid -ErrorAction SilentlyContinue)) -and
+        ([bool](Get-Process -Id $pair.ListenerPid -ErrorAction SilentlyContinue)) -and
+        ([bool](Get-Process -Id $bystander.Id -ErrorAction SilentlyContinue))
+    } finally {
+        Stop-SelfTestPair $pair
+        if ($bystander) { Stop-Process -Id $bystander.Id -Force -ErrorAction SilentlyContinue }
+        if ($bystanderScript -and (Test-Path $bystanderScript)) { Remove-Item -LiteralPath $bystanderScript -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+# STEP F #15 (regression): Spring/relay's stop path (Stop-TrackedProcess -> Send-CtrlC.ps1 with NO
+# -AllowedProcessIds) must behave exactly as before this phase - unconditional send, never refused by
+# the new console-sharing check, which only ever activates when that parameter is explicitly passed.
+Check 'Send-CtrlC.ps1 omitting -AllowedProcessIds performs the legacy unconditional send (Spring/relay path unaffected)' {
+    $single = Start-SelfTestSingleProcess
+    try {
+        $helper = Join-Path $scripts 'Send-CtrlC.ps1'
+        $p = Start-Process -FilePath $psExe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $helper, '-ProcessId', $single.LauncherPid) -WindowStyle Hidden -PassThru -Wait
+        Start-Sleep -Milliseconds 500
+        ($p.ExitCode -eq 0) -and (-not (Get-Process -Id $single.LauncherPid -ErrorAction SilentlyContinue))
+    } finally { Stop-SelfTestPair $single }
 }
 
 } finally {

@@ -1,4 +1,4 @@
-# Garmin Connector Process Ownership (Phase 6I-1.7B-1)
+# Garmin Connector Process Ownership (Phase 6I-1.7B-1, hardened in 6I-1.7B-1R)
 
 ## Problem
 
@@ -115,6 +115,48 @@ and `UNKNOWN_OWNER` are always refused, matching this phase's fail-safe requirem
   already was). `Invoke-RecoveryAction`'s connector `PreStop` branch uses the same ownership-aware
   stop. **Spring and relay's classification/recovery paths are unmodified.** The restart-budget,
   dependency-order and blocking logic in `Get-RecoveryPlan` itself is unchanged.
+
+## Phase 6I-1.7B-1R hardening
+
+A safety review of the 1.7B-1 implementation found and fixed several real gaps before any live use:
+
+- **Capture-time validation** (`Set-RunningAiConnectorOwnerMetaFromLive`): now requires `-Markers` and
+  validates the launcher's own identity, the listener/launcher relationship (self or live-verified
+  child, creation-time ordered), AND a final re-check of all three identities immediately before
+  writing - an existing sidecar is left untouched on any validation failure.
+- **Multi-field sidecar validation**: the orphan re-identification check now also requires the
+  sidecar's own `name` and `repoRoot` fields to match (not just PID/port/creationDate) - a sidecar
+  under the right filename but describing a different component or repository/worktree is rejected.
+- **Ambiguous/failed port queries are UNKNOWN_OWNER, never DOWN**: `Get-RunningAiListenerProcessIds`
+  distinguishes "genuinely nothing listening" from "2+ distinct owners reported" and "the query itself
+  failed" (including an out-of-range port, which fails at parameter-binding, not cmdlet execution) -
+  only the first maps to DOWN.
+- **Stop-time re-verification at every stage**: `Stop-RunningAiConnectorManaged` takes a fresh
+  PID+CreationDate baseline, and re-checks it before signaling, after the graceful wait, and
+  immediately before any forced kill - a PID whose identity shifted (reused) at any point aborts the
+  whole operation as `ownership-changed` rather than touching a different process or silently
+  continuing with a reduced set.
+- **`Send-CtrlC.ps1` console-safety check** (opt-in via `-AllowedProcessIds`, a comma-joined string -
+  not a PowerShell array parameter, which does not survive a `-File` process boundary intact):
+  enumerates every PID actually attached to the target's console (`GetConsoleProcessList`) and refuses
+  to signal at all if an unmanaged process shares it (exempting the console's own `conhost.exe` and
+  the helper's own transient attach). Omitting the parameter - what `Stop-TrackedProcess`/Spring/relay
+  still do - reproduces the exact legacy unconditional send.
+- **PID file/metadata preservation on partial failure** (`Test-RunningAiConnectorStopWasClean`, shared
+  by all three call sites): a stop only clears the `.pid`/`.owner.json` files when the result is an
+  actual clean end state (`graceful`/`forced`/`already-gone`) AND the port is confirmed free AND no
+  managed PID remains - `RemainingPids.Count=0` is never read alone. `RunningAI.Watchdog.ps1`'s
+  `Invoke-RecoveryAction` additionally **returns immediately** on a non-clean connector pre-stop,
+  never proceeding to launch `start-running-ai.ps1` into a port that may still be occupied.
+- **Diagnostic ownership visibility while healthy**: `Get-ConnectorComponentState` now attaches the
+  resolved ownership verdict to a healthy connector's state object as `.OwnershipVerdict` - purely
+  informational, never affecting `State`/`Reason` or the restart decision (a passing health check is
+  never treated as "ownership confirmed", but a mismatch is now visible for diagnosis).
+- Two implementation bugs surfaced only by writing real tests against real spawned processes: an
+  `[ordered]@{}` dictionary's integer-keyed indexer collides with its positional-index overload
+  (`System.ArgumentOutOfRangeException`) - fixed by using a plain `Hashtable`; and matching the
+  "nothing listening" condition on `Get-NetTCPConnection`'s (locale-dependent - this machine's own
+  error text is Korean) exception message instead of its stable `FullyQualifiedErrorId`.
 
 ## What this phase deliberately does NOT do
 

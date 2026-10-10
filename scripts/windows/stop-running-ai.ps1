@@ -57,11 +57,16 @@ function Stop-GarminConnectorComponent {
         return
     }
     $result = Stop-RunningAiConnectorManaged -Ownership $ownership -Port $Port -TimeoutSec $TimeoutSec
-    Remove-PidFile 'garmin-connector'
-    if ($result.RemainingPids.Count -gt 0) {
-        Write-Step "Garmin connector: $($result.Result) - PID(s) $($result.RemainingPids -join ', ') still alive, port $Port freed=$($result.PortFreed)"
-    } else {
+    # Phase 6I-1.7B-1R: only a fully confirmed stop (port free AND no managed PID remaining) clears
+    # the PID file/metadata - never RemainingPids.Count=0 alone, and never on 'refused' or
+    # 'ownership-changed'. A partial/failed stop preserves both files and reports exactly why, so a
+    # subsequent run (manual or Watchdog) sees the real state instead of a falsely "clean" one.
+    $cleanStop = Test-RunningAiConnectorStopWasClean -StopResult $result
+    if ($cleanStop) {
+        Remove-PidFile 'garmin-connector'
         Write-Step "Garmin connector: stopped ($($result.Result), verdict $($ownership.Verdict), managed PID(s) $($ownership.ManagedPids -join ', '))"
+    } else {
+        Write-Step "Garmin connector: NOT fully stopped (result=$($result.Result), portFreed=$($result.PortFreed), remaining PID(s)=$($result.RemainingPids -join ', ')); PID file and metadata preserved."
     }
 }
 
