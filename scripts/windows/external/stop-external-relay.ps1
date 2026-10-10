@@ -12,6 +12,13 @@ param([int]$TimeoutSec = 15)
 . "$PSScriptRoot\..\RunningAI.Common.ps1"
 . "$PSScriptRoot\RunningAI.ExternalRelay.Common.ps1"
 
+# Phase 6I-1.7B-2C (STEP 1): same runtime lock as start-external-relay.ps1 - see its comment.
+$runtimeLock = Enter-RunningAiRuntimeLock -TimeoutSec 5
+if (-not $runtimeLock) {
+    Write-Step 'Another start/stop against this runtime is already in progress; skipping (no service state changed).'
+    exit $ExitCode.Busy
+}
+
 try {
     $tracked = Get-TrackedProcessId 'external-relay' (Get-ExternalRelayMarkers)
     if ($null -eq $tracked) {
@@ -25,4 +32,6 @@ try {
 } catch {
     Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
     exit (Get-ExitCodeFromError $_)
+} finally {
+    Exit-RunningAiRuntimeLock $runtimeLock
 }

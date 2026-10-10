@@ -28,6 +28,17 @@ param(
 
 if (-not $PSBoundParameters.ContainsKey('Port')) { $Port = Get-ExternalRelayConfiguredPort }
 
+# Phase 6I-1.7B-2C (STEP 1): the SAME runtime lock start-running-ai.ps1/stop-running-ai.ps1 use,
+# so a manual run of this script is mutually exclusive with the full start/stop and with a
+# Watchdog-driven relay recovery action - none of them may touch the relay process concurrently.
+# A Watchdog-spawned child inherits RUNNING_AI_WATCHDOG_LOCK_INHERITED and skips acquiring (its
+# parent already holds it); a manual run always acquires normally.
+$runtimeLock = Enter-RunningAiRuntimeLock -TimeoutSec 5
+if (-not $runtimeLock) {
+    Write-Step 'Another start/stop against this runtime is already in progress; skipping (no service state changed).'
+    exit $ExitCode.Busy
+}
+
 try {
     # Load the repo-root .env into THIS process before anything that spawns node: this script runs
     # standalone, in its own process (the Watchdog Scheduled Task invokes it in a process separate
@@ -87,4 +98,6 @@ try {
 } catch {
     Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
     exit (Get-ExitCodeFromError $_)
+} finally {
+    Exit-RunningAiRuntimeLock $runtimeLock
 }

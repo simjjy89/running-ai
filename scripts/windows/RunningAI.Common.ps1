@@ -40,21 +40,34 @@ function Get-ExitCodeFromError {
 
 function Write-Step { param([string]$Message) Write-Host ("[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $Message) }
 
-# ---- cross-process start/stop serialization (Phase 6I-1.7B-2B, STEP F) -------------------------
+# ---- cross-process start/stop serialization (Phase 6I-1.7B-2B, STEP F; extended 6I-1.7B-2C, STEP 1) -
 #
 # A named Mutex distinct from Watchdog's own "RunningAI-Watchdog-<hash>" overlap guard (which only
-# ever prevents two WATCHDOG TICKS from running at once) - this one serializes start-running-ai.ps1
-# and stop-running-ai.ps1 against EACH OTHER and against themselves, for the SAME canonical
-# runtime/worktree. Acquired by those two scripts THEMSELVES, at their own top level, for their own
-# run only.
+# ever prevents two WATCHDOG TICKS from running at once) - this one serializes start-running-ai.ps1,
+# stop-running-ai.ps1 and the external relay's own start/stop scripts against EACH OTHER, against
+# themselves, and (Phase 6I-1.7B-2C) against a Watchdog-driven PreStop+Start/Restart recovery action,
+# for the SAME canonical runtime/worktree.
 #
-# Deliberately NEVER acquired by RunningAI.Watchdog.ps1 or watch-running-ai.ps1: Watchdog only ever
-# reaches a start/stop operation by spawning start-running-ai.ps1 as a brand-new, SEPARATE PowerShell
-# process (Invoke-RecoveryAction's Start-Process calls) and synchronously waiting for it to exit. If
-# Watchdog itself held this same lock while doing that wait, and the child then tried to acquire the
-# identical lock, the two would deadlock: the parent blocked on the child's exit, the child blocked on
-# the parent's release - neither ever happens. Watchdog never taking this lock at all removes that
-# failure mode by construction, rather than relying on careful ordering to avoid it.
+# Phase 6I-1.7B-2B's ORIGINAL rule - "RunningAI.Watchdog.ps1/watch-running-ai.ps1 never acquire this
+# lock" - was correct for a real problem (see below) but left a gap: a Watchdog PreStop runs entirely
+# IN-PROCESS, with no lock at all, so it could race a concurrent manual start/stop touching the exact
+# same process. Phase 6I-1.7B-2C closes that gap: RunningAI.Watchdog.ps1's OWN recovery helpers
+# (Invoke-RunningAiCoreRecoveryAction / Invoke-RunningAiRelayRecoveryAction) now DO acquire this lock,
+# for the full PreStop+Start/Restart duration of ONE recovery action - bundling both into a single
+# serialized unit, exactly like a manual stop-running-ai.ps1-then-start-running-ai.ps1 pair would be
+# under this same lock. A failed acquisition (another manual run is mid-operation) reports BUSY and
+# changes nothing - it is never a failure, never charged to any restart/long-term-failure budget.
+#
+# The original deadlock risk - Watchdog holding this lock while ALSO spawning start-running-ai.ps1 (or
+# the relay's start script) as a child it synchronously waits on, with that child trying to acquire the
+# SAME lock itself - still cannot be allowed to happen: the parent would block on the child's exit, the
+# child would block on the parent's release, neither ever happens. This is solved by trust, not by
+# avoidance: the Watchdog's lock-wrapped helpers set RUNNING_AI_WATCHDOG_LOCK_INHERITED='1' on ONLY the
+# one child process they are about to spawn (its own ProcessStartInfo environment block, never this
+# process's own $env:) - see Enter-RunningAiRuntimeLock below. That child then skips acquiring the lock
+# itself entirely (there is nothing to wait on, so no deadlock is even possible), trusting that its
+# parent already serialized this exact operation against every manual start/stop. A manually-run
+# start/stop script never has this variable set and always acquires the lock itself, unchanged.
 #
 # The hash is derived from $script:RuntimeDir, not bare $script:RepoRoot: in a test
 # (RUNNING_AI_TEST_RUNTIME_DIR set), that already points at a disposable per-test directory, so a
@@ -71,8 +84,23 @@ function Get-RunningAiRuntimeLockName {
 # runtime is already in progress and did not finish within $TimeoutSec - callers must treat $null as
 # "busy, do nothing, change no service state" (Exit-RunningAiRuntimeLock is a safe no-op on $null too,
 # so callers can always pass whatever this returns straight through to a finally block).
+#   RUNNING_AI_WATCHDOG_LOCK_INHERITED (Phase 6I-1.7B-2C, STEP 1): set to '1' ONLY by
+# RunningAI.Watchdog.ps1's own lock-wrapped recovery helpers, on the environment block of the ONE
+# child start/stop-script process they are about to spawn (never on this process's own $env:, so it
+# can never leak into any later action this process takes) - see Invoke-RunningAiCoreRecoveryAction /
+# Invoke-RunningAiRelayRecoveryAction. It tells that single, trusted child "the lock for this exact
+# operation is already held by your parent; do not try to acquire it yourself" - the parent already
+# proved mutual exclusion against every manual start/stop before spawning the child, so the child
+# re-acquiring the SAME named Mutex would either (a) deadlock the parent's WaitForExit against the
+# child's own wait on a lock only the parent can release, or (b) if the parent used a short timeout
+# for its own wait, spuriously report BUSY on a totally uncontended runtime and abort real recovery
+# work for no reason. A bare "'1'" value only ever reaches a process when the Watchdog itself set it
+# moments before spawning that process - a manually-run start-running-ai.ps1/stop-running-ai.ps1 (or
+# an operator's own PowerShell session) never has this set, so manual invocations always acquire the
+# lock exactly as before.
 function Enter-RunningAiRuntimeLock {
     param([int]$TimeoutSec = 2)
+    if ($env:RUNNING_AI_WATCHDOG_LOCK_INHERITED -eq '1') { return 'INHERITED' }
     $name = Get-RunningAiRuntimeLockName
     $mutex = New-Object System.Threading.Mutex($false, $name)
     try {
@@ -93,6 +121,7 @@ function Enter-RunningAiRuntimeLock {
 function Exit-RunningAiRuntimeLock {
     param($Mutex)
     if (-not $Mutex) { return }
+    if ($Mutex -eq 'INHERITED') { return }   # not a real Mutex handle - the parent owns releasing it
     try { $Mutex.ReleaseMutex() } catch { }
     try { $Mutex.Dispose() } catch { }
 }

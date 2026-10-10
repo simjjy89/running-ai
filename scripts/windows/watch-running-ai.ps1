@@ -103,14 +103,16 @@ try {
 
     if (-not $state.Available) { Write-WatchdogLog -Component 'watchdog' -State 'DEGRADED' -Reason 'STATE_UNAVAILABLE_FAIL_SAFE' -Action 'NONE' -Result $state.Note }
 
-    $steps = @(); $recoveryFailed = $false
+    $steps = @(); $recoveryFailed = $false; $recoveryBusy = $false
+    $deltas = [pscustomobject]@{ Restarts = @(); LongTermFailures = @() }
     if (-not $NoRecovery -and $state.Available -and $plan.Actions.Count -gt 0) {
         $runner = { param($a) Invoke-RecoveryAction -Action $a -ConnectorPort $ConnectorPort -SpringPort $SpringPort }
         $result = Invoke-WatchdogRecovery -Observe $observe -Runner $runner -History $history -HistoryAvailable $state.Available -Now $now `
             -WindowMinutes $WindowMinutes -MaxRestarts $MaxRestarts -ConnectorPort $ConnectorPort `
             -LongTermState $longTermState -LongTermWindowHours $LongTermWindowHours -LongTermMaxFailures $LongTermMaxFailures
-        $steps = @($result.Steps); $recoveryFailed = $result.Failed
+        $steps = @($result.Steps); $recoveryFailed = $result.Failed; $recoveryBusy = $result.Busy; $deltas = $result.Deltas
         foreach ($s in $steps) { Write-WatchdogLog -Component $s.Component -State 'RECOVERING' -Reason $s.Reason -Action $s.Action -Result $s.Result }
+        if ($recoveryBusy) { Write-Step 'Watchdog: a planned recovery action was deferred (BUSY) because a manual start/stop is in progress against this runtime; nothing was touched this tick.' }
     }
 
     # Final picture (after any recovery) for the status file.
@@ -159,9 +161,16 @@ try {
         restartBudget = [ordered]@{ windowMinutes = $WindowMinutes; maxRestarts = $MaxRestarts; used = $budget }
         connectorOwnership = $connectorOwnership
         longTermLockout = [ordered]@{ windowHours = $LongTermWindowHours; maxFailures = $LongTermMaxFailures; components = $longTermLockout }
+        recoveryBusy = $recoveryBusy
     })
-    Save-WatchdogState -History $history -LongTermState $longTermState
-    Write-WatchdogLog -Component 'watchdog' -State $overall -Action $lastAction -Result $(if ($recoveryFailed) { 'RECOVERY_FAILED' } else { 'OK' })
+    # Phase 6I-1.7B-2C (STEP 4): replays ONLY this tick's own deltas onto a freshly re-read copy of
+    # watchdog-state.json under a dedicated write lock, instead of trusting this process's own
+    # in-memory $history/$longTermState (captured at tick start, now possibly stale) - see
+    # Save-RunningAiWatchdogStateReconciled's own comment for why a plain Save-WatchdogState here would
+    # risk silently undoing a concurrent clear-watchdog-lockout.ps1 -Force.
+    $persisted = Save-RunningAiWatchdogStateReconciled -Deltas $deltas -Now $now -WindowMinutes $WindowMinutes -LongTermWindowHours $LongTermWindowHours -LongTermMaxFailures $LongTermMaxFailures
+    if (-not $persisted) { Write-WatchdogLog -Component 'watchdog' -State 'DEGRADED' -Reason 'STATE_SAVE_NOT_PERSISTED' -Action 'NONE' -Result 'SEE_PRECEDING_LOG_LINE' }
+    Write-WatchdogLog -Component 'watchdog' -State $overall -Action $lastAction -Result $(if ($recoveryFailed) { 'RECOVERY_FAILED' } elseif ($recoveryBusy) { 'RECOVERY_BUSY' } else { 'OK' })
 
     Write-Step "Watchdog: overall=$overall lastAction=$lastAction"
     exit $(if ($recoveryFailed) { $ExitCode.RecoveryFailed } else { $ExitCode.Ok })

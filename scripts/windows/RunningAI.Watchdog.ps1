@@ -41,6 +41,45 @@ function Write-JsonAtomic {
 
 function ConvertTo-UnixSeconds { param([datetime]$Time) [long]([DateTimeOffset]$Time.ToUniversalTime()).ToUnixTimeSeconds() }
 
+# ---- watchdog-state.json write serialization (Phase 6I-1.7B-2C, STEP 4) -------------------------
+#
+# A SEPARATE named Mutex from the runtime start/stop lock above (RunningAI.Common.ps1) - this one
+# protects only READS-THEN-WRITES of watchdog-state.json itself, which a Watchdog tick and an
+# operator's clear-watchdog-lockout.ps1 -Force can otherwise race: Watchdog reads the file at the
+# START of a (possibly minutes-long) tick, keeps its own in-memory History/LongTermState throughout,
+# and only writes at the very END. If an operator clears a component's lockout and saves WHILE that
+# tick is still running, the Watchdog's later save - built from its now-stale in-memory copy, taken
+# BEFORE the clear - would silently overwrite the operator's clear with the old, still-locked state.
+# This lock does not fix that by making the whole tick atomic (observing/recovering can take minutes
+# and must never hold a file lock that long) - it protects the one thing that actually needs it: the
+# window between "read the CURRENT on-disk state fresh" and "write the merged result back", which
+# both Save-WatchdogState's caller (watch-running-ai.ps1, replaying only the deltas IT itself
+# produced this tick onto a freshly re-read base) and clear-watchdog-lockout.ps1 -Force now do.
+function Get-RunningAiWatchdogStateLockName {
+    $hash = [BitConverter]::ToString([Security.Cryptography.SHA1]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($script:StatePath.ToLowerInvariant()))).Replace('-', '').Substring(0, 12)
+    "Local\RunningAI-WatchdogState-$hash"
+}
+
+function Enter-RunningAiWatchdogStateLock {
+    param([int]$TimeoutSec = 5)
+    $mutex = New-Object System.Threading.Mutex($false, (Get-RunningAiWatchdogStateLockName))
+    try {
+        $acquired = $mutex.WaitOne([TimeSpan]::FromSeconds($TimeoutSec))
+    } catch [System.Threading.AbandonedMutexException] {
+        $acquired = $true   # same reasoning as Enter-RunningAiRuntimeLock: usable immediately, not stuck forever
+    }
+    if ($acquired) { return $mutex }
+    try { $mutex.Dispose() } catch { }
+    return $null
+}
+
+function Exit-RunningAiWatchdogStateLock {
+    param($Mutex)
+    if (-not $Mutex) { return }
+    try { $Mutex.ReleaseMutex() } catch { }
+    try { $Mutex.Dispose() } catch { }
+}
+
 function New-EmptyHistory { $h = @{}; foreach ($c in $script:AllTrackedComponents) { $h[$c] = @() }; return $h }
 
 # Phase 6I-1.7B-2B (STEP C/D): long-term failure tracking and lockout, persisted alongside (never
@@ -117,6 +156,20 @@ function Clear-RunningAiComponentLockout {
 function Read-WatchdogState {
     param([string]$Path = $script:StatePath, [switch]$ReadOnly)
     if (-not (Test-Path -LiteralPath $Path)) {
+        # Phase 6I-1.7B-2C (STEP 4, requirement 7): a missing main file is normally just "first run" -
+        # but Save-WatchdogState also maintains a "$Path.bak" mirror of the last successful save, and a
+        # TRUE first run never has one (nothing was ever saved yet). A backup that exists while the
+        # main file does not is strong evidence the main file was deleted out from under a RUNNING
+        # system (disk issue, an accidental "rm", AV quarantine, ...) - silently treating that as a
+        # fresh, never-locked state would quietly erase a real long-term lockout and any restart
+        # history with it. Reported as unavailable (fail-safe, no recovery this tick) instead, exactly
+        # like a corrupt file - the backup itself is never auto-restored (the same "never auto-recover,
+        # always fail-safe" rule as a corrupt main file; an operator must look and restore it by hand
+        # if that is the right call). No file is touched either way, so -ReadOnly changes nothing here.
+        $bak = "$Path.bak"
+        if (Test-Path -LiteralPath $bak) {
+            return @{ Available = $false; History = (New-EmptyHistory); LongTermState = (New-EmptyLongTermState); Note = "state file missing but a backup ($(Split-Path $bak -Leaf)) exists - possible accidental deletion, not auto-restored; investigate before any recovery resumes" }
+        }
         return @{ Available = $true; History = (New-EmptyHistory); LongTermState = (New-EmptyLongTermState); Note = 'no state file (first run)' }
     }
     try {
@@ -166,7 +219,8 @@ function Read-WatchdogState {
         }
         $corrupt = "$Path.corrupt"
         try { Move-Item -LiteralPath $Path -Destination $corrupt -Force -ErrorAction Stop } catch { }
-        return @{ Available = $false; History = (New-EmptyHistory); LongTermState = (New-EmptyLongTermState); Note = "state file unreadable, quarantined as $(Split-Path $corrupt -Leaf)" }
+        $bakHint = if (Test-Path -LiteralPath "$Path.bak") { " A backup ($(Split-Path "$Path.bak" -Leaf)) from the last successful save exists if manual recovery is needed - never auto-restored." } else { '' }
+        return @{ Available = $false; History = (New-EmptyHistory); LongTermState = (New-EmptyLongTermState); Note = "state file unreadable, quarantined as $(Split-Path $corrupt -Leaf).$bakHint" }
     }
 }
 
@@ -192,6 +246,14 @@ function Add-RestartRecord {
 # shape) - still one atomic Write-JsonAtomic call, same file. $LongTermState defaults to a fresh
 # empty one so any existing caller that does not yet track it (none left in this codebase, kept for
 # defensiveness) still produces a valid, parseable v2 file rather than erroring.
+# Phase 6I-1.7B-2C (STEP 4, requirement 8): Write-JsonAtomic's own exceptions (disk full, permission
+# denied, path gone) are deliberately NOT caught here - a save failure must reach the caller's own
+# try/catch (watch-running-ai.ps1 has one, logging WATCHDOG_ERROR and exiting non-zero) rather than
+# being swallowed, which would otherwise leave the operator believing a tick's restart/lockout
+# accounting was durably recorded when it was not. The "$Path.bak" mirror (requirement 7, see
+# Read-WatchdogState above) is written SECOND, after the real file succeeds - if the main write
+# throws, no stale "successful-looking" backup is produced; if the main write succeeds but the
+# backup write itself throws, that too propagates rather than being silently ignored.
 function Save-WatchdogState {
     param([Parameter(Mandatory)]$History, $LongTermState = (New-EmptyLongTermState), [string]$Path = $script:StatePath)
     $restarts = [ordered]@{}
@@ -200,7 +262,9 @@ function Save-WatchdogState {
     foreach ($c in $script:AllTrackedComponents) {
         $longTerm[$c] = [ordered]@{ failures = @($LongTermState[$c].Failures); lockedOutSince = $LongTermState[$c].LockedOutSince }
     }
-    Write-JsonAtomic -Path $Path -Object ([ordered]@{ version = 2; restarts = $restarts; longTerm = $longTerm })
+    $obj = [ordered]@{ version = 2; restarts = $restarts; longTerm = $longTerm }
+    Write-JsonAtomic -Path $Path -Object $obj
+    Write-JsonAtomic -Path "$Path.bak" -Object $obj
 }
 
 # ---- logging -------------------------------------------------------------------------------
@@ -531,113 +595,66 @@ function Get-OverallState {
 
 # ---- execution -----------------------------------------------------------------------------
 
-# Default action runner: reuses the idempotent start script (it only starts what is down). Unhealthy
-# managed processes are stopped gracefully first, and only when the PID file proves they are ours.
-# The external relay is a deliberate exception: it is started via its OWN dedicated script
-# (external\start-external-relay.ps1), never the full start-running-ai.ps1 - calling the full
-# orchestrator to recover just the relay would make a genuine Docker/PostgreSQL/connector/Spring
-# failure incorrectly block/fail relay recovery, which is exactly the coupling Phase 6I-1.1
-# requires NOT exist.
-function Invoke-RecoveryAction {
-    param([Parameter(Mandatory)]$Action, [int]$ConnectorPort = 8765, [int]$SpringPort = 8080)
-    if ($Action.PreStop) {
-        if ($Action.Component -eq 'connector') {
-            # Phase 6I-1.7B-1: ownership-aware stop, not the plain tracked-PID stop. This is the path
-            # that reaches an ORPHANED_MANAGED_PROCESS (tracked launcher already gone, its listener
-            # child still holding the port) - Get-TrackedProcessId alone would see nothing to stop and
-            # silently leave the port occupied, so the subsequent restart's bind would fail.
-            $tracked = Read-PidFile 'garmin-connector'
-            $ownership = Get-RunningAiConnectorOwnership -Port $ConnectorPort -TrackedPid $tracked -Markers (Get-ConnectorMarkers)
-            # Phase 6I-1.7B-2A: explicit per-verdict gate, not just "ManagedPids.Count -gt 0" - that
-            # condition is ALSO true for... nothing, actually: ManagedPids is empty for every
-            # non-manageable verdict by construction. The real 1.7B-1R gap was that when it WAS empty
-            # (DOWN, FOREIGN_PROCESS, UNKNOWN_OWNER, or a query error folded into UNKNOWN_OWNER), the
-            # old code simply skipped this whole block with no action and fell straight through to the
-            # start-running-ai.ps1 launch below - correct for DOWN (nothing to stop, safe to start),
-            # silently wrong for every other case (restarting a connector whose port ownership was
-            # never verified). Each case is now explicit.
-            switch ($ownership.Verdict) {
-                'DOWN' {
-                    # Confirmed nothing is listening - safe to fall through to the start attempt below.
-                }
-                { $_ -in @('SELF_OWNED', 'LAUNCHER_CHILD', 'ORPHANED_MANAGED_PROCESS', 'LAUNCHER_ALIVE_NO_LISTENER') } {
-                    if (@($ownership.ManagedPids).Count -eq 0) {
-                        # Should not happen given the verdict, but fail-safe regardless of why.
-                        Write-Step "Garmin connector pre-stop blocked: verdict $($ownership.Verdict) reported no manageable PIDs; refusing to restart."
-                        return $false
-                    }
-                    $stopResult = Stop-RunningAiConnectorManaged -Ownership $ownership -Port $ConnectorPort -TimeoutSec 15
-                    $cleanStop = Test-RunningAiConnectorStopWasClean -StopResult $stopResult
-                    if ($cleanStop) {
-                        Remove-PidFile 'garmin-connector'
-                    } else {
-                        # A failed/partial pre-stop must never be followed by starting a new connector
-                        # anyway - the port may still be occupied by what we just failed to clear. PID
-                        # file and metadata are preserved (not touched above) so the next tick sees the
-                        # real state; this tick's recovery step is reported as failed, same as any
-                        # other failed action, rather than silently launching start-running-ai.ps1
-                        # straight into a bind-in-use failure.
-                        Write-Step "Garmin connector pre-stop did not fully succeed (result=$($stopResult.Result), resultCode=$($stopResult.ResultCode), portFreed=$($stopResult.PortFreed), remaining=$($stopResult.RemainingPids -join ',')); not starting a new connector this tick."
-                        return $false
-                    }
-                }
-                default {
-                    # FOREIGN_PROCESS, UNKNOWN_OWNER, or any future verdict not explicitly handled
-                    # above - ownership of whatever is on the port could not be verified. Block the
-                    # restart entirely rather than risk starting a second connector alongside (or
-                    # instead of stopping) a process we cannot positively identify.
-                    Write-Step "Garmin connector pre-stop blocked: ownership verdict is $($ownership.Verdict) ($($ownership.Detail)); refusing to restart an unverified process on port $ConnectorPort."
-                    return $false
-                }
-            }
-        } elseif ($Action.Component -eq 'external-relay') {
-            $tracked = Get-TrackedProcessId 'external-relay' (Get-ExternalRelayMarkers)
-            if ($tracked) { Stop-TrackedProcess -ProcessId $tracked -Markers (Get-ExternalRelayMarkers) -TimeoutSec 15 | Out-Null; Remove-PidFile 'external-relay' }
-        } else {
-            $tracked = Get-TrackedProcessId 'spring' (Get-SpringMarkers)
-            if ($tracked) { Stop-TrackedProcess -ProcessId $tracked -Markers (Get-SpringMarkers) -TimeoutSec 30 | Out-Null; Remove-PidFile 'spring' }
-        }
+# ---- recovery outcome contract (Phase 6I-1.7B-2C, STEP 2) ---------------------------------------
+#
+# Replaces the plain boolean $Runner result with a richer, explicit outcome so budget/lockout
+# attribution can be precise: AttemptedComponent (what this action targeted) is NOT always the same
+# as ActualFailedComponent (what the evidence - an exit code, a verified ownership verdict - actually
+# points to), and only ActualFailedComponent may ever be charged a long-term failure (never a guess).
+#   ResultCode: SUCCESS | FAILED | BUSY | BLOCKED | TIMED_OUT | UNKNOWN_FAILURE
+#   ActualFailedComponent: the component the evidence identifies as actually broken, or $null when
+#     the action succeeded, was never attempted (BUSY), was refused (BLOCKED), or could not be
+#     identified (UNKNOWN_FAILURE).
+#   BudgetChargeComponent: which component's long-term failure count this outcome charges - $null for
+#     everything except FAILED/TIMED_OUT (see Get-RunningAiRecoveryBudgetChargeComponent below).
+#   Retryable: informational only (never read by this file's own logic) - $false only for SUCCESS.
+function New-RunningAiRecoveryOutcome {
+    param(
+        [Parameter(Mandatory)][string]$AttemptedComponent,
+        [Parameter(Mandatory)][ValidateSet('SUCCESS', 'FAILED', 'BUSY', 'BLOCKED', 'TIMED_OUT', 'UNKNOWN_FAILURE')][string]$ResultCode,
+        [string]$ActionPerformed = $null,
+        [string]$ActualFailedComponent = $null
+    )
+    $budgetChargeComponent = if ($ResultCode -in @('FAILED', 'TIMED_OUT')) { if ($ActualFailedComponent) { $ActualFailedComponent } else { $AttemptedComponent } } else { $null }
+    [pscustomobject]@{
+        AttemptedComponent     = $AttemptedComponent
+        ActionPerformed        = $ActionPerformed
+        ResultCode             = $ResultCode
+        ActualFailedComponent  = $ActualFailedComponent
+        BudgetChargeComponent  = $budgetChargeComponent
+        Retryable              = ($ResultCode -ne 'SUCCESS')
     }
+}
 
-    if ($Action.Component -eq 'external-relay') {
-        $script = Join-Path $PSScriptRoot 'external\start-external-relay.ps1'
-        $ps = (Get-Command powershell.exe).Source
-        $argLine = "-NoProfile -ExecutionPolicy Bypass -File $(Quote-Argument $script)"
-        $proc = Start-Process -FilePath $ps -ArgumentList $argLine -WindowStyle Hidden -PassThru
-        if (-not $proc.WaitForExit(60000)) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue; return $false }
-        if ($proc.ExitCode -ne 0) { Write-WatchdogLog -Component $Action.Component -State 'RECOVERING' -Reason $Action.Reason -Action $Action.Action -Result "EXIT_CODE_$($proc.ExitCode)" }
-        return ($proc.ExitCode -eq 0)
+# Normalizes whatever $Runner returned into the rich outcome shape above. A PLAIN BOOLEAN (every
+# existing test in Test-Watchdog.ps1 and most of Test-WatchdogRecoveryPolicy.ps1 injects one) is
+# mapped to the exact legacy meaning - $true = SUCCESS, charge nobody; $false = FAILED, charge
+# $AttemptedComponent - so none of those tests needed to change for this phase. A caller (the real
+# Invoke-RecoveryAction, or a new test exercising the new attribution rules directly) that already
+# returns a New-RunningAiRecoveryOutcome-shaped object is passed through unchanged.
+function ConvertTo-RunningAiRecoveryOutcome {
+    param($RunResult, [Parameter(Mandatory)][string]$AttemptedComponent)
+    if ($RunResult -is [bool]) {
+        if ($RunResult) { return (New-RunningAiRecoveryOutcome -AttemptedComponent $AttemptedComponent -ResultCode 'SUCCESS') }
+        return (New-RunningAiRecoveryOutcome -AttemptedComponent $AttemptedComponent -ResultCode 'FAILED' -ActualFailedComponent $AttemptedComponent)
     }
+    if ($RunResult -and $RunResult.PSObject.Properties['ResultCode']) { return $RunResult }
+    # Neither shape - fail safe rather than guess at meaning.
+    return (New-RunningAiRecoveryOutcome -AttemptedComponent $AttemptedComponent -ResultCode 'UNKNOWN_FAILURE')
+}
 
-    # Phase 6I-1.7B-2B (STEP B): start-running-ai.ps1 is a single shared script covering Docker ->
-    # PostgreSQL -> connector -> Spring, each with its OWN dedicated exit code (see RunningAI.Common.ps1
-    # $ExitCode) - it does NOT report "connector failed" vs "Spring failed" as one undifferentiated
-    # failure. Previously only ($proc.ExitCode -eq 0) was ever read, so a RESTART_CONNECTOR action that
-    # failed because of an unrelated Spring problem (a real-world possibility: the idempotent script
-    # tries every unhealthy layer, not just the one this action targeted) would get silently recorded
-    # as a connector failure - the real cause mislabeled. The actual failing layer is now logged
-    # explicitly via the exit code, distinct from which component the ATTEMPT (and its restart-budget
-    # consumption, unchanged - see Invoke-WatchdogRecovery) was charged to. A code this mapping does not
-    # recognize is logged as UNKNOWN_FAILURE rather than guessed.
-    $script = Join-Path $PSScriptRoot 'start-running-ai.ps1'
-    $ps = (Get-Command powershell.exe).Source
-    $argLine = "-NoProfile -ExecutionPolicy Bypass -File $(Quote-Argument $script) -ConnectorPort $ConnectorPort -SpringPort $SpringPort"
-    $proc = Start-Process -FilePath $ps -ArgumentList $argLine -WindowStyle Hidden -PassThru
-    if (-not $proc.WaitForExit(900000)) {
-        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-        Write-WatchdogLog -Component $Action.Component -State 'RECOVERING' -Reason $Action.Reason -Action $Action.Action -Result 'TIMED_OUT'
-        return $false
-    }
-    if ($proc.ExitCode -ne 0) {
-        $actualComponent = Get-RunningAiComponentFromExitCode -ExitCode $proc.ExitCode
-        $actualLabel = if ($actualComponent) { $actualComponent.ToUpper() } else { 'UNKNOWN_FAILURE' }
-        if ($actualComponent -and $actualComponent -ne $Action.Component) {
-            Write-WatchdogLog -Component $Action.Component -State 'RECOVERING' -Reason $Action.Reason -Action $Action.Action -Result "FAILED_ACTUAL_COMPONENT_$($actualLabel)_EXIT_$($proc.ExitCode)"
-        } else {
-            Write-WatchdogLog -Component $Action.Component -State 'RECOVERING' -Reason $Action.Reason -Action $Action.Action -Result "FAILED_EXIT_$($proc.ExitCode)"
-        }
-    }
-    return ($proc.ExitCode -eq 0)
+# Phase 6I-1.7B-2C (STEP 2, rule 6): re-observes the REAL runtime (never the test-injectable $Observe
+# used by the generic Invoke-WatchdogRecovery loop - this is called only from the real
+# Invoke-RecoveryAction helpers below, which talk to the real Docker/connector/Spring/relay) and
+# confirms the attempted component is now actually UP before a successful exit code is trusted. A
+# start/restart script can exit 0 while the component it targeted still never came up (for example
+# it raced a transient port conflict that resolved itself one second too late) - exit code alone is
+# not proof of success.
+function Test-RunningAiRecoverySucceeded {
+    param([Parameter(Mandatory)][string]$Component, [int]$ConnectorPort = 8765, [int]$SpringPort = 8080)
+    $o = Get-RuntimeObservation -ConnectorPort $ConnectorPort -SpringPort $SpringPort -RecheckDelaySec 0
+    $states = Get-ComponentStates $o -ConnectorPort $ConnectorPort
+    return ($states[$Component].State -eq 'UP')
 }
 
 # Maps a start-running-ai.ps1 exit code back to the component it actually describes - $ExitCode.Java
@@ -654,6 +671,178 @@ function Get-RunningAiComponentFromExitCode {
         $script:ExitCode.Spring        { 'spring' }
         $script:ExitCode.ExternalRelay { 'external-relay' }
         default                        { $null }
+    }
+}
+
+# Dispatches to the connector/spring (core-chain) or external-relay recovery helper. Both helpers
+# acquire the SAME runtime lock start-running-ai.ps1/stop-running-ai.ps1 use (Phase 6I-1.7B-2C, STEP
+# 1) for the FULL duration of PreStop + the subsequent Start/Restart - one serialized unit, mutually
+# exclusive with a manual start/stop touching the same runtime. A failed acquisition (another manual
+# run is mid-operation) returns BUSY immediately: no PreStop, no Start, nothing touched.
+function Invoke-RecoveryAction {
+    param([Parameter(Mandatory)]$Action, [int]$ConnectorPort = 8765, [int]$SpringPort = 8080, [int]$LockTimeoutSec = 10)
+    if ($Action.Component -eq 'external-relay') {
+        return (Invoke-RunningAiRelayRecoveryAction -Action $Action -LockTimeoutSec $LockTimeoutSec)
+    }
+    return (Invoke-RunningAiCoreRecoveryAction -Action $Action -ConnectorPort $ConnectorPort -SpringPort $SpringPort -LockTimeoutSec $LockTimeoutSec)
+}
+
+# Spawns $FilePath/$ArgumentList as a Watchdog-trusted child: RUNNING_AI_WATCHDOG_LOCK_INHERITED is
+# set to '1' on ONLY that child process's own environment block (never this process's $env:, which a
+# later, unrelated probe/action in the SAME Watchdog tick could otherwise inherit) - see
+# RunningAI.Common.ps1's Enter-RunningAiRuntimeLock for why this exists. Returns
+# @{ Proc; TimedOut }; caller is responsible for reading .ExitCode only when -not TimedOut.
+function Start-RunningAiWatchdogTrustedChild {
+    param([Parameter(Mandatory)][string]$FilePath, [Parameter(Mandatory)][string]$ArgumentList, [Parameter(Mandatory)][int]$TimeoutMs)
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $FilePath
+    $psi.Arguments = $ArgumentList
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+    $psi.EnvironmentVariables['RUNNING_AI_WATCHDOG_LOCK_INHERITED'] = '1'
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+    [void]$proc.Start()
+    $timedOut = -not $proc.WaitForExit($TimeoutMs)
+    if ($timedOut) { try { $proc.Kill() } catch { } }
+    [pscustomobject]@{ Proc = $proc; TimedOut = $timedOut }
+}
+
+# Connector/Spring (core-chain) recovery for ONE action: ownership-aware PreStop (connector) or plain
+# tracked-PID PreStop (Spring), then start-running-ai.ps1 as a trusted child, bundled under one lock
+# hold (Phase 6I-1.7B-2C, STEP 1).
+function Invoke-RunningAiCoreRecoveryAction {
+    param([Parameter(Mandatory)]$Action, [int]$ConnectorPort = 8765, [int]$SpringPort = 8080, [int]$LockTimeoutSec = 10)
+
+    $lock = Enter-RunningAiRuntimeLock -TimeoutSec $LockTimeoutSec
+    if (-not $lock) {
+        Write-Step "Recovery of $($Action.Component) deferred: another start/stop against this runtime is already in progress (BUSY). Nothing touched."
+        return (New-RunningAiRecoveryOutcome -AttemptedComponent $Action.Component -ResultCode 'BUSY' -ActionPerformed $Action.Action)
+    }
+    try {
+        if ($Action.PreStop) {
+            if ($Action.Component -eq 'connector') {
+                # Phase 6I-1.7B-1: ownership-aware stop, not the plain tracked-PID stop. This is the
+                # path that reaches an ORPHANED_MANAGED_PROCESS (tracked launcher already gone, its
+                # listener child still holding the port) - Get-TrackedProcessId alone would see
+                # nothing to stop and silently leave the port occupied, so the subsequent restart's
+                # bind would fail.
+                $tracked = Read-PidFile 'garmin-connector'
+                $ownership = Get-RunningAiConnectorOwnership -Port $ConnectorPort -TrackedPid $tracked -Markers (Get-ConnectorMarkers)
+                switch ($ownership.Verdict) {
+                    'DOWN' {
+                        # Confirmed nothing is listening - safe to fall through to the start attempt below.
+                    }
+                    { $_ -in @('SELF_OWNED', 'LAUNCHER_CHILD', 'ORPHANED_MANAGED_PROCESS', 'LAUNCHER_ALIVE_NO_LISTENER') } {
+                        if (@($ownership.ManagedPids).Count -eq 0) {
+                            Write-Step "Garmin connector pre-stop blocked: verdict $($ownership.Verdict) reported no manageable PIDs; refusing to restart."
+                            return (New-RunningAiRecoveryOutcome -AttemptedComponent 'connector' -ResultCode 'BLOCKED' -ActionPerformed $Action.Action)
+                        }
+                        $stopResult = Stop-RunningAiConnectorManaged -Ownership $ownership -Port $ConnectorPort -TimeoutSec 15
+                        $cleanStop = Test-RunningAiConnectorStopWasClean -StopResult $stopResult
+                        if ($cleanStop) {
+                            Remove-PidFile 'garmin-connector'
+                        } else {
+                            # A failed/partial pre-stop must never be followed by starting a new
+                            # connector anyway - the port may still be occupied by what we just failed
+                            # to clear. PID file and metadata are preserved (not touched above) so the
+                            # next tick sees the real state. Phase 6I-1.7B-2C: an incomplete pre-stop is
+                            # a genuine failure OF THE CONNECTOR, not a mere refusal - charged exactly
+                            # like any other connector recovery failure (rule 2: the actual failed
+                            # component, here unambiguously the connector itself).
+                            Write-Step "Garmin connector pre-stop did not fully succeed (result=$($stopResult.Result), resultCode=$($stopResult.ResultCode), portFreed=$($stopResult.PortFreed), remaining=$($stopResult.RemainingPids -join ',')); not starting a new connector this tick."
+                            return (New-RunningAiRecoveryOutcome -AttemptedComponent 'connector' -ResultCode 'FAILED' -ActionPerformed $Action.Action -ActualFailedComponent 'connector')
+                        }
+                    }
+                    default {
+                        # FOREIGN_PROCESS, UNKNOWN_OWNER, or any future verdict not explicitly handled
+                        # above - ownership of whatever is on the port could not be verified. A refusal
+                        # to act, not a failed attempt (rule 3: never charges the long-term budget).
+                        Write-Step "Garmin connector pre-stop blocked: ownership verdict is $($ownership.Verdict) ($($ownership.Detail)); refusing to restart an unverified process on port $ConnectorPort."
+                        return (New-RunningAiRecoveryOutcome -AttemptedComponent 'connector' -ResultCode 'BLOCKED' -ActionPerformed $Action.Action)
+                    }
+                }
+            } else {
+                $tracked = Get-TrackedProcessId 'spring' (Get-SpringMarkers)
+                if ($tracked) { Stop-TrackedProcess -ProcessId $tracked -Markers (Get-SpringMarkers) -TimeoutSec 30 | Out-Null; Remove-PidFile 'spring' }
+            }
+        }
+
+        # Phase 6I-1.7B-2B (STEP B) / 2C (STEP 2): start-running-ai.ps1 is a single shared script
+        # covering Docker -> PostgreSQL -> connector -> Spring, each with its OWN dedicated exit code
+        # (see RunningAI.Common.ps1 $ExitCode) - it does NOT report "connector failed" vs "Spring
+        # failed" as one undifferentiated failure. The actual failing layer is read from the exit code
+        # and, when identifiable, is the ONLY component a long-term failure is ever charged against
+        # (rule 2/7/9) - never the originally-planned $Action.Component when the two differ.
+        $script = Join-Path $PSScriptRoot 'start-running-ai.ps1'
+        $ps = (Get-Command powershell.exe).Source
+        $argLine = "-NoProfile -ExecutionPolicy Bypass -File $(Quote-Argument $script) -ConnectorPort $ConnectorPort -SpringPort $SpringPort"
+        $spawn = Start-RunningAiWatchdogTrustedChild -FilePath $ps -ArgumentList $argLine -TimeoutMs 900000
+        if ($spawn.TimedOut) {
+            Write-WatchdogLog -Component $Action.Component -State 'RECOVERING' -Reason $Action.Reason -Action $Action.Action -Result 'TIMED_OUT'
+            return (New-RunningAiRecoveryOutcome -AttemptedComponent $Action.Component -ResultCode 'TIMED_OUT' -ActionPerformed $Action.Action)
+        }
+        $exitCode = $spawn.Proc.ExitCode
+        if ($exitCode -ne 0) {
+            $actualComponent = Get-RunningAiComponentFromExitCode -ExitCode $exitCode
+            $actualLabel = if ($actualComponent) { $actualComponent.ToUpper() } else { 'UNKNOWN_FAILURE' }
+            if ($actualComponent -and $actualComponent -ne $Action.Component) {
+                Write-WatchdogLog -Component $Action.Component -State 'RECOVERING' -Reason $Action.Reason -Action $Action.Action -Result "FAILED_ACTUAL_COMPONENT_$($actualLabel)_EXIT_$($exitCode)"
+            } else {
+                Write-WatchdogLog -Component $Action.Component -State 'RECOVERING' -Reason $Action.Reason -Action $Action.Action -Result "FAILED_EXIT_$($exitCode)"
+            }
+            if ($actualComponent) {
+                return (New-RunningAiRecoveryOutcome -AttemptedComponent $Action.Component -ResultCode 'FAILED' -ActionPerformed $Action.Action -ActualFailedComponent $actualComponent)
+            }
+            # Rule 4: the exit code does not map to any known component - never guess, never charge.
+            return (New-RunningAiRecoveryOutcome -AttemptedComponent $Action.Component -ResultCode 'UNKNOWN_FAILURE' -ActionPerformed $Action.Action)
+        }
+        # Rule 5/6: exit 0 is not itself proof of success - re-observe the real runtime and require the
+        # attempted component to actually be UP before reporting SUCCESS.
+        if (-not (Test-RunningAiRecoverySucceeded -Component $Action.Component -ConnectorPort $ConnectorPort -SpringPort $SpringPort)) {
+            Write-WatchdogLog -Component $Action.Component -State 'RECOVERING' -Reason $Action.Reason -Action $Action.Action -Result 'FAILED_VERIFICATION_STILL_NOT_UP'
+            return (New-RunningAiRecoveryOutcome -AttemptedComponent $Action.Component -ResultCode 'FAILED' -ActionPerformed $Action.Action -ActualFailedComponent $Action.Component)
+        }
+        return (New-RunningAiRecoveryOutcome -AttemptedComponent $Action.Component -ResultCode 'SUCCESS' -ActionPerformed $Action.Action)
+    } finally {
+        Exit-RunningAiRuntimeLock $lock
+    }
+}
+
+# External relay recovery for ONE action: plain tracked-PID PreStop, then its OWN dedicated start
+# script (never the full start-running-ai.ps1 - see the module header comment on independence) as a
+# trusted child, bundled under one lock hold exactly like the core-chain helper above.
+function Invoke-RunningAiRelayRecoveryAction {
+    param([Parameter(Mandatory)]$Action, [int]$LockTimeoutSec = 10)
+
+    $lock = Enter-RunningAiRuntimeLock -TimeoutSec $LockTimeoutSec
+    if (-not $lock) {
+        Write-Step 'Recovery of external-relay deferred: another start/stop against this runtime is already in progress (BUSY). Nothing touched.'
+        return (New-RunningAiRecoveryOutcome -AttemptedComponent 'external-relay' -ResultCode 'BUSY' -ActionPerformed $Action.Action)
+    }
+    try {
+        if ($Action.PreStop) {
+            $tracked = Get-TrackedProcessId 'external-relay' (Get-ExternalRelayMarkers)
+            if ($tracked) { Stop-TrackedProcess -ProcessId $tracked -Markers (Get-ExternalRelayMarkers) -TimeoutSec 15 | Out-Null; Remove-PidFile 'external-relay' }
+        }
+
+        $script = Join-Path $PSScriptRoot 'external\start-external-relay.ps1'
+        $ps = (Get-Command powershell.exe).Source
+        $argLine = "-NoProfile -ExecutionPolicy Bypass -File $(Quote-Argument $script)"
+        $spawn = Start-RunningAiWatchdogTrustedChild -FilePath $ps -ArgumentList $argLine -TimeoutMs 60000
+        if ($spawn.TimedOut) {
+            Write-WatchdogLog -Component 'external-relay' -State 'RECOVERING' -Reason $Action.Reason -Action $Action.Action -Result 'TIMED_OUT'
+            return (New-RunningAiRecoveryOutcome -AttemptedComponent 'external-relay' -ResultCode 'TIMED_OUT' -ActionPerformed $Action.Action)
+        }
+        $exitCode = $spawn.Proc.ExitCode
+        if ($exitCode -ne 0) {
+            Write-WatchdogLog -Component 'external-relay' -State 'RECOVERING' -Reason $Action.Reason -Action $Action.Action -Result "EXIT_CODE_$exitCode"
+            return (New-RunningAiRecoveryOutcome -AttemptedComponent 'external-relay' -ResultCode 'FAILED' -ActionPerformed $Action.Action -ActualFailedComponent 'external-relay')
+        }
+        return (New-RunningAiRecoveryOutcome -AttemptedComponent 'external-relay' -ResultCode 'SUCCESS' -ActionPerformed $Action.Action)
+    } finally {
+        Exit-RunningAiRuntimeLock $lock
     }
 }
 
@@ -691,7 +880,29 @@ function Invoke-WatchdogRecovery {
     # recovery completely independently. The core chain still stops at its first failure (dependency
     # order matters: Docker before Postgres before connector before Spring) - the relay loop's own
     # failure never affects the core chain and vice versa.
-    $steps = @(); $coreFailed = $false; $relayFailed = $false
+    # Phase 6I-1.7B-2C (STEP 1/2): $runResult is normalized through ConvertTo-RunningAiRecoveryOutcome,
+    # so a plain boolean (every existing injected test $Runner) and the real, rich
+    # Invoke-RecoveryAction outcome are both handled by the SAME logic below, with the plain-boolean
+    # case reproducing the exact pre-2C attribution (charge $next.Component on $false) byte for byte.
+    #
+    # BUSY (the lock is held by a concurrent manual start/stop) is NOT a failure: nothing was
+    # attempted, so neither the short-term restart budget (Add-RestartRecord) nor the long-term
+    # failure count is charged, and $coreFailed/$relayFailed stay false - only a separate
+    # $coreBusy/$relayBusy flag (surfaced as .Busy on the return value) records it. BLOCKED (an
+    # explicit refusal to act, e.g. unverified connector ownership) and UNKNOWN_FAILURE (the actual
+    # failed component could not be identified) both still stop this tick's loop (rule 5: never report
+    # a non-SUCCESS run as if it recovered) but likewise never charge the long-term budget (rules 3/4)
+    # - only FAILED/TIMED_OUT do, and only against .BudgetChargeComponent (rules 2/7/9), which is the
+    # ACTUAL failed component when the evidence identifies one, never blindly $next.Component.
+    #
+    # Every Add-RestartRecord/Add-LongTermFailure call this invocation actually makes is ALSO recorded
+    # into $deltas (Phase 6I-1.7B-2C, STEP 4): $History/$LongTermState are still mutated in place
+    # exactly as before (existing callers that only look at those two objects afterward keep working
+    # unchanged), but a caller that must persist against a FRESHLY re-read copy of watchdog-state.json
+    # (to avoid clobbering a concurrent clear-watchdog-lockout.ps1 -Force - see watch-running-ai.ps1)
+    # can replay just these deltas onto that fresh copy instead of trusting this whole stale snapshot.
+    $steps = @(); $coreFailed = $false; $relayFailed = $false; $coreBusy = $false; $relayBusy = $false
+    $restartDeltas = @(); $longTermFailureDeltas = @()
 
     for ($i = 0; $i -lt $MaxSteps; $i++) {
         $states = Get-ComponentStates (& $Observe) -ConnectorPort $ConnectorPort
@@ -699,22 +910,18 @@ function Invoke-WatchdogRecovery {
         $coreActions = @($plan.Actions | Where-Object { $_.Component -in $script:Components })
         if ($coreActions.Count -eq 0) { break }
         $next = $coreActions[0]
+        $outcome = ConvertTo-RunningAiRecoveryOutcome -RunResult (& $Runner $next) -AttemptedComponent $next.Component
+        $steps += [pscustomobject]@{ Component = $next.Component; Action = $next.Action; Reason = $next.Reason; Result = $outcome.ResultCode }
+        if ($outcome.ResultCode -eq 'BUSY') { $coreBusy = $true; break }
         Add-RestartRecord -History $History -Component $next.Component -Now $Now
-        $runResult = & $Runner $next
-        $ok = [bool]$runResult
-        $steps += [pscustomobject]@{ Component = $next.Component; Action = $next.Action; Reason = $next.Reason; Result = $(if ($ok) { 'SUCCESS' } else { 'FAILED' }) }
-        if (-not $ok) {
-            # Phase 6I-1.7B-2B (STEP C): a FAILURE (not merely an attempt) counts toward the long-term
-            # lockout - recorded regardless of whether $LongTermState was supplied (a $null one is
-            # simply discarded by these functions' own no-op-on-null guards... actually both REQUIRE a
-            # non-null state, so only record when one was actually given, preserving every existing
-            # caller that does not pass this parameter at all).
-            if ($LongTermState) {
-                Add-LongTermFailure -LongTermState $LongTermState -Component $next.Component -Now $Now
-                Update-RunningAiLongTermLockout -LongTermState $LongTermState -Component $next.Component -Now $Now -WindowHours $LongTermWindowHours -MaxFailures $LongTermMaxFailures
-            }
-            $coreFailed = $true; break
+        $restartDeltas += [pscustomobject]@{ Component = $next.Component; Now = $Now }
+        if ($outcome.ResultCode -eq 'SUCCESS') { continue }
+        if ($LongTermState -and $outcome.BudgetChargeComponent) {
+            Add-LongTermFailure -LongTermState $LongTermState -Component $outcome.BudgetChargeComponent -Now $Now
+            Update-RunningAiLongTermLockout -LongTermState $LongTermState -Component $outcome.BudgetChargeComponent -Now $Now -WindowHours $LongTermWindowHours -MaxFailures $LongTermMaxFailures
+            $longTermFailureDeltas += [pscustomobject]@{ Component = $outcome.BudgetChargeComponent; Now = $Now }
         }
+        $coreFailed = $true; break
     }
 
     for ($i = 0; $i -lt $MaxSteps; $i++) {
@@ -723,19 +930,73 @@ function Invoke-WatchdogRecovery {
         $independentActions = @($plan.Actions | Where-Object { $_.Component -in $script:IndependentComponents })
         if ($independentActions.Count -eq 0) { break }
         $next = $independentActions[0]
+        $outcome = ConvertTo-RunningAiRecoveryOutcome -RunResult (& $Runner $next) -AttemptedComponent $next.Component
+        $steps += [pscustomobject]@{ Component = $next.Component; Action = $next.Action; Reason = $next.Reason; Result = $outcome.ResultCode }
+        if ($outcome.ResultCode -eq 'BUSY') { $relayBusy = $true; break }
         Add-RestartRecord -History $History -Component $next.Component -Now $Now
-        $ok = [bool](& $Runner $next)
-        $steps += [pscustomobject]@{ Component = $next.Component; Action = $next.Action; Reason = $next.Reason; Result = $(if ($ok) { 'SUCCESS' } else { 'FAILED' }) }
-        if (-not $ok) {
-            if ($LongTermState) {
-                Add-LongTermFailure -LongTermState $LongTermState -Component $next.Component -Now $Now
-                Update-RunningAiLongTermLockout -LongTermState $LongTermState -Component $next.Component -Now $Now -WindowHours $LongTermWindowHours -MaxFailures $LongTermMaxFailures
-            }
-            $relayFailed = $true; break
+        $restartDeltas += [pscustomobject]@{ Component = $next.Component; Now = $Now }
+        if ($outcome.ResultCode -eq 'SUCCESS') { continue }
+        if ($LongTermState -and $outcome.BudgetChargeComponent) {
+            Add-LongTermFailure -LongTermState $LongTermState -Component $outcome.BudgetChargeComponent -Now $Now
+            Update-RunningAiLongTermLockout -LongTermState $LongTermState -Component $outcome.BudgetChargeComponent -Now $Now -WindowHours $LongTermWindowHours -MaxFailures $LongTermMaxFailures
+            $longTermFailureDeltas += [pscustomobject]@{ Component = $outcome.BudgetChargeComponent; Now = $Now }
         }
+        $relayFailed = $true; break
     }
 
-    [pscustomobject]@{ Steps = $steps; Failed = ($coreFailed -or $relayFailed) }
+    [pscustomobject]@{
+        Steps  = $steps
+        Failed = ($coreFailed -or $relayFailed)
+        Busy   = ($coreBusy -or $relayBusy)
+        Deltas = [pscustomobject]@{ Restarts = $restartDeltas; LongTermFailures = $longTermFailureDeltas }
+    }
+}
+
+# Phase 6I-1.7B-2C (STEP 4): the ONLY safe way to persist a Watchdog tick's own restart/long-term-
+# failure deltas (see Invoke-WatchdogRecovery's ".Deltas" above) without a lost-update race against a
+# concurrent clear-watchdog-lockout.ps1 -Force: acquire the state-file lock, re-read the CURRENT
+# on-disk state fresh (never trust the in-memory copy taken at tick start, which may already be stale
+# by the time a possibly minutes-long tick finishes), re-apply the SAME window pruning the tick itself
+# applied at its start (so the fresh base is consistent with $Now/$WindowMinutes/$LongTermWindowHours),
+# replay only this tick's OWN deltas onto that fresh base, and save once. If the fresh read itself is
+# unavailable (corrupt/missing-with-backup - Read-WatchdogState's own fail-safe cases), nothing is
+# written at all rather than guessing: this tick's deltas are lost for the state file (though still
+# visible in this run's own log/status output), which is the safe trade-off per requirement 6 ("손상된
+# 상태 파일은 자동 복구하지 않고 Fail-safe") - never fabricate a merge target. A lock acquisition
+# failure (another writer will not finish in time) is reported the same way: nothing written, loudly.
+function Save-RunningAiWatchdogStateReconciled {
+    param(
+        [Parameter(Mandatory)]$Deltas,
+        [Parameter(Mandatory)][datetime]$Now,
+        [int]$WindowMinutes = 10,
+        [int]$LongTermWindowHours = 24,
+        [int]$LongTermMaxFailures = 6,
+        [string]$Path = $script:StatePath,
+        [int]$LockTimeoutSec = 10
+    )
+    $lock = Enter-RunningAiWatchdogStateLock -TimeoutSec $LockTimeoutSec
+    if (-not $lock) {
+        Write-Step 'WARNING: could not acquire the watchdog-state.json write lock within the timeout; this tick''s restart/long-term-failure accounting was NOT persisted (state file left exactly as it was).'
+        return $false
+    }
+    try {
+        $fresh = Read-WatchdogState -Path $Path
+        if (-not $fresh.Available) {
+            Write-Step "WARNING: watchdog-state.json could not be re-read before saving ($($fresh.Note)); this tick's restart/long-term-failure accounting was NOT persisted."
+            return $false
+        }
+        Update-HistoryWindow -History $fresh.History -Now $Now -WindowMinutes $WindowMinutes
+        Update-LongTermFailureWindow -LongTermState $fresh.LongTermState -Now $Now -WindowHours $LongTermWindowHours
+        foreach ($d in @($Deltas.Restarts)) { Add-RestartRecord -History $fresh.History -Component $d.Component -Now $d.Now }
+        foreach ($d in @($Deltas.LongTermFailures)) {
+            Add-LongTermFailure -LongTermState $fresh.LongTermState -Component $d.Component -Now $d.Now
+            Update-RunningAiLongTermLockout -LongTermState $fresh.LongTermState -Component $d.Component -Now $d.Now -WindowHours $LongTermWindowHours -MaxFailures $LongTermMaxFailures
+        }
+        Save-WatchdogState -History $fresh.History -LongTermState $fresh.LongTermState -Path $Path
+        return $true
+    } finally {
+        Exit-RunningAiWatchdogStateLock $lock
+    }
 }
 
 # ---- scheduled task definition (built in memory; registering is the installer's job) ------------

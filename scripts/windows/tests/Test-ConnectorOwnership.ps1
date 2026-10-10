@@ -483,11 +483,15 @@ Check 'Test-RunningAiConnectorStopWasClean requires PortFreed, not RemainingPids
 # launch when the stop was not clean - a full process-level reproduction of a genuinely failed
 # pre-stop would require forcing a real, timed ownership change, which (like true PID reuse) cannot
 # be deterministically engineered against real OS processes.
-Check 'Invoke-RecoveryAction never starts a new connector after a non-clean connector pre-stop (source check)' {
+# Phase 6I-1.7B-2C: the connector PreStop/Start logic moved from Invoke-RecoveryAction (now a thin
+# dispatcher) into Invoke-RunningAiCoreRecoveryAction, and a blocked/failed pre-stop now returns a
+# BLOCKED/FAILED outcome object (New-RunningAiRecoveryOutcome) instead of a plain $false - these
+# source checks were updated to match the new function/shape, not the behavior they assert.
+Check 'Invoke-RunningAiCoreRecoveryAction never starts a new connector after a non-clean connector pre-stop (source check)' {
     $src = Get-Content (Join-Path $scripts 'RunningAI.Watchdog.ps1') -Raw
-    $fn = [regex]::Match($src, '(?s)function Invoke-RecoveryAction \{.*?\n\}\r?\n').Value
+    $fn = [regex]::Match($src, '(?s)function Invoke-RunningAiCoreRecoveryAction \{.*?\n\}\r?\n').Value
     ($fn -match 'Test-RunningAiConnectorStopWasClean') -and
-    ($fn -match '(?s)Test-RunningAiConnectorStopWasClean.*?return \$false')
+    ($fn -match "(?s)Test-RunningAiConnectorStopWasClean.*?ResultCode 'FAILED'")
 }
 
 # STEP F #14: Send-CtrlC.ps1 must refuse (exit 2) rather than signal when a genuinely unmanaged
@@ -558,26 +562,26 @@ Check 'Send-CtrlC.ps1 omitting -AllowedProcessIds performs the legacy unconditio
 # start-running-ai.ps1 launch a few lines later (Docker/PostgreSQL/the real connector) - exactly the
 # kind of "touches real services from a test" this work order forbids. Source inspection proves the
 # gate exists without ever risking that fall-through.
-Check 'Invoke-RecoveryAction connector PreStop: DOWN proceeds, every other verdict blocks (source check)' {
+Check 'Invoke-RunningAiCoreRecoveryAction connector PreStop: DOWN proceeds, every other verdict blocks (source check)' {
     $src = Get-Content (Join-Path $scripts 'RunningAI.Watchdog.ps1') -Raw
-    $fn = [regex]::Match($src, "(?s)function Invoke-RecoveryAction \{.*?\n\}\r?\n").Value
-    $connectorBlock = [regex]::Match($fn, "(?s)if \(\`$Action\.Component -eq 'connector'\) \{.*?\n        \} elseif").Value
+    $fn = [regex]::Match($src, "(?s)function Invoke-RunningAiCoreRecoveryAction \{.*?\n\}\r?\n").Value
+    $connectorBlock = [regex]::Match($fn, "(?s)if \(\`$Action\.Component -eq 'connector'\) \{.*?\n            \} else \{").Value
     # 'DOWN' case has an empty/comment-only body (falls through to the start attempt below).
     $downCase = [regex]::Match($connectorBlock, "(?s)'DOWN' \{(.*?)\}\r?\n\s*\{")
     # Every other explicitly-manageable verdict requires ManagedPids non-empty, else blocks.
-    $hasManagedPidsGuard = $connectorBlock -match "(?s)ManagedPids\).Count -eq 0.*?return \`$false"
+    $hasManagedPidsGuard = $connectorBlock -match "(?s)ManagedPids\).Count -eq 0.*?ResultCode 'BLOCKED'"
     # The catch-all default (FOREIGN_PROCESS, UNKNOWN_OWNER, anything unrecognized) blocks too.
-    $hasDefaultBlock = $connectorBlock -match "(?s)default \{.*?return \`$false"
+    $hasDefaultBlock = $connectorBlock -match "(?s)default \{.*?ResultCode 'BLOCKED'"
     ($connectorBlock -match "'DOWN' \{") -and $hasManagedPidsGuard -and $hasDefaultBlock
 }
 
 # STEP 1 item 3 / STEP 5 item 4: the DOWN case's own body must contain no stop/block logic at all -
 # confirms it is a deliberate pass-through, not an accidental empty case that happens to work.
-Check 'Invoke-RecoveryAction connector PreStop: DOWN case body is a pure pass-through comment, no action (source check)' {
+Check 'Invoke-RunningAiCoreRecoveryAction connector PreStop: DOWN case body is a pure pass-through comment, no action (source check)' {
     $src = Get-Content (Join-Path $scripts 'RunningAI.Watchdog.ps1') -Raw
-    $fn = [regex]::Match($src, "(?s)function Invoke-RecoveryAction \{.*?\n\}\r?\n").Value
+    $fn = [regex]::Match($src, "(?s)function Invoke-RunningAiCoreRecoveryAction \{.*?\n\}\r?\n").Value
     $downBody = [regex]::Match($fn, "(?s)'DOWN' \{(.*?)\}\r?\n\s*\{ \`$_ -in").Groups[1].Value
-    (-not [string]::IsNullOrWhiteSpace($downBody)) -and ($downBody -notmatch 'Stop-RunningAiConnectorManaged|return \$false')
+    (-not [string]::IsNullOrWhiteSpace($downBody)) -and ($downBody -notmatch 'Stop-RunningAiConnectorManaged|ResultCode ''(BLOCKED|FAILED)''')
 }
 
 # STEP 5 #5: classification-time identity (Ownership.ManagedPidSnapshot), not merely "is this PID

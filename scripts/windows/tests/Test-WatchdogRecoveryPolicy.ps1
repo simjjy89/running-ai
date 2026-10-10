@@ -483,10 +483,38 @@ Start-Sleep -Seconds 60   # never releases - this process gets force-killed inst
     }
 }
 
-Check 'RunningAI.Watchdog.ps1 and watch-running-ai.ps1 never acquire the runtime lock themselves (source check - avoids the Watchdog-holds-lock-while-child-waits deadlock)' {
+# Phase 6I-1.7B-2C (STEP 1) supersedes the original 2B rule this test enforced ("Watchdog never
+# acquires this lock at all"): RunningAI.Watchdog.ps1's own recovery helpers now DO acquire it, for
+# the bundled PreStop+Start/Restart duration. The deadlock risk that rule existed to avoid still
+# cannot be allowed to happen, so what must be true now instead is: (1) watch-running-ai.ps1 ITSELF
+# still never acquires it directly (only the Watchdog.ps1 recovery helpers do, always through the
+# lock-then-spawn-trusted-child pattern); (2) EVERY Enter-RunningAiRuntimeLock call in
+# RunningAI.Watchdog.ps1 is immediately followed by its own try/finally releasing it (never held open
+# indefinitely); (3) every process this file spawns while holding that lock goes through
+# Start-RunningAiWatchdogTrustedChild (which sets RUNNING_AI_WATCHDOG_LOCK_INHERITED on the child), and
+# this file contains no OTHER raw Start-Process call to start-running-ai.ps1 or
+# external\start-external-relay.ps1 that could re-acquire the same lock and deadlock/spuriously-BUSY
+# against its own parent.
+Check 'watch-running-ai.ps1 never acquires the runtime lock directly; only RunningAI.Watchdog.ps1''s lock-then-spawn-trusted-child helpers do (source check)' {
     $watchdogSrc = Get-Content (Join-Path $scripts 'RunningAI.Watchdog.ps1') -Raw
     $watchSrc = Get-Content (Join-Path $scripts 'watch-running-ai.ps1') -Raw
-    ($watchdogSrc -notmatch 'Enter-RunningAiRuntimeLock') -and ($watchSrc -notmatch 'Enter-RunningAiRuntimeLock')
+    $enterCount = ([regex]::Matches($watchdogSrc, '\$lock = Enter-RunningAiRuntimeLock')).Count
+    $finallyExitCount = ([regex]::Matches($watchdogSrc, '(?s)finally \{\s*Exit-RunningAiRuntimeLock \$lock\s*\}')).Count
+    ($watchSrc -notmatch 'Enter-RunningAiRuntimeLock') -and
+    ($enterCount -eq 2) -and ($finallyExitCount -eq 2) -and
+    ($watchdogSrc -notmatch '(?s)Start-Process -FilePath \$ps -ArgumentList \$argLine -WindowStyle Hidden -PassThru\b(?!.{0,400}Start-RunningAiWatchdogTrustedChild)')
+}
+
+# Every spawn of start-running-ai.ps1 or the relay's own start script FROM INSIDE a lock-holding
+# recovery helper must go through the trusted-child path (sets RUNNING_AI_WATCHDOG_LOCK_INHERITED on
+# that one child only) - never a plain Start-Process, which would let the child try to re-acquire the
+# SAME lock its own parent is holding.
+Check 'Invoke-RunningAiCoreRecoveryAction and Invoke-RunningAiRelayRecoveryAction spawn their child scripts ONLY via Start-RunningAiWatchdogTrustedChild (source check)' {
+    $src = Get-Content (Join-Path $scripts 'RunningAI.Watchdog.ps1') -Raw
+    $coreFn = [regex]::Match($src, '(?s)function Invoke-RunningAiCoreRecoveryAction \{.*?\n\}\r?\n').Value
+    $relayFn = [regex]::Match($src, '(?s)function Invoke-RunningAiRelayRecoveryAction \{.*?\n\}\r?\n').Value
+    ($coreFn -match 'Start-RunningAiWatchdogTrustedChild') -and ($relayFn -match 'Start-RunningAiWatchdogTrustedChild') -and
+    ($coreFn -notmatch 'Start-Process -FilePath \$ps') -and ($relayFn -notmatch 'Start-Process -FilePath \$ps')
 }
 
 Check 'start-running-ai.ps1 and stop-running-ai.ps1 both acquire and release the runtime lock (source check)' {
@@ -509,6 +537,398 @@ Check 'Get-RunningAiComponentFromExitCode maps every start-running-ai.ps1 layer 
     (Get-RunningAiComponentFromExitCode -ExitCode $ExitCode.Spring) -eq 'spring' -and
     (Get-RunningAiComponentFromExitCode -ExitCode $ExitCode.ExternalRelay) -eq 'external-relay' -and
     ($null -eq (Get-RunningAiComponentFromExitCode -ExitCode 999))
+}
+
+# ======================================================================================
+# Phase 6I-1.7B-2C, STEP 1/5: Watchdog PreStop+Start/Restart vs manual start/stop mutual exclusion.
+# A REAL separate process holds the real Enter-RunningAiRuntimeLock (same pattern as the 2B
+# contention test above) while THIS process calls the real Invoke-RunningAiCoreRecoveryAction /
+# Invoke-RunningAiRelayRecoveryAction directly - both must report BUSY and touch nothing (no PID
+# file, no process, no start-running-ai.ps1/external start script spawned).
+# ======================================================================================
+
+function New-RunningAiLockHolderProcess {
+    param([string]$Dir, [int]$HoldSeconds = 6)
+    $psExe = (Get-Command powershell.exe).Source
+    $holderScript = Join-Path $Dir ('holder-' + [guid]::NewGuid().ToString('N') + '.ps1')
+    @"
+. `"`$env:RA_TEST_COMMON_PATH`"
+`$m = Enter-RunningAiRuntimeLock -TimeoutSec 5
+if (-not `$m) { exit 9 }
+Start-Sleep -Seconds $HoldSeconds
+Exit-RunningAiRuntimeLock `$m
+"@ | Set-Content -LiteralPath $holderScript -Encoding ascii
+    $env:RA_TEST_COMMON_PATH = Join-Path $scripts 'RunningAI.Common.ps1'
+    Start-Process -FilePath $psExe -ArgumentList @('-NoProfile', '-WindowStyle', 'Hidden', '-File', $holderScript) -WindowStyle Hidden -PassThru
+}
+
+# Calling Invoke-RunningAiCoreRecoveryAction/Invoke-RunningAiRelayRecoveryAction IN-PROCESS here would
+# be unsafe: this test FILE already dot-sourced RunningAI.Watchdog.ps1 at its own top, before
+# With-TempRuntimeDir ever sets RUNNING_AI_TEST_RUNTIME_DIR - so this process's own $script:RuntimeDir
+# (and the runtime-lock name derived from it) is permanently bound to the REAL dev-worktree ".runtime"
+# path, exactly like the 2B lock-contention test's own documented gotcha. Calling the action function
+# directly here would therefore use the REAL runtime lock name (harmless by itself) but, if the BUSY
+# check did not fire, would fall through toward a REAL start-running-ai.ps1 spawn - precisely what this
+# whole test suite exists to never risk. The action attempt therefore ALSO runs as its own freshly
+# spawned process (dot-sourcing fresh, after RUNNING_AI_TEST_RUNTIME_DIR is set in its inherited
+# environment) and is given clearly-fake, high, random ConnectorPort/SpringPort values as a second,
+# independent safety net - even in the extremely unlikely case BUSY does not fire, nothing would touch
+# a real port. The outcome is serialized to a small JSON result file and read back here.
+function Invoke-RunningAiRecoveryActionInIsolatedProcess {
+    param(
+        [string]$Dir,
+        [Parameter(Mandatory)][ValidateSet('Core', 'Relay')][string]$Kind,
+        [Parameter(Mandatory)]$Action,
+        [int]$LockTimeoutSec = 1
+    )
+    $resultPath = Join-Path $Dir ('outcome-' + [guid]::NewGuid().ToString('N') + '.json')
+    $actionJson = ($Action | ConvertTo-Json -Compress)
+    $connectorPort = Get-Random -Minimum 20000 -Maximum 30000
+    $springPort = Get-Random -Minimum 30000 -Maximum 40000
+    $invocation = if ($Kind -eq 'Core') {
+        "Invoke-RunningAiCoreRecoveryAction -Action `$action -ConnectorPort $connectorPort -SpringPort $springPort -LockTimeoutSec $LockTimeoutSec"
+    } else {
+        "Invoke-RunningAiRelayRecoveryAction -Action `$action -LockTimeoutSec $LockTimeoutSec"
+    }
+    $runnerScript = Join-Path $Dir ('attempt-' + [guid]::NewGuid().ToString('N') + '.ps1')
+    @"
+. `"`$env:RA_TEST_WATCHDOG_PATH`"
+`$action = '$actionJson' | ConvertFrom-Json
+`$outcome = $invocation
+`$outcome | ConvertTo-Json -Compress | Set-Content -LiteralPath `$env:RA_TEST_RESULT_PATH -Encoding ascii
+"@ | Set-Content -LiteralPath $runnerScript -Encoding ascii
+    $psExe = (Get-Command powershell.exe).Source
+    $env:RA_TEST_WATCHDOG_PATH = Join-Path $scripts 'RunningAI.Watchdog.ps1'
+    $env:RA_TEST_RESULT_PATH = $resultPath
+    try {
+        Start-Process -FilePath $psExe -ArgumentList @('-NoProfile', '-WindowStyle', 'Hidden', '-File', $runnerScript) -WindowStyle Hidden -Wait
+        if (Test-Path -LiteralPath $resultPath) { Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json } else { $null }
+    } finally {
+        Remove-Item Env:\RA_TEST_WATCHDOG_PATH, Env:\RA_TEST_RESULT_PATH -ErrorAction SilentlyContinue
+    }
+}
+
+Check 'Watchdog core-chain recovery (PreStop+Start) reports BUSY and touches nothing while a manual start/stop holds the runtime lock' {
+    With-TempRuntimeDir {
+        param($dir)
+        $holder = $null
+        try {
+            $holder = New-RunningAiLockHolderProcess -Dir $dir -HoldSeconds 6
+            Start-Sleep -Seconds 2
+            $action = [pscustomobject]@{ Component = 'spring'; Action = 'RESTART_SPRING'; Reason = 'PROCESS_ALIVE_HEALTH_FAILING'; PreStop = $true }
+            $outcome = Invoke-RunningAiRecoveryActionInIsolatedProcess -Dir $dir -Kind Core -Action $action
+            # Checked via the ISOLATED temp runtime dir's own file (never Get-TrackedProcessId in THIS
+            # process, which is permanently bound to the REAL dev-worktree runtime dir - see the helper
+            # function's own comment above for why).
+            ($null -ne $outcome) -and ($outcome.ResultCode -eq 'BUSY') -and ($outcome.AttemptedComponent -eq 'spring') -and ($null -eq $outcome.BudgetChargeComponent) -and
+            (-not (Test-Path -LiteralPath (Join-Path $dir 'spring.pid')))
+        } finally {
+            if ($holder) { Stop-Process -Id $holder.Id -Force -ErrorAction SilentlyContinue }
+            Remove-Item Env:\RA_TEST_COMMON_PATH -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Check 'Watchdog connector recovery reports BUSY (not FAILED/BLOCKED) while a manual start/stop holds the runtime lock (covers both PreStop-vs-Stop and Start-vs-Start conflicts)' {
+    With-TempRuntimeDir {
+        param($dir)
+        $holder = $null
+        try {
+            $holder = New-RunningAiLockHolderProcess -Dir $dir -HoldSeconds 6
+            Start-Sleep -Seconds 2
+            $action = [pscustomobject]@{ Component = 'connector'; Action = 'START_CONNECTOR'; Reason = 'PROCESS_DEAD'; PreStop = $false }
+            $outcome = Invoke-RunningAiRecoveryActionInIsolatedProcess -Dir $dir -Kind Core -Action $action
+            ($null -ne $outcome) -and ($outcome.ResultCode -eq 'BUSY') -and ($outcome.ActionPerformed -eq 'START_CONNECTOR') -and ($outcome.Retryable)
+        } finally {
+            if ($holder) { Stop-Process -Id $holder.Id -Force -ErrorAction SilentlyContinue }
+            Remove-Item Env:\RA_TEST_COMMON_PATH -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Check 'Relay recovery reports BUSY and touches nothing while a manual stop (same runtime lock) is in progress' {
+    With-TempRuntimeDir {
+        param($dir)
+        $holder = $null
+        try {
+            $holder = New-RunningAiLockHolderProcess -Dir $dir -HoldSeconds 6
+            Start-Sleep -Seconds 2
+            $action = [pscustomobject]@{ Component = 'external-relay'; Action = 'START_EXTERNAL_RELAY'; Reason = 'PROCESS_DEAD'; PreStop = $false }
+            $outcome = Invoke-RunningAiRecoveryActionInIsolatedProcess -Dir $dir -Kind Relay -Action $action
+            ($null -ne $outcome) -and ($outcome.ResultCode -eq 'BUSY') -and ($outcome.AttemptedComponent -eq 'external-relay') -and
+            (-not (Test-Path -LiteralPath (Join-Path $dir 'external-relay.pid')))
+        } finally {
+            if ($holder) { Stop-Process -Id $holder.Id -Force -ErrorAction SilentlyContinue }
+            Remove-Item Env:\RA_TEST_COMMON_PATH -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+# ---- deadlock avoidance: the trusted-child inheritance mechanism itself -------------------------
+
+Check 'Enter-RunningAiRuntimeLock returns INHERITED (no wait at all) when RUNNING_AI_WATCHDOG_LOCK_INHERITED=1, and Exit- is a safe no-op on it' {
+    $orig = $env:RUNNING_AI_WATCHDOG_LOCK_INHERITED
+    try {
+        $env:RUNNING_AI_WATCHDOG_LOCK_INHERITED = '1'
+        $m = Enter-RunningAiRuntimeLock -TimeoutSec 1
+        $isInherited = ($m -eq 'INHERITED')
+        Exit-RunningAiRuntimeLock $m   # must not throw
+        $isInherited
+    } finally {
+        if ($null -eq $orig) { Remove-Item Env:\RUNNING_AI_WATCHDOG_LOCK_INHERITED -ErrorAction SilentlyContinue } else { $env:RUNNING_AI_WATCHDOG_LOCK_INHERITED = $orig }
+    }
+}
+
+Check 'Start-RunningAiWatchdogTrustedChild sets RUNNING_AI_WATCHDOG_LOCK_INHERITED on the CHILD only, never leaking into this process''s own $env:' {
+    With-TempRuntimeDir {
+        param($dir)
+        $marker = Join-Path $dir 'inherited-marker.txt'
+        $childScript = Join-Path $dir 'dump-inherited.ps1'
+        @"
+`$v = `$env:RUNNING_AI_WATCHDOG_LOCK_INHERITED
+if (`$null -eq `$v) { `$v = '<unset>' }
+Set-Content -LiteralPath '$marker' -Value `$v -Encoding ascii
+"@ | Set-Content -LiteralPath $childScript -Encoding ascii
+        $psExe = (Get-Command powershell.exe).Source
+        $beforeInThisProcess = $env:RUNNING_AI_WATCHDOG_LOCK_INHERITED
+        $spawn = Start-RunningAiWatchdogTrustedChild -FilePath $psExe -ArgumentList "-NoProfile -File `"$childScript`"" -TimeoutMs 10000
+        $afterInThisProcess = $env:RUNNING_AI_WATCHDOG_LOCK_INHERITED
+        $childSaw = if (Test-Path -LiteralPath $marker) { (Get-Content -LiteralPath $marker -Raw).Trim() } else { $null }
+        (-not $spawn.TimedOut) -and ($childSaw -eq '1') -and ($beforeInThisProcess -eq $afterInThisProcess)
+    }
+}
+
+# ======================================================================================
+# Phase 6I-1.7B-2C, STEP 2/5: outcome normalization and attribution precision.
+# ======================================================================================
+
+Check 'New-RunningAiRecoveryOutcome: SUCCESS/BUSY/BLOCKED/UNKNOWN_FAILURE never set a BudgetChargeComponent' {
+    $success = New-RunningAiRecoveryOutcome -AttemptedComponent 'spring' -ResultCode 'SUCCESS'
+    $busy = New-RunningAiRecoveryOutcome -AttemptedComponent 'spring' -ResultCode 'BUSY'
+    $blocked = New-RunningAiRecoveryOutcome -AttemptedComponent 'connector' -ResultCode 'BLOCKED'
+    $unknown = New-RunningAiRecoveryOutcome -AttemptedComponent 'connector' -ResultCode 'UNKNOWN_FAILURE'
+    ($null -eq $success.BudgetChargeComponent) -and ($null -eq $busy.BudgetChargeComponent) -and
+    ($null -eq $blocked.BudgetChargeComponent) -and ($null -eq $unknown.BudgetChargeComponent)
+}
+
+Check 'New-RunningAiRecoveryOutcome: FAILED/TIMED_OUT charge the ACTUAL failed component when known, else fall back to the attempted one' {
+    $mismatched = New-RunningAiRecoveryOutcome -AttemptedComponent 'connector' -ResultCode 'FAILED' -ActualFailedComponent 'spring'
+    $selfAttributed = New-RunningAiRecoveryOutcome -AttemptedComponent 'connector' -ResultCode 'FAILED'
+    $timedOut = New-RunningAiRecoveryOutcome -AttemptedComponent 'spring' -ResultCode 'TIMED_OUT'
+    ($mismatched.BudgetChargeComponent -eq 'spring') -and ($selfAttributed.BudgetChargeComponent -eq 'connector') -and
+    ($timedOut.BudgetChargeComponent -eq 'spring')
+}
+
+Check 'ConvertTo-RunningAiRecoveryOutcome: a plain legacy boolean Runner reproduces the exact pre-2C attribution ($true=SUCCESS no charge, $false=FAILED charge the attempted component)' {
+    $ok = ConvertTo-RunningAiRecoveryOutcome -RunResult $true -AttemptedComponent 'spring'
+    $bad = ConvertTo-RunningAiRecoveryOutcome -RunResult $false -AttemptedComponent 'connector'
+    ($ok.ResultCode -eq 'SUCCESS') -and ($null -eq $ok.BudgetChargeComponent) -and
+    ($bad.ResultCode -eq 'FAILED') -and ($bad.BudgetChargeComponent -eq 'connector') -and ($bad.ActualFailedComponent -eq 'connector')
+}
+
+Check 'Invoke-WatchdogRecovery: a BUSY runner result charges NO restart/long-term budget, reports .Busy true and .Failed false, with empty Deltas' {
+    $history = New-EmptyHistory
+    $lt = New-EmptyLongTermState
+    $runner = { param($a) New-RunningAiRecoveryOutcome -AttemptedComponent $a.Component -ResultCode 'BUSY' -ActionPerformed $a.Action }
+    $fakeObserve = {
+        [pscustomobject]@{ Docker='UP'; Postgres='healthy'; ConnectorHealth=$true; ConnectorPortUsed=$true; ConnectorPid=1; SpringHealth=$false; SpringPortUsed=$false; SpringPid=$null; ExternalRelayHealth=$true; ExternalRelayPortUsed=$true; ExternalRelayPid=1 }
+    }
+    $result = Invoke-WatchdogRecovery -Observe $fakeObserve -Runner $runner -History $history -HistoryAvailable $true -Now $now -LongTermState $lt
+    ($result.Busy) -and (-not $result.Failed) -and (@($result.Deltas.Restarts).Count -eq 0) -and (@($result.Deltas.LongTermFailures).Count -eq 0) -and
+    ((Get-RestartCount -History $history -Component 'spring' -Now $now) -eq 0) -and
+    (-not (Test-RunningAiComponentLockedOut -LongTermState $lt -Component 'spring'))
+}
+
+Check 'Invoke-WatchdogRecovery: Spring failing does not charge Connector''s long-term failure count (attempted=connector would never happen for a pure Spring failure, but a mismatched outcome must still route correctly)' {
+    $history = New-EmptyHistory
+    $lt = New-EmptyLongTermState
+    $runner = { param($a) New-RunningAiRecoveryOutcome -AttemptedComponent $a.Component -ResultCode 'FAILED' -ActionPerformed $a.Action -ActualFailedComponent 'spring' }
+    $fakeObserve = {
+        [pscustomobject]@{ Docker='UP'; Postgres='healthy'; ConnectorHealth=$false; ConnectorPortUsed=$false; ConnectorPid=$null; SpringHealth=$true; SpringPortUsed=$true; SpringPid=1; ExternalRelayHealth=$true; ExternalRelayPortUsed=$true; ExternalRelayPid=1 }
+    }
+    $result = Invoke-WatchdogRecovery -Observe $fakeObserve -Runner $runner -History $history -HistoryAvailable $true -Now $now -LongTermState $lt
+    (@($lt['spring'].Failures).Count -eq 1) -and (@($lt['connector'].Failures).Count -eq 0) -and
+    (@(@($result.Deltas.LongTermFailures) | Where-Object { $_.Component -eq 'spring' }).Count -eq 1)
+}
+
+Check 'Invoke-WatchdogRecovery: a self-attributed Connector failure charges ONLY Connector''s long-term budget' {
+    $history = New-EmptyHistory
+    $lt = New-EmptyLongTermState
+    $runner = { param($a) New-RunningAiRecoveryOutcome -AttemptedComponent $a.Component -ResultCode 'FAILED' -ActionPerformed $a.Action -ActualFailedComponent 'connector' }
+    $fakeObserve = {
+        [pscustomobject]@{ Docker='UP'; Postgres='healthy'; ConnectorHealth=$false; ConnectorPortUsed=$false; ConnectorPid=$null; SpringHealth=$true; SpringPortUsed=$true; SpringPid=1; ExternalRelayHealth=$true; ExternalRelayPortUsed=$true; ExternalRelayPid=1 }
+    }
+    $result = Invoke-WatchdogRecovery -Observe $fakeObserve -Runner $runner -History $history -HistoryAvailable $true -Now $now -LongTermState $lt
+    (@($lt['connector'].Failures).Count -eq 1) -and (@($lt['spring'].Failures).Count -eq 0) -and (@($lt['docker'].Failures).Count -eq 0)
+}
+
+Check 'Invoke-WatchdogRecovery: UNKNOWN_FAILURE stops the tick (.Failed true) but charges NO component''s long-term budget, while still consuming the short-term attempt budget' {
+    $history = New-EmptyHistory
+    $lt = New-EmptyLongTermState
+    $runner = { param($a) New-RunningAiRecoveryOutcome -AttemptedComponent $a.Component -ResultCode 'UNKNOWN_FAILURE' -ActionPerformed $a.Action }
+    $fakeObserve = {
+        [pscustomobject]@{ Docker='UP'; Postgres='healthy'; ConnectorHealth=$false; ConnectorPortUsed=$false; ConnectorPid=$null; SpringHealth=$true; SpringPortUsed=$true; SpringPid=1; ExternalRelayHealth=$true; ExternalRelayPortUsed=$true; ExternalRelayPid=1 }
+    }
+    $result = Invoke-WatchdogRecovery -Observe $fakeObserve -Runner $runner -History $history -HistoryAvailable $true -Now $now -LongTermState $lt
+    ($result.Failed) -and (-not $result.Busy) -and (@($lt['connector'].Failures).Count -eq 0) -and
+    ((Get-RestartCount -History $history -Component 'connector' -Now $now) -eq 1) -and
+    (@(@($result.Deltas.Restarts) | Where-Object { $_.Component -eq 'connector' }).Count -eq 1) -and
+    (@($result.Deltas.LongTermFailures).Count -eq 0)
+}
+
+# ======================================================================================
+# Phase 6I-1.7B-2C, STEP 4/5: watchdog-state.json write serialization and lockout-clear safety.
+# ======================================================================================
+
+Check 'Enter-RunningAiWatchdogStateLock refuses while a REAL SEPARATE process holds the same-named state lock, and succeeds once released' {
+    With-TempRuntimeDir {
+        param($dir)
+        $psExe = (Get-Command powershell.exe).Source
+        $holderScript = Join-Path $dir 'state-holder.ps1'
+        $contenderScript = Join-Path $dir 'state-contender.ps1'
+        $resultPath = Join-Path $dir 'state-contender-result.txt'
+        @'
+. "$env:RA_TEST_WATCHDOG_PATH"
+$m = Enter-RunningAiWatchdogStateLock -TimeoutSec 5
+if (-not $m) { exit 9 }
+Start-Sleep -Seconds 4
+Exit-RunningAiWatchdogStateLock $m
+'@ | Set-Content -LiteralPath $holderScript -Encoding ascii
+        @'
+. "$env:RA_TEST_WATCHDOG_PATH"
+$mine = Enter-RunningAiWatchdogStateLock -TimeoutSec 1
+if ($mine) { Exit-RunningAiWatchdogStateLock $mine; 'ACQUIRED' | Set-Content -LiteralPath $env:RA_TEST_RESULT_PATH -Encoding ascii }
+else { 'BUSY' | Set-Content -LiteralPath $env:RA_TEST_RESULT_PATH -Encoding ascii }
+'@ | Set-Content -LiteralPath $contenderScript -Encoding ascii
+        $env:RA_TEST_WATCHDOG_PATH = Join-Path $scripts 'RunningAI.Watchdog.ps1'
+        $holder = $null
+        try {
+            $holder = Start-Process -FilePath $psExe -ArgumentList @('-NoProfile', '-WindowStyle', 'Hidden', '-File', $holderScript) -WindowStyle Hidden -PassThru
+            Start-Sleep -Seconds 2
+            $env:RA_TEST_RESULT_PATH = $resultPath
+            Start-Process -FilePath $psExe -ArgumentList @('-NoProfile', '-WindowStyle', 'Hidden', '-File', $contenderScript) -WindowStyle Hidden -Wait
+            $busyWhileHeld = (Test-Path -LiteralPath $resultPath) -and ((Get-Content -LiteralPath $resultPath -Raw).Trim() -eq 'BUSY')
+            Start-Sleep -Seconds 4   # let the holder finish and release
+            Remove-Item -LiteralPath $resultPath -ErrorAction SilentlyContinue
+            Start-Process -FilePath $psExe -ArgumentList @('-NoProfile', '-WindowStyle', 'Hidden', '-File', $contenderScript) -WindowStyle Hidden -Wait
+            $acquiredAfterRelease = (Test-Path -LiteralPath $resultPath) -and ((Get-Content -LiteralPath $resultPath -Raw).Trim() -eq 'ACQUIRED')
+            $busyWhileHeld -and $acquiredAfterRelease
+        } finally {
+            if ($holder) { Stop-Process -Id $holder.Id -Force -ErrorAction SilentlyContinue }
+            Remove-Item Env:\RA_TEST_WATCHDOG_PATH, Env:\RA_TEST_RESULT_PATH -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Check 'Save-RunningAiWatchdogStateReconciled replays only THIS tick''s own deltas onto a freshly re-read base, never resurrecting a concurrently-cleared lockout' {
+    With-TempRuntimeDir {
+        param($dir)
+        $path = Join-Path $dir 'watchdog-state.json'
+        # Seed: connector already locked out from an earlier run.
+        $seedLt = New-EmptyLongTermState
+        1..6 | ForEach-Object { Add-LongTermFailure -LongTermState $seedLt -Component 'connector' -Now $now }
+        Update-RunningAiLongTermLockout -LongTermState $seedLt -Component 'connector' -Now $now -MaxFailures 6
+        Save-WatchdogState -History (New-EmptyHistory) -LongTermState $seedLt -Path $path
+        # Simulate "an operator cleared the connector lockout WHILE our tick was still running" by
+        # overwriting the on-disk file directly (standing in for a real concurrent clear-watchdog-
+        # lockout.ps1 -Force, already covered end-to-end by the next check) BEFORE we save our own
+        # tick's deltas - a completely unrelated 'spring' failure recorded during that same tick.
+        $clearedLt = New-EmptyLongTermState
+        Save-WatchdogState -History (New-EmptyHistory) -LongTermState $clearedLt -Path $path
+        $deltas = [pscustomobject]@{ Restarts = @(); LongTermFailures = @([pscustomobject]@{ Component = 'spring'; Now = $now }) }
+        $ok = Save-RunningAiWatchdogStateReconciled -Deltas $deltas -Now $now -Path $path
+        $reloaded = Read-WatchdogState -Path $path
+        $ok -and
+        (-not (Test-RunningAiComponentLockedOut -LongTermState $reloaded.LongTermState -Component 'connector')) -and
+        (@($reloaded.LongTermState['connector'].Failures).Count -eq 0) -and
+        (@($reloaded.LongTermState['spring'].Failures).Count -eq 1)
+    }
+}
+
+Check 'clear-watchdog-lockout.ps1 WITHOUT -Force (preview) never modifies the state file, even byte-for-byte' {
+    With-TempRuntimeDir {
+        param($dir)
+        $path = Join-Path $dir 'watchdog-state.json'
+        $lt = New-EmptyLongTermState
+        1..6 | ForEach-Object { Add-LongTermFailure -LongTermState $lt -Component 'spring' -Now $now }
+        Update-RunningAiLongTermLockout -LongTermState $lt -Component 'spring' -Now $now -MaxFailures 6
+        Save-WatchdogState -History (New-EmptyHistory) -LongTermState $lt -Path $path
+        $before = Get-Content -LiteralPath $path -Raw
+        $beforeWriteTime = (Get-Item -LiteralPath $path).LastWriteTimeUtc
+        $psExe = (Get-Command powershell.exe).Source
+        $previewScript = Join-Path $scripts 'clear-watchdog-lockout.ps1'
+        Start-Process -FilePath $psExe -ArgumentList @('-NoProfile', '-File', $previewScript, '-Component', 'spring') -WindowStyle Hidden -Wait
+        $after = Get-Content -LiteralPath $path -Raw
+        $afterWriteTime = (Get-Item -LiteralPath $path).LastWriteTimeUtc
+        ($before -eq $after) -and ($beforeWriteTime -eq $afterWriteTime) -and (-not (Test-Path -LiteralPath "$path.corrupt"))
+    }
+}
+
+Check 'clear-watchdog-lockout.ps1 -Force actually clears the named component only, and a real concurrent Watchdog-style save (holding the state lock first) is refused rather than racing' {
+    With-TempRuntimeDir {
+        param($dir)
+        $path = Join-Path $dir 'watchdog-state.json'
+        $lt = New-EmptyLongTermState
+        1..6 | ForEach-Object { Add-LongTermFailure -LongTermState $lt -Component 'connector' -Now $now }
+        Update-RunningAiLongTermLockout -LongTermState $lt -Component 'connector' -Now $now -MaxFailures 6
+        1..2 | ForEach-Object { Add-LongTermFailure -LongTermState $lt -Component 'spring' -Now $now }
+        Save-WatchdogState -History (New-EmptyHistory) -LongTermState $lt -Path $path
+        $psExe = (Get-Command powershell.exe).Source
+        $clearScript = Join-Path $scripts 'clear-watchdog-lockout.ps1'
+        $holderScript = Join-Path $dir 'state-lock-holder.ps1'
+        @'
+. "$env:RA_TEST_WATCHDOG_PATH"
+$m = Enter-RunningAiWatchdogStateLock -TimeoutSec 5
+if (-not $m) { exit 9 }
+Start-Sleep -Seconds 16
+Exit-RunningAiWatchdogStateLock $m
+'@ | Set-Content -LiteralPath $holderScript -Encoding ascii
+        $env:RA_TEST_WATCHDOG_PATH = Join-Path $scripts 'RunningAI.Watchdog.ps1'
+        $holder = $null
+        try {
+            $holder = Start-Process -FilePath $psExe -ArgumentList @('-NoProfile', '-WindowStyle', 'Hidden', '-File', $holderScript) -WindowStyle Hidden -PassThru
+            Start-Sleep -Seconds 2
+            # clear-watchdog-lockout.ps1 -Force itself waits up to 10s for the lock (production value,
+            # not shortened for this test) - the holder above sleeps 16s total (started ~2s before this
+            # call), so its remaining hold time comfortably exceeds that 10s budget and this attempt
+            # genuinely times out and is refused, rather than merely waiting the holder out.
+            $clearDuringHold = Start-Process -FilePath $psExe -ArgumentList @('-NoProfile', '-File', $clearScript, '-Component', 'connector', '-Force') -WindowStyle Hidden -PassThru -Wait
+            $refusedWhileHeld = ($clearDuringHold.ExitCode -ne 0)
+            $stillLockedDuringHold = Test-RunningAiComponentLockedOut -LongTermState (Read-WatchdogState -Path $path).LongTermState -Component 'connector'
+            Start-Sleep -Seconds 6   # let the holder release (16s total hold, ~12s elapsed by now)
+            $clearAfterRelease = Start-Process -FilePath $psExe -ArgumentList @('-NoProfile', '-File', $clearScript, '-Component', 'connector', '-Force') -WindowStyle Hidden -PassThru -Wait
+            $reloaded = Read-WatchdogState -Path $path
+            $clearedNow = -not (Test-RunningAiComponentLockedOut -LongTermState $reloaded.LongTermState -Component 'connector')
+            $springUntouched = (@($reloaded.LongTermState['spring'].Failures).Count -eq 2)
+            $refusedWhileHeld -and $stillLockedDuringHold -and ($clearAfterRelease.ExitCode -eq 0) -and $clearedNow -and $springUntouched
+        } finally {
+            if ($holder) { Stop-Process -Id $holder.Id -Force -ErrorAction SilentlyContinue }
+            Remove-Item Env:\RA_TEST_WATCHDOG_PATH -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Check 'Read-WatchdogState: a missing main file WITH a .bak present is reported unavailable (never silently treated as first run), and the backup is never auto-restored' {
+    With-TempRuntimeDir {
+        param($dir)
+        $path = Join-Path $dir 'watchdog-state.json'
+        $lt = New-EmptyLongTermState
+        1..6 | ForEach-Object { Add-LongTermFailure -LongTermState $lt -Component 'spring' -Now $now }
+        Update-RunningAiLongTermLockout -LongTermState $lt -Component 'spring' -Now $now -MaxFailures 6
+        Save-WatchdogState -History (New-EmptyHistory) -LongTermState $lt -Path $path   # writes $path and $path.bak
+        Remove-Item -LiteralPath $path -Force   # simulate the main file vanishing
+        $state = Read-WatchdogState -Path $path
+        (-not $state.Available) -and ($state.Note -match 'backup') -and (-not (Test-Path -LiteralPath $path))
+    }
+}
+
+Check 'Read-WatchdogState: a missing main file with NO .bak is still a genuine first run (unchanged behavior)' {
+    With-TempRuntimeDir {
+        param($dir)
+        $path = Join-Path $dir 'watchdog-state.json'
+        $state = Read-WatchdogState -Path $path
+        ($state.Available) -and ($state.Note -eq 'no state file (first run)')
+    }
 }
 
 if ($failures.Count) {
