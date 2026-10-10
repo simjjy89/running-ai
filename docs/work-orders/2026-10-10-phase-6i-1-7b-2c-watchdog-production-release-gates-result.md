@@ -137,7 +137,8 @@ Phase 6I-1.7B-2B의 결론을 그대로 재확인했다 — **변경하지 않�
 
 ## 9. Git Commit SHA
 
-커밋 직후 본 문서에 보강 기록.
+`07e999a` (`fix(windows): close watchdog production safety gaps`), `origin/main-3`로 Fast-forward
+Push 완료(`b5a8463..07e999a`). `origin/main`과 Canonical은 전혀 건드리지 않았다.
 
 ## 10. Canonical 및 운영환경 불변 확인
 
