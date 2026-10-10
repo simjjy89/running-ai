@@ -666,20 +666,182 @@ Check 'Relay recovery reports BUSY and touches nothing while a manual stop (same
 
 # ---- deadlock avoidance: the trusted-child inheritance mechanism itself -------------------------
 
-Check 'Enter-RunningAiRuntimeLock returns INHERITED (no wait at all) when RUNNING_AI_WATCHDOG_LOCK_INHERITED=1, and Exit- is a safe no-op on it' {
-    $orig = $env:RUNNING_AI_WATCHDOG_LOCK_INHERITED
-    try {
-        $env:RUNNING_AI_WATCHDOG_LOCK_INHERITED = '1'
-        $m = Enter-RunningAiRuntimeLock -TimeoutSec 1
-        $isInherited = ($m -eq 'INHERITED')
-        Exit-RunningAiRuntimeLock $m   # must not throw
-        $isInherited
-    } finally {
-        if ($null -eq $orig) { Remove-Item Env:\RUNNING_AI_WATCHDOG_LOCK_INHERITED -ErrorAction SilentlyContinue } else { $env:RUNNING_AI_WATCHDOG_LOCK_INHERITED = $orig }
+Check 'Test-RunningAiTrustedWatchdogParent rejects a bare flag, empty/non-numeric/dead PIDs, and PIDs with no matching command line (STEP B hardening)' {
+    (-not (Test-RunningAiTrustedWatchdogParent -ClaimedParentPid '1')) -and                      # the OLD bare-flag value is no longer meaningful at all
+    (-not (Test-RunningAiTrustedWatchdogParent -ClaimedParentPid '')) -and
+    (-not (Test-RunningAiTrustedWatchdogParent -ClaimedParentPid $null)) -and
+    (-not (Test-RunningAiTrustedWatchdogParent -ClaimedParentPid 'not-a-pid')) -and
+    (-not (Test-RunningAiTrustedWatchdogParent -ClaimedParentPid '999999999')) -and               # astronomically unlikely to be a live PID
+    (-not (Test-RunningAiTrustedWatchdogParent -ClaimedParentPid "$PID"))                          # THIS test process is alive, but is not named watch-running-ai.ps1 and is not its own parent
+}
+
+Check 'Enter-RunningAiRuntimeLock returns INHERITED only for a REAL spawned "watch-running-ai.ps1"-named process that is the genuine direct parent (STEP B happy path)' {
+    With-TempRuntimeDir {
+        param($dir)
+        $fakeWatchdogDir = Join-Path (Join-Path $scripts 'tests') ('.tmp-trustparent-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Force $fakeWatchdogDir | Out-Null
+        try {
+            # Named EXACTLY "watch-running-ai.ps1" and placed UNDER this repo's own tree (so both the
+            # filename substring check and the repo-root substring check pass) - but it is a disposable
+            # stub, never the real file, and it never touches a real runtime.
+            $fakeWatchdogScript = Join-Path $fakeWatchdogDir 'watch-running-ai.ps1'
+            $resultPath = Join-Path $dir 'trusted-result.txt'
+            $childScript = Join-Path $dir 'trusted-child-check.ps1'
+            @"
+. "`$env:RA_TEST_COMMON_PATH"
+`$trusted = Test-RunningAiTrustedWatchdogParent -ClaimedParentPid `$env:RUNNING_AI_WATCHDOG_LOCK_INHERITED
+`$trusted | Out-File -LiteralPath `$env:RA_TEST_RESULT_PATH -Encoding ascii
+"@ | Set-Content -LiteralPath $childScript -Encoding ascii
+            $psExe = (Get-Command powershell.exe).Source
+            @"
+`$psi = New-Object System.Diagnostics.ProcessStartInfo
+`$psi.FileName = '$psExe'
+`$psi.Arguments = '-NoProfile -File "$childScript"'
+`$psi.UseShellExecute = `$false
+`$psi.EnvironmentVariables['RUNNING_AI_WATCHDOG_LOCK_INHERITED'] = "`$PID"
+`$proc = New-Object System.Diagnostics.Process
+`$proc.StartInfo = `$psi
+[void]`$proc.Start()
+`$proc.WaitForExit()
+"@ | Set-Content -LiteralPath $fakeWatchdogScript -Encoding ascii
+            $env:RA_TEST_COMMON_PATH = Join-Path $scripts 'RunningAI.Common.ps1'
+            $env:RA_TEST_RESULT_PATH = $resultPath
+            Start-Process -FilePath $psExe -ArgumentList @('-NoProfile', '-File', $fakeWatchdogScript) -WindowStyle Hidden -Wait
+            $result = if (Test-Path -LiteralPath $resultPath) { (Get-Content -LiteralPath $resultPath -Raw).Trim() } else { $null }
+            $result -eq 'True'
+        } finally {
+            Remove-Item Env:\RA_TEST_COMMON_PATH, Env:\RA_TEST_RESULT_PATH -ErrorAction SilentlyContinue
+            Remove-Item -Recurse -Force $fakeWatchdogDir -ErrorAction SilentlyContinue
+        }
     }
 }
 
-Check 'Start-RunningAiWatchdogTrustedChild sets RUNNING_AI_WATCHDOG_LOCK_INHERITED on the CHILD only, never leaking into this process''s own $env:' {
+Check 'Test-RunningAiTrustedWatchdogParent rejects a real, live, correctly-named watch-running-ai.ps1 process once it has exited (dead parent is never trusted, STEP B risk 3)' {
+    $fakeWatchdogDir = Join-Path (Join-Path $scripts 'tests') ('.tmp-trustparent-dead-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force $fakeWatchdogDir | Out-Null
+    try {
+        $fakeWatchdogScript = Join-Path $fakeWatchdogDir 'watch-running-ai.ps1'
+        'exit 0' | Set-Content -LiteralPath $fakeWatchdogScript -Encoding ascii
+        $psExe = (Get-Command powershell.exe).Source
+        $proc = Start-Process -FilePath $psExe -ArgumentList @('-NoProfile', '-File', $fakeWatchdogScript) -WindowStyle Hidden -PassThru
+        $proc.WaitForExit()
+        Start-Sleep -Milliseconds 300
+        -not (Test-RunningAiTrustedWatchdogParent -ClaimedParentPid "$($proc.Id)")
+    } finally {
+        Remove-Item -Recurse -Force $fakeWatchdogDir -ErrorAction SilentlyContinue
+    }
+}
+
+Check 'Test-RunningAiTrustedWatchdogParent rejects a live watch-running-ai.ps1-named process that is NOT this process''s actual parent (STEP B risk 1: cannot fake trust by pointing at an unrelated live Watchdog-shaped process)' {
+    $fakeWatchdogDir = Join-Path (Join-Path $scripts 'tests') ('.tmp-trustparent-unrelated-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force $fakeWatchdogDir | Out-Null
+    try {
+        $fakeWatchdogScript = Join-Path $fakeWatchdogDir 'watch-running-ai.ps1'
+        'Start-Sleep -Seconds 5' | Set-Content -LiteralPath $fakeWatchdogScript -Encoding ascii
+        $psExe = (Get-Command powershell.exe).Source
+        $proc = Start-Process -FilePath $psExe -ArgumentList @('-NoProfile', '-File', $fakeWatchdogScript) -WindowStyle Hidden -PassThru
+        Start-Sleep -Milliseconds 500
+        try {
+            # This TEST process (not a child of $proc) claims $proc as its "parent" - command line and
+            # repo-root markers would match, but the real ParentProcessId relationship does not.
+            -not (Test-RunningAiTrustedWatchdogParent -ClaimedParentPid "$($proc.Id)")
+        } finally {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        }
+    } finally {
+        Remove-Item -Recurse -Force $fakeWatchdogDir -ErrorAction SilentlyContinue
+    }
+}
+
+Check 'Test-RunningAiTrustedWatchdogParent rejects a live, correctly-parented process whose command line does not reference THIS repository (STEP B risk 5: a flag leaked from a different worktree never verifies here)' {
+    $fakeWatchdogDir = Join-Path (Join-Path $scripts 'tests') ('.tmp-trustparent-otherrepo-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force $fakeWatchdogDir | Out-Null
+    try {
+        # Named "watch-running-ai.ps1" but deliberately placed OUTSIDE this repo's tree (%TEMP%, not
+        # under $scripts) - the filename substring matches but the repo-root substring cannot.
+        $otherRepoDir = Join-Path ([IO.Path]::GetTempPath()) ('ra-otherrepo-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Force $otherRepoDir | Out-Null
+        $fakeWatchdogScript = Join-Path $otherRepoDir 'watch-running-ai.ps1'
+        $resultPath = Join-Path $fakeWatchdogDir 'result.txt'
+        $childScript = Join-Path $fakeWatchdogDir 'child.ps1'
+        @"
+. "`$env:RA_TEST_COMMON_PATH"
+`$trusted = Test-RunningAiTrustedWatchdogParent -ClaimedParentPid `$env:RUNNING_AI_WATCHDOG_LOCK_INHERITED
+`$trusted | Out-File -LiteralPath `$env:RA_TEST_RESULT_PATH -Encoding ascii
+"@ | Set-Content -LiteralPath $childScript -Encoding ascii
+        $psExe = (Get-Command powershell.exe).Source
+        @"
+`$psi = New-Object System.Diagnostics.ProcessStartInfo
+`$psi.FileName = '$psExe'
+`$psi.Arguments = '-NoProfile -File "$childScript"'
+`$psi.UseShellExecute = `$false
+`$psi.EnvironmentVariables['RUNNING_AI_WATCHDOG_LOCK_INHERITED'] = "`$PID"
+`$proc = New-Object System.Diagnostics.Process
+`$proc.StartInfo = `$psi
+[void]`$proc.Start()
+`$proc.WaitForExit()
+"@ | Set-Content -LiteralPath $fakeWatchdogScript -Encoding ascii
+        $env:RA_TEST_COMMON_PATH = Join-Path $scripts 'RunningAI.Common.ps1'
+        $env:RA_TEST_RESULT_PATH = $resultPath
+        Start-Process -FilePath $psExe -ArgumentList @('-NoProfile', '-File', $fakeWatchdogScript) -WindowStyle Hidden -Wait
+        $result = if (Test-Path -LiteralPath $resultPath) { (Get-Content -LiteralPath $resultPath -Raw).Trim() } else { $null }
+        $result -eq 'False'
+    } finally {
+        Remove-Item Env:\RA_TEST_COMMON_PATH, Env:\RA_TEST_RESULT_PATH -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force $fakeWatchdogDir, $otherRepoDir -ErrorAction SilentlyContinue
+    }
+}
+
+Check 'Test-RunningAiTrustedWatchdogParent rejects a grandchild that merely inherited the flag value (STEP B risk 2: the intermediate process, not the original Watchdog, is the grandchild''s real parent)' {
+    $fakeWatchdogDir = Join-Path (Join-Path $scripts 'tests') ('.tmp-trustparent-grandchild-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force $fakeWatchdogDir | Out-Null
+    try {
+        $fakeWatchdogScript = Join-Path $fakeWatchdogDir 'watch-running-ai.ps1'
+        $intermediateScript = Join-Path $fakeWatchdogDir 'intermediate.ps1'
+        $grandchildScript = Join-Path $fakeWatchdogDir 'grandchild.ps1'
+        $resultPath = Join-Path $fakeWatchdogDir 'result.txt'
+        @"
+. "`$env:RA_TEST_COMMON_PATH"
+`$trusted = Test-RunningAiTrustedWatchdogParent -ClaimedParentPid `$env:RUNNING_AI_WATCHDOG_LOCK_INHERITED
+`$trusted | Out-File -LiteralPath `$env:RA_TEST_RESULT_PATH -Encoding ascii
+"@ | Set-Content -LiteralPath $grandchildScript -Encoding ascii
+        $psExe = (Get-Command powershell.exe).Source
+        # Intermediate process does NOT clear the inherited env var before spawning its own child -
+        # that grandchild still SEES the original Watchdog's PID value, but its own real parent is the
+        # intermediate process, not the Watchdog.
+        @"
+`$psi = New-Object System.Diagnostics.ProcessStartInfo
+`$psi.FileName = '$psExe'
+`$psi.Arguments = '-NoProfile -File "$grandchildScript"'
+`$psi.UseShellExecute = `$false
+`$proc = New-Object System.Diagnostics.Process
+`$proc.StartInfo = `$psi
+[void]`$proc.Start()
+`$proc.WaitForExit()
+"@ | Set-Content -LiteralPath $intermediateScript -Encoding ascii
+        @"
+`$psi = New-Object System.Diagnostics.ProcessStartInfo
+`$psi.FileName = '$psExe'
+`$psi.Arguments = '-NoProfile -File "$intermediateScript"'
+`$psi.UseShellExecute = `$false
+`$psi.EnvironmentVariables['RUNNING_AI_WATCHDOG_LOCK_INHERITED'] = "`$PID"
+`$proc = New-Object System.Diagnostics.Process
+`$proc.StartInfo = `$psi
+[void]`$proc.Start()
+`$proc.WaitForExit()
+"@ | Set-Content -LiteralPath $fakeWatchdogScript -Encoding ascii
+        $env:RA_TEST_COMMON_PATH = Join-Path $scripts 'RunningAI.Common.ps1'
+        $env:RA_TEST_RESULT_PATH = $resultPath
+        Start-Process -FilePath $psExe -ArgumentList @('-NoProfile', '-File', $fakeWatchdogScript) -WindowStyle Hidden -Wait
+        $result = if (Test-Path -LiteralPath $resultPath) { (Get-Content -LiteralPath $resultPath -Raw).Trim() } else { $null }
+        $result -eq 'False'
+    } finally {
+        Remove-Item Env:\RA_TEST_COMMON_PATH, Env:\RA_TEST_RESULT_PATH -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force $fakeWatchdogDir -ErrorAction SilentlyContinue
+    }
+}
+
+Check 'Start-RunningAiWatchdogTrustedChild sets RUNNING_AI_WATCHDOG_LOCK_INHERITED to THIS PROCESS''S OWN PID on the CHILD only, never leaking into this process''s own $env:' {
     With-TempRuntimeDir {
         param($dir)
         $marker = Join-Path $dir 'inherited-marker.txt'
@@ -694,7 +856,7 @@ Set-Content -LiteralPath '$marker' -Value `$v -Encoding ascii
         $spawn = Start-RunningAiWatchdogTrustedChild -FilePath $psExe -ArgumentList "-NoProfile -File `"$childScript`"" -TimeoutMs 10000
         $afterInThisProcess = $env:RUNNING_AI_WATCHDOG_LOCK_INHERITED
         $childSaw = if (Test-Path -LiteralPath $marker) { (Get-Content -LiteralPath $marker -Raw).Trim() } else { $null }
-        (-not $spawn.TimedOut) -and ($childSaw -eq '1') -and ($beforeInThisProcess -eq $afterInThisProcess)
+        (-not $spawn.TimedOut) -and ($childSaw -eq "$PID") -and ($beforeInThisProcess -eq $afterInThisProcess)
     }
 }
 

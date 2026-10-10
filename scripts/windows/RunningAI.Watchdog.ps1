@@ -687,10 +687,14 @@ function Invoke-RecoveryAction {
     return (Invoke-RunningAiCoreRecoveryAction -Action $Action -ConnectorPort $ConnectorPort -SpringPort $SpringPort -LockTimeoutSec $LockTimeoutSec)
 }
 
-# Spawns $FilePath/$ArgumentList as a Watchdog-trusted child: RUNNING_AI_WATCHDOG_LOCK_INHERITED is
-# set to '1' on ONLY that child process's own environment block (never this process's $env:, which a
-# later, unrelated probe/action in the SAME Watchdog tick could otherwise inherit) - see
-# RunningAI.Common.ps1's Enter-RunningAiRuntimeLock for why this exists. Returns
+# Spawns $FilePath/$ArgumentList as a Watchdog-trusted child: RUNNING_AI_WATCHDOG_LOCK_INHERITED is set
+# to THIS PROCESS'S OWN PID (Phase 6I-1.7C-0, STEP B - a bare '1' flag was provably bypassable; see
+# Test-RunningAiTrustedWatchdogParent in RunningAI.Common.ps1 for the exact verification the child
+# performs against this claim) on ONLY that child process's own environment block (never this process's
+# $env:, which a later, unrelated probe/action in the SAME Watchdog tick could otherwise inherit). $PID
+# here is watch-running-ai.ps1's own process - the same process whose live command line the child will
+# verify contains "watch-running-ai.ps1" and this repository's root, and whose actual parent/child
+# relationship and CreationDate ordering the child also checks before ever trusting the claim. Returns
 # @{ Proc; TimedOut }; caller is responsible for reading .ExitCode only when -not TimedOut.
 function Start-RunningAiWatchdogTrustedChild {
     param([Parameter(Mandatory)][string]$FilePath, [Parameter(Mandatory)][string]$ArgumentList, [Parameter(Mandatory)][int]$TimeoutMs)
@@ -700,7 +704,7 @@ function Start-RunningAiWatchdogTrustedChild {
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
     $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
-    $psi.EnvironmentVariables['RUNNING_AI_WATCHDOG_LOCK_INHERITED'] = '1'
+    $psi.EnvironmentVariables['RUNNING_AI_WATCHDOG_LOCK_INHERITED'] = "$PID"
     $proc = New-Object System.Diagnostics.Process
     $proc.StartInfo = $psi
     [void]$proc.Start()

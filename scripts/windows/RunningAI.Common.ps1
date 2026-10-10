@@ -62,12 +62,13 @@ function Write-Step { param([string]$Message) Write-Host ("[{0}] {1}" -f (Get-Da
 # the relay's start script) as a child it synchronously waits on, with that child trying to acquire the
 # SAME lock itself - still cannot be allowed to happen: the parent would block on the child's exit, the
 # child would block on the parent's release, neither ever happens. This is solved by trust, not by
-# avoidance: the Watchdog's lock-wrapped helpers set RUNNING_AI_WATCHDOG_LOCK_INHERITED='1' on ONLY the
-# one child process they are about to spawn (its own ProcessStartInfo environment block, never this
-# process's own $env:) - see Enter-RunningAiRuntimeLock below. That child then skips acquiring the lock
-# itself entirely (there is nothing to wait on, so no deadlock is even possible), trusting that its
-# parent already serialized this exact operation against every manual start/stop. A manually-run
-# start/stop script never has this variable set and always acquires the lock itself, unchanged.
+# avoidance: the Watchdog's lock-wrapped helpers set RUNNING_AI_WATCHDOG_LOCK_INHERITED=<their own PID>
+# on ONLY the one child process they are about to spawn (its own ProcessStartInfo environment block,
+# never this process's own $env:) - see Enter-RunningAiRuntimeLock / Test-RunningAiTrustedWatchdogParent
+# below. That child then skips acquiring the lock itself entirely (there is nothing to wait on, so no
+# deadlock is even possible), but only once it has independently PROVEN the claim, not merely observed
+# the variable's presence (Phase 6I-1.7C-0, STEP B - see Test-RunningAiTrustedWatchdogParent's own
+# comment for the exact checks and why a bare flag was not enough).
 #
 # The hash is derived from $script:RuntimeDir, not bare $script:RepoRoot: in a test
 # (RUNNING_AI_TEST_RUNTIME_DIR set), that already points at a disposable per-test directory, so a
@@ -80,27 +81,60 @@ function Get-RunningAiRuntimeLockName {
     "Local\RunningAI-Runtime-$hash"
 }
 
+# Phase 6I-1.7C-0 (STEP B): RUNNING_AI_WATCHDOG_LOCK_INHERITED was, as of Phase 6I-1.7B-2C, a bare
+# '1' flag - trusted on sight. That is not enough: the variable's mere PRESENCE proves nothing about
+# WHO set it. Any of these would have silently defeated the runtime lock entirely:
+#   1. an operator (or any other script) manually sets the SAME variable before running
+#      start-running-ai.ps1/stop-running-ai.ps1 by hand - the lock is skipped with no real parent
+#      holding it at all;
+#   2. the variable is inherited by a grandchild process the trusted child itself spawns, long after
+#      that grandchild's actual relationship to any Watchdog has become irrelevant;
+#   3. the real Watchdog parent has already exited (crashed, killed) by the time a slow child checks
+#      the flag - the "someone already holds this lock" premise is simply false by then;
+#   4. an unrelated PowerShell session sets it for an entirely different purpose and it leaks into a
+#      later, unrelated invocation of this script;
+#   5. the SAME flag value, having no worktree-specific identity, would be trusted just as blindly in
+#      a completely different Development worktree or Canonical.
+# The variable now carries the WATCHDOG PROCESS'S OWN PID (not a bare flag), and that claim is proven,
+# fresh, on every single call - never cached, never trusted a second time on the strength of an earlier
+# check - by Test-RunningAiTrustedWatchdogParent: the claimed PID must (a) be alive RIGHT NOW, (b) have a
+# live command line containing BOTH "watch-running-ai.ps1" and THIS REPOSITORY'S OWN root path (so a
+# flag leaked from a different worktree's Watchdog, or from an unrelated process, never verifies here -
+# closes risk 5 and most of risk 4), (c) actually BE this process's real parent (Win32_Process
+# ParentProcessId, not merely some other live Watchdog running elsewhere - closes risk 1: nothing about
+# an operator's own interactive PowerShell session has a Watchdog process as its parent), and (d) have a
+# CreationDate at or before this process's own (temporal ordering - a PID later reused by an unrelated
+# process cannot have "started before" a process that already existed - defends against PID reuse).
+# Any single failure falls back to a REAL lock acquisition - never to a skip (closes risk 3: once the
+# real Watchdog is gone, the very next check simply fails and the fallback behaves exactly like a
+# manual invocation would). A grandchild this process spawns does NOT automatically inherit a valid
+# claim just because the environment variable value propagates to it (risk 2): that grandchild's own
+# ParentProcessId is THIS process, not the original Watchdog, so the check (c) fails for it unless it is
+# itself re-launched with its own correctly-updated claim - which nothing in this codebase does, by
+# design, since no further process after the one directly-spawned trusted child ever needs this lock.
+function Test-RunningAiTrustedWatchdogParent {
+    param([string]$ClaimedParentPid)
+    if ([string]::IsNullOrWhiteSpace($ClaimedParentPid)) { return $false }
+    $parentPid = 0
+    if (-not [int]::TryParse($ClaimedParentPid, [ref]$parentPid) -or $parentPid -le 0) { return $false }
+    $parentInfo = Get-CimInstance Win32_Process -Filter "ProcessId=$parentPid" -ErrorAction SilentlyContinue
+    if (-not $parentInfo -or -not $parentInfo.CommandLine) { return $false }
+    if ($parentInfo.CommandLine.IndexOf('watch-running-ai.ps1', [StringComparison]::OrdinalIgnoreCase) -lt 0) { return $false }
+    if ($parentInfo.CommandLine.IndexOf($script:RepoRoot, [StringComparison]::OrdinalIgnoreCase) -lt 0) { return $false }
+    $selfInfo = Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction SilentlyContinue
+    if (-not $selfInfo) { return $false }
+    if ([int]$selfInfo.ParentProcessId -ne $parentPid) { return $false }
+    if ($parentInfo.CreationDate -gt $selfInfo.CreationDate) { return $false }
+    return $true
+}
+
 # Returns a live, OWNED Mutex handle on success, or $null when another start/stop against this SAME
 # runtime is already in progress and did not finish within $TimeoutSec - callers must treat $null as
 # "busy, do nothing, change no service state" (Exit-RunningAiRuntimeLock is a safe no-op on $null too,
 # so callers can always pass whatever this returns straight through to a finally block).
-#   RUNNING_AI_WATCHDOG_LOCK_INHERITED (Phase 6I-1.7B-2C, STEP 1): set to '1' ONLY by
-# RunningAI.Watchdog.ps1's own lock-wrapped recovery helpers, on the environment block of the ONE
-# child start/stop-script process they are about to spawn (never on this process's own $env:, so it
-# can never leak into any later action this process takes) - see Invoke-RunningAiCoreRecoveryAction /
-# Invoke-RunningAiRelayRecoveryAction. It tells that single, trusted child "the lock for this exact
-# operation is already held by your parent; do not try to acquire it yourself" - the parent already
-# proved mutual exclusion against every manual start/stop before spawning the child, so the child
-# re-acquiring the SAME named Mutex would either (a) deadlock the parent's WaitForExit against the
-# child's own wait on a lock only the parent can release, or (b) if the parent used a short timeout
-# for its own wait, spuriously report BUSY on a totally uncontended runtime and abort real recovery
-# work for no reason. A bare "'1'" value only ever reaches a process when the Watchdog itself set it
-# moments before spawning that process - a manually-run start-running-ai.ps1/stop-running-ai.ps1 (or
-# an operator's own PowerShell session) never has this set, so manual invocations always acquire the
-# lock exactly as before.
 function Enter-RunningAiRuntimeLock {
     param([int]$TimeoutSec = 2)
-    if ($env:RUNNING_AI_WATCHDOG_LOCK_INHERITED -eq '1') { return 'INHERITED' }
+    if (Test-RunningAiTrustedWatchdogParent -ClaimedParentPid $env:RUNNING_AI_WATCHDOG_LOCK_INHERITED) { return 'INHERITED' }
     $name = Get-RunningAiRuntimeLockName
     $mutex = New-Object System.Threading.Mutex($false, $name)
     try {
