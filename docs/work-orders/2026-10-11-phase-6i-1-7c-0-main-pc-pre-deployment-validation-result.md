@@ -102,7 +102,7 @@ Canonical(`C:\running-ai-github`) 작업 트리: clean. 기존 Untracked 문서(
 - `scripts/windows/tests/Test-MainPcPythonVenvCtrlC.ps1` (신규) — STEP C Main PC 실제 Python 3.12 venv 검증.
 - `docs/work-orders/2026-10-11-phase-6i-1-7c-0-*.md` (신규, 본 문서 + 지시서 원문).
 
-Commit SHA: 커밋 직후 본 문서에 보강 기록.
+Commit SHA: `ddd8da5` (`fix(windows): bind the watchdog runtime-lock trust claim to a verified PID`), `origin/main-3`로 Fast-forward Push 완료(`111ce74..ddd8da5`). `origin/main`과 Canonical은 건드리지 않았다.
 
 ## 9. 실제 서비스/PID/PostgreSQL 불변 여부
 
