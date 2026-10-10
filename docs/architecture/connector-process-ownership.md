@@ -1,4 +1,4 @@
-# Garmin Connector Process Ownership (Phase 6I-1.7B-1, hardened in 6I-1.7B-1R and 6I-1.7B-2A)
+# Garmin Connector Process Ownership (Phase 6I-1.7B-1, hardened in 6I-1.7B-1R, 6I-1.7B-2A and 6I-1.7B-2B)
 
 ## Problem
 
@@ -195,11 +195,84 @@ A safety review of the 1.7B-1 implementation found and fixed several real gaps b
   `blocked`/`restartBudget` are byte-for-byte unchanged in shape): the connector's resolved ownership
   verdict, nothing else - never a CommandLine, PID list, or credential.
 
+## Phase 6I-1.7B-2B hardening (Watchdog recovery policy)
+
+- **`LAUNCHER_ALIVE_NO_LISTENER` verdict**: a confirmed-empty port no longer collapses straight to
+  `DOWN` when the tracked launcher is still alive and genuinely ours (its child listener died or never
+  started). Reporting plain `DOWN` here would let a caller start a second launcher alongside the
+  still-live one - two venv processes racing for the same port once their children come up. This
+  verdict is manageable (`Stop-RunningAiConnectorManaged` now accepts it alongside `SELF_OWNED` /
+  `LAUNCHER_CHILD` / `ORPHANED_MANAGED_PROCESS`): the stale launcher is stopped first, then a fresh
+  start is attempted. A genuinely dead tracked PID with nothing listening still resolves to plain
+  `DOWN` exactly as before. `start-running-ai.ps1`'s manual path gained the same check before launching
+  a brand-new connector.
+- **Already-gone metadata is no longer cleared unconditionally**: when every baseline-tracked PID has
+  exited, the sidecar metadata is now only removed when the port is *also* confirmed free. If a
+  different, unrelated process has already grabbed the port in the interim, the metadata is kept -
+  it is the one piece of evidence that could later prove whatever is on the port now is not a
+  continuation of what RunningAI used to manage. `PortFreed` on the `already-gone` outcome reflects
+  this directly.
+- **Watchdog failure attribution is logged, not just inferred from exit code**: `Invoke-RecoveryAction`
+  now maps a child process's actual exit code back to the component it really indicates
+  (`Get-RunningAiComponentFromExitCode`) and logs `FAILED_ACTUAL_COMPONENT_<X>_EXIT_<code>` whenever
+  that differs from the component the recovery step intended to fix, instead of always blaming the
+  planned component. This is a **log-level improvement only** - it does not change which budget is
+  consumed or which component the executor contract reports as failed, to avoid changing the existing
+  boolean `Runner` contract relied on by `Test-Watchdog.ps1`.
+- **Persistent long-term lockout** (`RunningAI.Watchdog.ps1`): alongside the unchanged short-term
+  budget (10 min / 3 restarts, auto-recoverable once restarts age out of the window), a new per-component
+  long-term lockout (24 h / 6 failures by default, `-LongTermWindowHours`/`-LongTermMaxFailures` on
+  `watch-running-ai.ps1`) persists across Watchdog restarts and does **not** auto-clear when failures
+  age out of its window - only an explicit operator run of the new `clear-watchdog-lockout.ps1` (never
+  invoked automatically by anything) resets it. `Get-RecoveryPlan` checks the lockout before even
+  consulting the short-term budget, for both the core chain and the independent relay component,
+  blocking with reason `LOCKED_OUT`; omitting `-LongTermState` reproduces the exact pre-2B behavior.
+- **`watchdog-state.json` version 2**: adds a `longTerm` section (`{failures: [...], lockedOutSince}`
+  per component) alongside the unchanged `restarts` section, written with `version: 2`. A v1 file (no
+  `longTerm` key at all, or missing an entry for one component) migrates losslessly - its restart
+  history is preserved exactly, and every component without long-term data gets a fresh, never-locked
+  entry. Reading any optional key here uses `$obj.PSObject.Properties[...]` rather than dot-notation,
+  because dot-notation on a `ConvertFrom-Json` object for a genuinely absent property throws
+  `PropertyNotFoundException` under this file's `Set-StrictMode -Version Latest` - the same gotcha
+  `Get-RunningAiErrorDetails` already works around elsewhere in this codebase - which would otherwise
+  make a v1 file indistinguishable from a corrupt one. `-ReadOnly` on `Read-WatchdogState` skips the
+  quarantine `Move-Item` on a corrupt file without weakening the real (non-DryRun) path.
+- **External Relay recovery is independent of the core chain, in both directions**:
+  `Invoke-WatchdogRecovery` runs two separate loops - one for the core chain
+  (`docker`/`postgres`/`connector`/`spring`, stops at its own first failure) and one for the
+  independent-component set (`external-relay`) - instead of one combined loop. A Spring/connector/
+  docker/postgres failure no longer blocks the relay's own recovery in the same tick, and a relay
+  failure no longer blocks core-chain recovery; each loop also passes `-ConnectorPort` through to
+  every internal `Get-ComponentStates` call (closing a gap where the connector's ownership-aware state
+  was silently skipped inside the recovery loop even though the top-level observation had it) and
+  records long-term failures/lockout independently per loop.
+- **A single cross-process runtime lock** (`RunningAI.Common.ps1`): `Enter-RunningAiRuntimeLock` /
+  `Exit-RunningAiRuntimeLock` wrap a named Windows Mutex (hashed from the runtime directory, so a test
+  runtime never collides with the real one) that `start-running-ai.ps1` and `stop-running-ai.ps1` both
+  acquire before doing anything and release in a `finally`; a busy runtime exits immediately with the
+  new `ExitCode.Busy` (25) rather than racing the other run. **The Watchdog itself never acquires this
+  lock** - it only invokes start/stop logic through its own in-process functions, never by launching
+  `start-running-ai.ps1`/`stop-running-ai.ps1` as a child process, so there is no path by which the
+  Watchdog could hold this lock while waiting on a child that needs the same lock. This is a deliberate,
+  permanent design constraint, not an oversight: a Watchdog that ever shells out to these scripts while
+  holding this lock would deadlock against them.
+- **`DryRun` is now provably read-only**: `Get-TrackedProcessId -ReadOnly` reports a stale/foreign PID
+  as absent without touching its `.pid` file (the real, non-DryRun path still removes it exactly as
+  before), and `Get-DefaultProbes -ReadOnly` / `Get-RuntimeObservation -ReadOnly` thread that switch
+  through every process-existence probe `watch-running-ai.ps1 -DryRun` uses, alongside
+  `Read-WatchdogState -ReadOnly` (above). `-DryRun` still writes nothing, quarantines nothing, and makes
+  no Docker/Garmin/process-termination call.
+
 ## What this phase deliberately does NOT do
 
 - Does not change `Get-ProcessComponentState`, `Stop-TrackedProcess`, or any Spring/relay call site.
-- Does not change the Watchdog's restart-budget policy, dependency ordering, or scheduler.
+- Does not change the Watchdog's short-term restart-budget policy (10 min / 3), dependency ordering, or
+  scheduler cron.
 - Does not retroactively tag an already-running connector's `.pid` file or auto-create its sidecar.
-- Does not touch the real Garmin connector, port 8765, or any operational `.env`/process at any point
-  in its own test suite (`scripts\windows\tests\Test-ConnectorOwnership.ps1` uses only temporary
-  loopback ports and short-lived PowerShell test processes it creates and tears down itself).
+- Does not change which component the boolean `Runner` executor contract reports as failed - the 2B
+  exit-code attribution (STEP B) is additive logging only.
+- Does not touch the real Garmin connector, port 8765, the real Spring/relay ports, or any operational
+  `.env`/process at any point in its own test suites (`Test-ConnectorOwnership.ps1`,
+  `Test-WatchdogRecoveryPolicy.ps1`) - both use only temporary loopback ports, a disposable
+  `RUNNING_AI_TEST_RUNTIME_DIR`, and short-lived PowerShell test processes they create and tear down
+  themselves.

@@ -208,12 +208,23 @@ Check 'a foreign process (different repo marker) on the port is FOREIGN_PROCESS,
 }
 
 # ---- 7. launcher alive, listener never started ---------------------------------------------------
-Check 'launcher alive but nothing listening yet is DOWN, not conflated with an ambiguous port' {
+# Phase 6I-1.7B-2B (STEP A-3) intentionally changed this exact scenario's classification: a tracked
+# PID that is alive AND genuinely ours, with nothing listening, now resolves to the dedicated
+# LAUNCHER_ALIVE_NO_LISTENER verdict (manageable - the stale launcher gets stopped before a fresh
+# start), never plain DOWN - starting a second launcher alongside a still-live one would race them
+# against each other. Plain DOWN is reserved for when NO live tracked launcher remains at all.
+Check 'launcher alive but nothing listening yet is LAUNCHER_ALIVE_NO_LISTENER, not plain DOWN' {
     $port = Get-SelfTestPort
     # No listener process at all for this port - $PID stands in for a live, ours-by-marker-only
     # launcher that simply has not spawned anything bound to the port.
     $o = Get-RunningAiConnectorOwnership -Port $port -TrackedPid $PID -Markers @('powershell') -Name ('selftest-ownership-' + [guid]::NewGuid().ToString('N'))
-    $o.Verdict -eq 'DOWN' -and (@($o.ManagedPids).Count -eq 0)
+    ($o.Verdict -eq 'LAUNCHER_ALIVE_NO_LISTENER') -and (@($o.ManagedPids).Count -eq 1) -and (@($o.ManagedPids)[0] -eq $PID) -and ($o.LauncherPid -eq $PID)
+}
+
+Check 'a tracked PID that is dead (not merely foreign) with nothing listening is plain DOWN' {
+    $port = Get-SelfTestPort
+    $o = Get-RunningAiConnectorOwnership -Port $port -TrackedPid 999999 -Markers @('powershell') -Name ('selftest-ownership-' + [guid]::NewGuid().ToString('N'))
+    ($o.Verdict -eq 'DOWN') -and (@($o.ManagedPids).Count -eq 0)
 }
 
 # ---- 8/9. launcher dead, listener survives (the real Phase 6I-1.7A scenario) ---------------------

@@ -20,7 +20,7 @@ $script:ConnectorDir = Join-Path $script:RepoRoot 'tools\garmin-connector'
 $script:ServerDir    = Join-Path $script:RepoRoot 'server'
 
 # Exit codes shared by start/stop/status so a Scheduled Task result identifies the failing layer.
-$script:ExitCode = @{ Ok = 0; Docker = 10; Postgres = 11; Connector = 12; Java = 13; Spring = 14; ExternalRelay = 15; Usage = 2; Other = 1; WatchdogError = 20; RecoveryFailed = 21; Cloudflared = 22; ExternalAccess = 23; ConnectorStopIncomplete = 24 }
+$script:ExitCode = @{ Ok = 0; Docker = 10; Postgres = 11; Connector = 12; Java = 13; Spring = 14; ExternalRelay = 15; Usage = 2; Other = 1; WatchdogError = 20; RecoveryFailed = 21; Cloudflared = 22; ExternalAccess = 23; ConnectorStopIncomplete = 24; Busy = 25 }
 
 function Get-RepoRoot { $script:RepoRoot }
 
@@ -39,6 +39,63 @@ function Get-ExitCodeFromError {
 }
 
 function Write-Step { param([string]$Message) Write-Host ("[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $Message) }
+
+# ---- cross-process start/stop serialization (Phase 6I-1.7B-2B, STEP F) -------------------------
+#
+# A named Mutex distinct from Watchdog's own "RunningAI-Watchdog-<hash>" overlap guard (which only
+# ever prevents two WATCHDOG TICKS from running at once) - this one serializes start-running-ai.ps1
+# and stop-running-ai.ps1 against EACH OTHER and against themselves, for the SAME canonical
+# runtime/worktree. Acquired by those two scripts THEMSELVES, at their own top level, for their own
+# run only.
+#
+# Deliberately NEVER acquired by RunningAI.Watchdog.ps1 or watch-running-ai.ps1: Watchdog only ever
+# reaches a start/stop operation by spawning start-running-ai.ps1 as a brand-new, SEPARATE PowerShell
+# process (Invoke-RecoveryAction's Start-Process calls) and synchronously waiting for it to exit. If
+# Watchdog itself held this same lock while doing that wait, and the child then tried to acquire the
+# identical lock, the two would deadlock: the parent blocked on the child's exit, the child blocked on
+# the parent's release - neither ever happens. Watchdog never taking this lock at all removes that
+# failure mode by construction, rather than relying on careful ordering to avoid it.
+#
+# The hash is derived from $script:RuntimeDir, not bare $script:RepoRoot: in a test
+# (RUNNING_AI_TEST_RUNTIME_DIR set), that already points at a disposable per-test directory, so a
+# test's lock name is naturally distinct from both the real canonical runtime's and from every other
+# concurrently-running test's - never contending with, or being confused for, a real operator's
+# start/stop. A real invocation's RuntimeDir is always "<repo root>\.runtime", so the name is still
+# perfectly stable (and shared) across repeated real runs against the same repo.
+function Get-RunningAiRuntimeLockName {
+    $hash = [BitConverter]::ToString([Security.Cryptography.SHA1]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($script:RuntimeDir.ToLowerInvariant()))).Replace('-', '').Substring(0, 12)
+    "Local\RunningAI-Runtime-$hash"
+}
+
+# Returns a live, OWNED Mutex handle on success, or $null when another start/stop against this SAME
+# runtime is already in progress and did not finish within $TimeoutSec - callers must treat $null as
+# "busy, do nothing, change no service state" (Exit-RunningAiRuntimeLock is a safe no-op on $null too,
+# so callers can always pass whatever this returns straight through to a finally block).
+function Enter-RunningAiRuntimeLock {
+    param([int]$TimeoutSec = 2)
+    $name = Get-RunningAiRuntimeLockName
+    $mutex = New-Object System.Threading.Mutex($false, $name)
+    try {
+        $acquired = $mutex.WaitOne([TimeSpan]::FromSeconds($TimeoutSec))
+    } catch [System.Threading.AbandonedMutexException] {
+        # The previous owner exited (crash, Stop-Process, a killed Scheduled Task run) without ever
+        # releasing - .NET still grants THIS caller ownership when that happens. Never treated as an
+        # error or as "the lock is now permanently stuck": an abandoned mutex is immediately usable,
+        # exactly like a normal acquire, so a single operator process dying never blocks every future
+        # start/stop against this runtime forever.
+        $acquired = $true
+    }
+    if ($acquired) { return $mutex }
+    try { $mutex.Dispose() } catch { }
+    return $null
+}
+
+function Exit-RunningAiRuntimeLock {
+    param($Mutex)
+    if (-not $Mutex) { return }
+    try { $Mutex.ReleaseMutex() } catch { }
+    try { $Mutex.Dispose() } catch { }
+}
 
 # Runs a native command, returns its exit code and discards output (avoids PowerShell 5.1
 # turning stderr lines into errors).
@@ -514,11 +571,19 @@ function Get-ConnectorMarkers { @('garmin_connector', ' serve', $script:RepoRoot
 function Get-SpringMarkers    { @('running-ai-server', '-jar', $script:RepoRoot) }
 
 # Returns the tracked PID when it is alive AND still our process; cleans a stale/foreign PID file.
+# -ReadOnly (Phase 6I-1.7B-2B, STEP G): a stale/foreign .pid file is normally removed here the
+# instant it is detected - correct for every real execution path, but a write side-effect that must
+# never happen just from a DryRun *observation*. When set, the stale file is reported exactly the
+# same way in the return value ($null) but left completely untouched on disk.
 function Get-TrackedProcessId {
-    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string[]]$Markers)
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string[]]$Markers, [switch]$ReadOnly)
     $tracked = Read-PidFile $Name
     if ($null -eq $tracked) { return $null }
     if (Test-ProcessIdentity -ProcessId $tracked -Markers $Markers) { return $tracked }
+    if ($ReadOnly) {
+        Write-Step "$Name.pid (PID $tracked) does not match this component - read-only check, left untouched."
+        return $null
+    }
     Write-Step "Removing stale $Name.pid (PID $tracked is not this component)."
     Remove-PidFile $Name
     return $null

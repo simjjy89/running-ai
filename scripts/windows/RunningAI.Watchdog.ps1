@@ -43,30 +43,130 @@ function ConvertTo-UnixSeconds { param([datetime]$Time) [long]([DateTimeOffset]$
 
 function New-EmptyHistory { $h = @{}; foreach ($c in $script:AllTrackedComponents) { $h[$c] = @() }; return $h }
 
-# Returns @{ Available; History; Note }. A missing file is a normal first run. A malformed file is
-# quarantined (renamed *.corrupt) and reported as NOT available: for that tick the watchdog must
-# not restart anything, because without restart history it cannot enforce the budget.
+# Phase 6I-1.7B-2B (STEP C/D): long-term failure tracking and lockout, persisted alongside (never
+# replacing) the existing short-term restart history. Separate from $History/Get-RestartCount, which
+# remain exactly as they were (10-minute/3-restart short-term budget, unchanged). One entry per
+# tracked component: { Failures = [unix seconds, FAILURES only - not every attempt]; LockedOutSince =
+# unix seconds | $null }. LockedOutSince, once set, is never cleared by this file's own machinery -
+# only Clear-RunningAiComponentLockout (an explicit, separately-invoked operator action) can reset it.
+function New-EmptyLongTermState {
+    $h = @{}
+    foreach ($c in $script:AllTrackedComponents) { $h[$c] = @{ Failures = @(); LockedOutSince = $null } }
+    return $h
+}
+
+function Get-LongTermFailureCount {
+    param([Parameter(Mandatory)]$LongTermState, [Parameter(Mandatory)][string]$Component, [Parameter(Mandatory)][datetime]$Now, [int]$WindowHours = 24)
+    $since = ConvertTo-UnixSeconds $Now.AddHours(-$WindowHours)
+    @(@($LongTermState[$Component].Failures) | Where-Object { $_ -ge $since }).Count
+}
+
+# Drops failure timestamps that fell out of the long-term window - LockedOutSince is NEVER touched
+# here (requirement: a lockout persists even once the failures that caused it age out of the window,
+# across reboots and Watchdog process restarts - the only point of a durable lockout is to require an
+# explicit operator look, not to quietly expire on its own).
+function Update-LongTermFailureWindow {
+    param([Parameter(Mandatory)]$LongTermState, [Parameter(Mandatory)][datetime]$Now, [int]$WindowHours = 24)
+    $since = ConvertTo-UnixSeconds $Now.AddHours(-$WindowHours)
+    foreach ($c in $script:AllTrackedComponents) {
+        $LongTermState[$c].Failures = @(@($LongTermState[$c].Failures) | Where-Object { $_ -ge $since })
+    }
+}
+
+function Add-LongTermFailure {
+    param([Parameter(Mandatory)]$LongTermState, [Parameter(Mandatory)][string]$Component, [Parameter(Mandatory)][datetime]$Now)
+    $LongTermState[$Component].Failures = @(@($LongTermState[$Component].Failures) + (ConvertTo-UnixSeconds $Now))
+}
+
+# Sets LockedOutSince the FIRST time the windowed long-term failure count reaches $MaxFailures - a
+# no-op if already locked (never re-stamps the timestamp, never un-locks). Call this right after
+# Add-LongTermFailure for the same component/tick.
+function Update-RunningAiLongTermLockout {
+    param([Parameter(Mandatory)]$LongTermState, [Parameter(Mandatory)][string]$Component, [Parameter(Mandatory)][datetime]$Now, [int]$WindowHours = 24, [int]$MaxFailures = 6)
+    if ($LongTermState[$Component].LockedOutSince) { return }
+    if ((Get-LongTermFailureCount -LongTermState $LongTermState -Component $Component -Now $Now -WindowHours $WindowHours) -ge $MaxFailures) {
+        $LongTermState[$Component].LockedOutSince = (ConvertTo-UnixSeconds $Now)
+    }
+}
+
+function Test-RunningAiComponentLockedOut {
+    param([Parameter(Mandatory)]$LongTermState, [Parameter(Mandatory)][string]$Component)
+    [bool]$LongTermState[$Component].LockedOutSince
+}
+
+# Explicit, separately-invoked operator action (Phase 6I-1.7B-2B, STEP C) - never called by any
+# automatic Watchdog code path. Clears both the lockout flag and the failure history for one
+# component, so a (freshly saved) state no longer blocks its recovery. Intended caller:
+# scripts/windows/clear-watchdog-lockout.ps1, run by hand after investigating why the component kept
+# failing - this phase does not run it against any real state.
+function Clear-RunningAiComponentLockout {
+    param([Parameter(Mandatory)]$LongTermState, [Parameter(Mandatory)][string]$Component)
+    $LongTermState[$Component] = @{ Failures = @(); LockedOutSince = $null }
+}
+
+# Returns @{ Available; History; LongTermState; Note }. A missing file is a normal first run. A
+# malformed file is quarantined (renamed *.corrupt) and reported as NOT available: for that tick the
+# watchdog must not restart anything, because without restart history it cannot enforce the budget.
+# A v1 file (no "longTerm" key - Phase 6I-1.7B-1 and earlier) loads its existing "restarts" history
+# exactly as before and gets a freshly-initialized, never-locked LongTermState - no restart history is
+# lost, and a v1 file is never mistaken for "corrupt" just because it predates long-term tracking.
+#
+# -ReadOnly (Phase 6I-1.7B-2B, STEP G): skips the quarantine Move-Item - a DryRun observation must
+# never rename/move a file on disk. The corrupt-file outcome (Available=$false, no history) is
+# reported identically either way; only the quarantine side-effect itself is suppressed.
 function Read-WatchdogState {
-    param([string]$Path = $script:StatePath)
-    if (-not (Test-Path -LiteralPath $Path)) { return @{ Available = $true; History = (New-EmptyHistory); Note = 'no state file (first run)' } }
+    param([string]$Path = $script:StatePath, [switch]$ReadOnly)
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return @{ Available = $true; History = (New-EmptyHistory); LongTermState = (New-EmptyLongTermState); Note = 'no state file (first run)' }
+    }
     try {
         $raw = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop
         $obj = ConvertFrom-Json $raw -ErrorAction Stop
         if ($null -eq $obj -or $null -eq $obj.restarts) { throw 'restarts missing' }
+        # Phase 6I-1.7B-2B: dot-notation on a ConvertFrom-Json PSCustomObject for a property that is
+        # genuinely absent (an older state file missing a component added later, or a pre-2B v1 file
+        # with no "longTerm" key at all) throws PropertyNotFoundException under this file's
+        # Set-StrictMode -Version Latest (see Get-RunningAiErrorDetails above for the same gotcha) -
+        # that exception would be swallowed by the catch below and misreported as a corrupt file. Read
+        # every optional key via PSObject.Properties instead of dot-notation.
+        $restartsObj = $obj.restarts
         $history = New-EmptyHistory
         foreach ($c in $script:AllTrackedComponents) {
-            $values = $obj.restarts.$c
-            if ($null -ne $values) {
+            $valuesProp = $restartsObj.PSObject.Properties[$c]
+            if ($valuesProp -and $null -ne $valuesProp.Value) {
                 $list = @()
-                foreach ($v in @($values)) { $list += [long]$v }
+                foreach ($v in @($valuesProp.Value)) { $list += [long]$v }
                 $history[$c] = $list
             }
         }
-        return @{ Available = $true; History = $history; Note = 'ok' }
+        # Migration: absent entirely (v1) -> a fresh, never-locked state per component. Present but
+        # missing one component's entry (e.g. a component added after this file was last written) ->
+        # that one component only gets a fresh entry, every other component's real data is preserved.
+        $longTermState = New-EmptyLongTermState
+        $longTermProp = $obj.PSObject.Properties['longTerm']
+        if ($longTermProp -and $longTermProp.Value) {
+            $longTermObj = $longTermProp.Value
+            foreach ($c in $script:AllTrackedComponents) {
+                $entryProp = $longTermObj.PSObject.Properties[$c]
+                if ($entryProp -and $null -ne $entryProp.Value) {
+                    $entry = $entryProp.Value
+                    $failures = @()
+                    foreach ($v in @($entry.failures)) { $failures += [long]$v }
+                    $longTermState[$c] = @{
+                        Failures       = $failures
+                        LockedOutSince = if ($null -ne $entry.lockedOutSince) { [long]$entry.lockedOutSince } else { $null }
+                    }
+                }
+            }
+        }
+        return @{ Available = $true; History = $history; LongTermState = $longTermState; Note = 'ok' }
     } catch {
+        if ($ReadOnly) {
+            return @{ Available = $false; History = (New-EmptyHistory); LongTermState = (New-EmptyLongTermState); Note = 'state file unreadable (read-only check, not quarantined)' }
+        }
         $corrupt = "$Path.corrupt"
         try { Move-Item -LiteralPath $Path -Destination $corrupt -Force -ErrorAction Stop } catch { }
-        return @{ Available = $false; History = (New-EmptyHistory); Note = "state file unreadable, quarantined as $(Split-Path $corrupt -Leaf)" }
+        return @{ Available = $false; History = (New-EmptyHistory); LongTermState = (New-EmptyLongTermState); Note = "state file unreadable, quarantined as $(Split-Path $corrupt -Leaf)" }
     }
 }
 
@@ -88,11 +188,19 @@ function Add-RestartRecord {
     $History[$Component] = @(@($History[$Component]) + (ConvertTo-UnixSeconds $Now))
 }
 
+# Phase 6I-1.7B-2B: writes schema version 2 (adds "longTerm" alongside the unchanged "restarts"
+# shape) - still one atomic Write-JsonAtomic call, same file. $LongTermState defaults to a fresh
+# empty one so any existing caller that does not yet track it (none left in this codebase, kept for
+# defensiveness) still produces a valid, parseable v2 file rather than erroring.
 function Save-WatchdogState {
-    param([Parameter(Mandatory)]$History, [string]$Path = $script:StatePath)
+    param([Parameter(Mandatory)]$History, $LongTermState = (New-EmptyLongTermState), [string]$Path = $script:StatePath)
     $restarts = [ordered]@{}
     foreach ($c in $script:AllTrackedComponents) { $restarts[$c] = @($History[$c]) }
-    Write-JsonAtomic -Path $Path -Object ([ordered]@{ version = 1; restarts = $restarts })
+    $longTerm = [ordered]@{}
+    foreach ($c in $script:AllTrackedComponents) {
+        $longTerm[$c] = [ordered]@{ failures = @($LongTermState[$c].Failures); lockedOutSince = $LongTermState[$c].LockedOutSince }
+    }
+    Write-JsonAtomic -Path $Path -Object ([ordered]@{ version = 2; restarts = $restarts; longTerm = $longTerm })
 }
 
 # ---- logging -------------------------------------------------------------------------------
@@ -111,7 +219,7 @@ function Write-WatchdogLog {
 # ---- observation ---------------------------------------------------------------------------
 
 function Get-DefaultProbes {
-    param([int]$ConnectorPort, [int]$SpringPort, [int]$RelayPort)
+    param([int]$ConnectorPort, [int]$SpringPort, [int]$RelayPort, [switch]$ReadOnly)
     $compose = Join-Path (Get-RepoRoot) 'docker-compose.yml'
     # .GetNewClosure() gives each probe its own copy of $ConnectorPort/$SpringPort/$RelayPort/
     # $compose so they keep working after Get-DefaultProbes returns - but a closure's new session
@@ -131,6 +239,14 @@ function Get-DefaultProbes {
     $testSpringHealthFn    = ${function:Test-SpringHealth}
     $testExternalRelayHealthFn = ${function:Test-ExternalRelayHealth}
     $testPortInUseFn       = ${function:Test-PortInUse}
+    # Phase 6I-1.7B-2B (STEP G): $ReadOnly must reach Get-TrackedProcessId so a DryRun observation
+    # never removes a stale/foreign .pid file. These three probes now reference a captured variable
+    # ($ReadOnly), so - same reason as every other probe here - they need .GetNewClosure() too, and
+    # therefore the SAME function-reference-variable workaround for the functions they call by name.
+    $getTrackedProcessIdFn = ${function:Get-TrackedProcessId}
+    $getConnectorMarkersFn = ${function:Get-ConnectorMarkers}
+    $getSpringMarkersFn    = ${function:Get-SpringMarkers}
+    $getExternalRelayMarkersFn = ${function:Get-ExternalRelayMarkers}
     @{
         Docker = {
             if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { return 'NO_CLI' }
@@ -147,27 +263,30 @@ function Get-DefaultProbes {
         }.GetNewClosure()
         ConnectorHealth   = { & $testConnectorHealthFn $ConnectorPort }.GetNewClosure()
         ConnectorPortUsed = { & $testPortInUseFn $ConnectorPort }.GetNewClosure()
-        ConnectorPid      = { Get-TrackedProcessId 'garmin-connector' (Get-ConnectorMarkers) }
+        ConnectorPid      = { & $getTrackedProcessIdFn 'garmin-connector' (& $getConnectorMarkersFn) -ReadOnly:$ReadOnly }.GetNewClosure()
         SpringHealth      = { & $testSpringHealthFn $SpringPort }.GetNewClosure()
         SpringPortUsed    = { & $testPortInUseFn $SpringPort }.GetNewClosure()
-        SpringPid         = { Get-TrackedProcessId 'spring' (Get-SpringMarkers) }
+        SpringPid         = { & $getTrackedProcessIdFn 'spring' (& $getSpringMarkersFn) -ReadOnly:$ReadOnly }.GetNewClosure()
         ExternalRelayHealth   = { & $testExternalRelayHealthFn $RelayPort }.GetNewClosure()
         ExternalRelayPortUsed = { & $testPortInUseFn $RelayPort }.GetNewClosure()
-        ExternalRelayPid      = { Get-TrackedProcessId 'external-relay' (Get-ExternalRelayMarkers) }
+        ExternalRelayPid      = { & $getTrackedProcessIdFn 'external-relay' (& $getExternalRelayMarkersFn) -ReadOnly:$ReadOnly }.GetNewClosure()
     }
 }
 
 # Collects raw facts. When a managed process is alive but its health check fails, the check is
 # repeated once after $RecheckDelaySec so a momentary hiccup is not treated as a persistent failure.
+# -ReadOnly (Phase 6I-1.7B-2B, STEP G): forwarded to Get-DefaultProbes so a DryRun observation never
+# removes a stale/foreign .pid file as a side effect of merely looking at it.
 function Get-RuntimeObservation {
     param(
         [int]$ConnectorPort = 8765,
         [int]$SpringPort = 8080,
         [int]$RelayPort = (Get-ExternalRelayConfiguredPort),
         [int]$RecheckDelaySec = 10,
-        [hashtable]$Probes
+        [hashtable]$Probes,
+        [switch]$ReadOnly
     )
-    $p = Get-DefaultProbes -ConnectorPort $ConnectorPort -SpringPort $SpringPort -RelayPort $RelayPort
+    $p = Get-DefaultProbes -ConnectorPort $ConnectorPort -SpringPort $SpringPort -RelayPort $RelayPort -ReadOnly:$ReadOnly
     if ($Probes) { foreach ($k in $Probes.Keys) { $p[$k] = $Probes[$k] } }
 
     $docker = & $p.Docker
@@ -314,7 +433,8 @@ function Get-RecoveryPlan {
         [Parameter(Mandatory)][datetime]$Now,
         [bool]$HistoryAvailable = $true,
         [int]$WindowMinutes = 10,
-        [int]$MaxRestarts = 3
+        [int]$MaxRestarts = 3,
+        $LongTermState = $null
     )
     $actions = New-Object System.Collections.ArrayList
     $blocked = New-Object System.Collections.ArrayList
@@ -324,6 +444,13 @@ function Get-RecoveryPlan {
         $s = $States[$c]
         if ($s.State -eq 'UP') { continue }
         if ($s.State -eq 'UNKNOWN' -and $s.Reason -eq 'DEPENDENCY_DOCKER') { continue }   # judged after Docker is recovered
+
+        # Phase 6I-1.7B-2B (STEP C): a persistent long-term lockout blocks this component outright,
+        # before even the short-term budget is consulted, and ($LongTermState optional - omitted by
+        # any existing caller that does not yet track it, reproducing the exact pre-lockout behavior).
+        if ($LongTermState -and (Test-RunningAiComponentLockedOut -LongTermState $LongTermState -Component $c)) {
+            [void]$blocked.Add([pscustomobject]@{ Component = $c; Reason = 'LOCKED_OUT' }); $ready = $false; continue
+        }
 
         if (-not $ready) { [void]$blocked.Add([pscustomobject]@{ Component = $c; Reason = 'DEPENDENCY_NOT_READY' }); continue }
 
@@ -365,6 +492,10 @@ function Get-RecoveryPlan {
     foreach ($c in $script:IndependentComponents) {
         $s = $States[$c]
         if ($s.State -eq 'UP') { continue }
+
+        if ($LongTermState -and (Test-RunningAiComponentLockedOut -LongTermState $LongTermState -Component $c)) {
+            [void]$blocked.Add([pscustomobject]@{ Component = $c; Reason = 'LOCKED_OUT' }); continue
+        }
 
         $action = $null; $preStop = $false; $unrecoverable = $null
         switch ($c) {
@@ -429,7 +560,7 @@ function Invoke-RecoveryAction {
                 'DOWN' {
                     # Confirmed nothing is listening - safe to fall through to the start attempt below.
                 }
-                { $_ -in @('SELF_OWNED', 'LAUNCHER_CHILD', 'ORPHANED_MANAGED_PROCESS') } {
+                { $_ -in @('SELF_OWNED', 'LAUNCHER_CHILD', 'ORPHANED_MANAGED_PROCESS', 'LAUNCHER_ALIVE_NO_LISTENER') } {
                     if (@($ownership.ManagedPids).Count -eq 0) {
                         # Should not happen given the verdict, but fail-safe regardless of why.
                         Write-Step "Garmin connector pre-stop blocked: verdict $($ownership.Verdict) reported no manageable PIDs; refusing to restart."
@@ -474,15 +605,56 @@ function Invoke-RecoveryAction {
         $argLine = "-NoProfile -ExecutionPolicy Bypass -File $(Quote-Argument $script)"
         $proc = Start-Process -FilePath $ps -ArgumentList $argLine -WindowStyle Hidden -PassThru
         if (-not $proc.WaitForExit(60000)) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue; return $false }
+        if ($proc.ExitCode -ne 0) { Write-WatchdogLog -Component $Action.Component -State 'RECOVERING' -Reason $Action.Reason -Action $Action.Action -Result "EXIT_CODE_$($proc.ExitCode)" }
         return ($proc.ExitCode -eq 0)
     }
 
+    # Phase 6I-1.7B-2B (STEP B): start-running-ai.ps1 is a single shared script covering Docker ->
+    # PostgreSQL -> connector -> Spring, each with its OWN dedicated exit code (see RunningAI.Common.ps1
+    # $ExitCode) - it does NOT report "connector failed" vs "Spring failed" as one undifferentiated
+    # failure. Previously only ($proc.ExitCode -eq 0) was ever read, so a RESTART_CONNECTOR action that
+    # failed because of an unrelated Spring problem (a real-world possibility: the idempotent script
+    # tries every unhealthy layer, not just the one this action targeted) would get silently recorded
+    # as a connector failure - the real cause mislabeled. The actual failing layer is now logged
+    # explicitly via the exit code, distinct from which component the ATTEMPT (and its restart-budget
+    # consumption, unchanged - see Invoke-WatchdogRecovery) was charged to. A code this mapping does not
+    # recognize is logged as UNKNOWN_FAILURE rather than guessed.
     $script = Join-Path $PSScriptRoot 'start-running-ai.ps1'
     $ps = (Get-Command powershell.exe).Source
     $argLine = "-NoProfile -ExecutionPolicy Bypass -File $(Quote-Argument $script) -ConnectorPort $ConnectorPort -SpringPort $SpringPort"
     $proc = Start-Process -FilePath $ps -ArgumentList $argLine -WindowStyle Hidden -PassThru
-    if (-not $proc.WaitForExit(900000)) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue; return $false }
+    if (-not $proc.WaitForExit(900000)) {
+        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        Write-WatchdogLog -Component $Action.Component -State 'RECOVERING' -Reason $Action.Reason -Action $Action.Action -Result 'TIMED_OUT'
+        return $false
+    }
+    if ($proc.ExitCode -ne 0) {
+        $actualComponent = Get-RunningAiComponentFromExitCode -ExitCode $proc.ExitCode
+        $actualLabel = if ($actualComponent) { $actualComponent.ToUpper() } else { 'UNKNOWN_FAILURE' }
+        if ($actualComponent -and $actualComponent -ne $Action.Component) {
+            Write-WatchdogLog -Component $Action.Component -State 'RECOVERING' -Reason $Action.Reason -Action $Action.Action -Result "FAILED_ACTUAL_COMPONENT_$($actualLabel)_EXIT_$($proc.ExitCode)"
+        } else {
+            Write-WatchdogLog -Component $Action.Component -State 'RECOVERING' -Reason $Action.Reason -Action $Action.Action -Result "FAILED_EXIT_$($proc.ExitCode)"
+        }
+    }
     return ($proc.ExitCode -eq 0)
+}
+
+# Maps a start-running-ai.ps1 exit code back to the component it actually describes - $ExitCode.Java
+# (JDK discovery) maps to 'spring' (Java is only ever needed to start Spring in this codebase, never
+# the Python connector), $ExitCode.Ok and any unrecognized code map to $null (no specific component -
+# "success" or "cannot attribute", never a guess).
+function Get-RunningAiComponentFromExitCode {
+    param([int]$ExitCode)
+    switch ($ExitCode) {
+        $script:ExitCode.Docker        { 'docker' }
+        $script:ExitCode.Postgres      { 'postgres' }
+        $script:ExitCode.Connector     { 'connector' }
+        $script:ExitCode.Java          { 'spring' }
+        $script:ExitCode.Spring        { 'spring' }
+        $script:ExitCode.ExternalRelay { 'external-relay' }
+        default                        { $null }
+    }
 }
 
 # Observe -> plan -> run ONLY the first planned action -> observe again, so dependency order is
@@ -498,20 +670,72 @@ function Invoke-WatchdogRecovery {
         [Parameter(Mandatory)][datetime]$Now,
         [int]$WindowMinutes = 10,
         [int]$MaxRestarts = 3,
-        [int]$MaxSteps = 6
+        [int]$MaxSteps = 6,
+        $ConnectorPort = $null,
+        $LongTermState = $null,
+        [int]$LongTermWindowHours = 24,
+        [int]$LongTermMaxFailures = 6
     )
-    $steps = @(); $failed = $false
+    # Phase 6I-1.7B-2B (STEP A-1): $ConnectorPort was previously NEVER passed to Get-ComponentStates
+    # here, even though watch-running-ai.ps1's OWN direct calls (before/after this function runs) do
+    # pass it - so the connector's ownership-aware classification (Get-ConnectorComponentState) used
+    # the legacy FOREIGN_PROCESS-guessing fallback for every decision actually made DURING recovery,
+    # while the before/after snapshots used the real ownership model. The whole cycle now shares one
+    # consistent policy.
+    #
+    # Phase 6I-1.7B-2B (STEP E): core-chain and independent (relay) actions are executed in two
+    # SEPARATE loops. The single shared loop here previously took only $plan.Actions[0] each
+    # iteration and broke entirely on any failure - so a failed connector/Spring action (first in the
+    # combined list) could prevent the relay's action (second) from ever being attempted in the same
+    # tick, even though Get-RecoveryPlan's own design (see its comments) already computes relay
+    # recovery completely independently. The core chain still stops at its first failure (dependency
+    # order matters: Docker before Postgres before connector before Spring) - the relay loop's own
+    # failure never affects the core chain and vice versa.
+    $steps = @(); $coreFailed = $false; $relayFailed = $false
+
     for ($i = 0; $i -lt $MaxSteps; $i++) {
-        $states = Get-ComponentStates (& $Observe)
-        $plan = Get-RecoveryPlan -States $states -History $History -Now $Now -HistoryAvailable $HistoryAvailable -WindowMinutes $WindowMinutes -MaxRestarts $MaxRestarts
-        if ($plan.Actions.Count -eq 0) { break }
-        $next = $plan.Actions[0]
+        $states = Get-ComponentStates (& $Observe) -ConnectorPort $ConnectorPort
+        $plan = Get-RecoveryPlan -States $states -History $History -Now $Now -HistoryAvailable $HistoryAvailable -WindowMinutes $WindowMinutes -MaxRestarts $MaxRestarts -LongTermState $LongTermState
+        $coreActions = @($plan.Actions | Where-Object { $_.Component -in $script:Components })
+        if ($coreActions.Count -eq 0) { break }
+        $next = $coreActions[0]
+        Add-RestartRecord -History $History -Component $next.Component -Now $Now
+        $runResult = & $Runner $next
+        $ok = [bool]$runResult
+        $steps += [pscustomobject]@{ Component = $next.Component; Action = $next.Action; Reason = $next.Reason; Result = $(if ($ok) { 'SUCCESS' } else { 'FAILED' }) }
+        if (-not $ok) {
+            # Phase 6I-1.7B-2B (STEP C): a FAILURE (not merely an attempt) counts toward the long-term
+            # lockout - recorded regardless of whether $LongTermState was supplied (a $null one is
+            # simply discarded by these functions' own no-op-on-null guards... actually both REQUIRE a
+            # non-null state, so only record when one was actually given, preserving every existing
+            # caller that does not pass this parameter at all).
+            if ($LongTermState) {
+                Add-LongTermFailure -LongTermState $LongTermState -Component $next.Component -Now $Now
+                Update-RunningAiLongTermLockout -LongTermState $LongTermState -Component $next.Component -Now $Now -WindowHours $LongTermWindowHours -MaxFailures $LongTermMaxFailures
+            }
+            $coreFailed = $true; break
+        }
+    }
+
+    for ($i = 0; $i -lt $MaxSteps; $i++) {
+        $states = Get-ComponentStates (& $Observe) -ConnectorPort $ConnectorPort
+        $plan = Get-RecoveryPlan -States $states -History $History -Now $Now -HistoryAvailable $HistoryAvailable -WindowMinutes $WindowMinutes -MaxRestarts $MaxRestarts -LongTermState $LongTermState
+        $independentActions = @($plan.Actions | Where-Object { $_.Component -in $script:IndependentComponents })
+        if ($independentActions.Count -eq 0) { break }
+        $next = $independentActions[0]
         Add-RestartRecord -History $History -Component $next.Component -Now $Now
         $ok = [bool](& $Runner $next)
         $steps += [pscustomobject]@{ Component = $next.Component; Action = $next.Action; Reason = $next.Reason; Result = $(if ($ok) { 'SUCCESS' } else { 'FAILED' }) }
-        if (-not $ok) { $failed = $true; break }
+        if (-not $ok) {
+            if ($LongTermState) {
+                Add-LongTermFailure -LongTermState $LongTermState -Component $next.Component -Now $Now
+                Update-RunningAiLongTermLockout -LongTermState $LongTermState -Component $next.Component -Now $Now -WindowHours $LongTermWindowHours -MaxFailures $LongTermMaxFailures
+            }
+            $relayFailed = $true; break
+        }
     }
-    [pscustomobject]@{ Steps = $steps; Failed = $failed }
+
+    [pscustomobject]@{ Steps = $steps; Failed = ($coreFailed -or $relayFailed) }
 }
 
 # ---- scheduled task definition (built in memory; registering is the installer's job) ------------

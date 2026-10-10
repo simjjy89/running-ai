@@ -35,7 +35,14 @@ param(
     [int]$WindowMinutes = 10,
     [int]$MaxRestarts = 3,
     [int]$LogMaxSizeMB = 10,
-    [int]$LogRetentionDays = 14
+    [int]$LogRetentionDays = 14,
+    # Phase 6I-1.7B-2B (STEP C): long-term lockout, independent of and on top of the short-term
+    # $WindowMinutes/$MaxRestarts budget above. Recommended defaults per the work order: 24h / 6
+    # FAILURES (not mere attempts). Once a component crosses this, it is LOCKED_OUT until an
+    # explicit operator action (scripts/windows/clear-watchdog-lockout.ps1) clears it - never
+    # automatically, not even after the 24h window itself has long since passed.
+    [int]$LongTermWindowHours = 24,
+    [int]$LongTermMaxFailures = 6
 )
 
 . "$PSScriptRoot\RunningAI.Watchdog.ps1"
@@ -64,18 +71,27 @@ try {
         Remove-ExpiredLogs -LogDir $script:LogDir -MaxAgeDays $LogRetentionDays | Out-Null
     }
 
-    $state = Read-WatchdogState
+    # Phase 6I-1.7B-2B (STEP G): -ReadOnly:$DryRun on both calls below is what actually makes DryRun
+    # read-only. Previously a corrupt watchdog-state.json was still quarantined, and a stale/foreign
+    # .pid file was still removed, as a side effect of merely observing - BEFORE the DryRun branch's
+    # own "exit, nothing written" was ever reached.
+    $state = Read-WatchdogState -ReadOnly:$DryRun
     $history = $state.History
     Update-HistoryWindow -History $history -Now $now -WindowMinutes $WindowMinutes
+    $longTermState = $state.LongTermState
+    Update-LongTermFailureWindow -LongTermState $longTermState -Now $now -WindowHours $LongTermWindowHours
 
-    $observe = { Get-RuntimeObservation -ConnectorPort $ConnectorPort -SpringPort $SpringPort -RecheckDelaySec $RecheckDelaySec }
+    $observe = { Get-RuntimeObservation -ConnectorPort $ConnectorPort -SpringPort $SpringPort -RecheckDelaySec $RecheckDelaySec -ReadOnly:$DryRun }
     $states = Get-ComponentStates (& $observe) -ConnectorPort $ConnectorPort
-    $plan = Get-RecoveryPlan -States $states -History $history -Now $now -HistoryAvailable $state.Available -WindowMinutes $WindowMinutes -MaxRestarts $MaxRestarts
+    $plan = Get-RecoveryPlan -States $states -History $history -Now $now -HistoryAvailable $state.Available -WindowMinutes $WindowMinutes -MaxRestarts $MaxRestarts -LongTermState $longTermState
     $hint = Get-GarminHintFromLog -Now $now
 
     if ($DryRun) {
         Write-Host 'DRY RUN - nothing is executed and no files are written.'
-        foreach ($c in $script:AllTrackedComponents) { Write-Host ("{0,-10} {1,-10} {2}" -f $c, $states[$c].State, $states[$c].Reason) }
+        foreach ($c in $script:AllTrackedComponents) {
+            $lockNote = if (Test-RunningAiComponentLockedOut -LongTermState $longTermState -Component $c) { ' [LOCKED_OUT]' } else { '' }
+            Write-Host ("{0,-10} {1,-10} {2}{3}" -f $c, $states[$c].State, $states[$c].Reason, $lockNote)
+        }
         if ($hint) { Write-Host "Garmin hint : $hint (informational; never causes a restart)" }
         if (-not $state.Available) { Write-Host "State       : $($state.Note) -> no recovery this tick (fail safe)" }
         if ($plan.Actions.Count -eq 0) { Write-Host 'Planned actions: none' }
@@ -91,14 +107,15 @@ try {
     if (-not $NoRecovery -and $state.Available -and $plan.Actions.Count -gt 0) {
         $runner = { param($a) Invoke-RecoveryAction -Action $a -ConnectorPort $ConnectorPort -SpringPort $SpringPort }
         $result = Invoke-WatchdogRecovery -Observe $observe -Runner $runner -History $history -HistoryAvailable $state.Available -Now $now `
-            -WindowMinutes $WindowMinutes -MaxRestarts $MaxRestarts
+            -WindowMinutes $WindowMinutes -MaxRestarts $MaxRestarts -ConnectorPort $ConnectorPort `
+            -LongTermState $longTermState -LongTermWindowHours $LongTermWindowHours -LongTermMaxFailures $LongTermMaxFailures
         $steps = @($result.Steps); $recoveryFailed = $result.Failed
         foreach ($s in $steps) { Write-WatchdogLog -Component $s.Component -State 'RECOVERING' -Reason $s.Reason -Action $s.Action -Result $s.Result }
     }
 
     # Final picture (after any recovery) for the status file.
     $finalStates = if ($steps.Count -gt 0) { Get-ComponentStates (& $observe) -ConnectorPort $ConnectorPort } else { $states }
-    $finalPlan = if ($steps.Count -gt 0) { Get-RecoveryPlan -States $finalStates -History $history -Now $now -HistoryAvailable $state.Available -WindowMinutes $WindowMinutes -MaxRestarts $MaxRestarts } else { $plan }
+    $finalPlan = if ($steps.Count -gt 0) { Get-RecoveryPlan -States $finalStates -History $history -Now $now -HistoryAvailable $state.Available -WindowMinutes $WindowMinutes -MaxRestarts $MaxRestarts -LongTermState $longTermState } else { $plan }
     $blocked = @($finalPlan.Blocked)
     foreach ($b in $blocked) { Write-WatchdogLog -Component $b.Component -State $finalStates[$b.Component].State -Reason $b.Reason -Action 'NONE' -Result 'NOT_TOUCHED' }
     $overall = Get-OverallState -States $finalStates -Blocked $blocked -GarminHint $hint
@@ -118,6 +135,20 @@ try {
     $connectorOwnershipProp = $finalStates['connector'].PSObject.Properties['OwnershipVerdict']
     $connectorOwnership = if ($connectorOwnershipProp) { [ordered]@{ verdict = $connectorOwnershipProp.Value } } else { $null }
 
+    # Phase 6I-1.7B-2B (STEP C/D): per-component long-term lockout visibility - additive, same
+    # non-secret vocabulary as everything else in this file (a boolean, a failure count, and - only
+    # when locked - the UTC timestamp it happened). Never a CommandLine or credential.
+    $longTermLockout = [ordered]@{}
+    foreach ($c in $script:AllTrackedComponents) {
+        $failureCount = Get-LongTermFailureCount -LongTermState $longTermState -Component $c -Now $now -WindowHours $LongTermWindowHours
+        $lockedOutSince = $longTermState[$c].LockedOutSince
+        $longTermLockout[$c] = [ordered]@{
+            lockedOut = [bool]$lockedOutSince
+            failureCountInWindow = $failureCount
+            lockedOutSinceUtc = if ($lockedOutSince) { [DateTimeOffset]::FromUnixTimeSeconds($lockedOutSince).UtcDateTime.ToString('yyyy-MM-ddTHH:mm:ssZ') } else { $null }
+        }
+    }
+
     Write-JsonAtomic -Path $script:StatusPath -Object ([ordered]@{
         checkedAt = $now.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
         overall = $overall
@@ -127,8 +158,9 @@ try {
         lastAction = $lastAction
         restartBudget = [ordered]@{ windowMinutes = $WindowMinutes; maxRestarts = $MaxRestarts; used = $budget }
         connectorOwnership = $connectorOwnership
+        longTermLockout = [ordered]@{ windowHours = $LongTermWindowHours; maxFailures = $LongTermMaxFailures; components = $longTermLockout }
     })
-    Save-WatchdogState -History $history
+    Save-WatchdogState -History $history -LongTermState $longTermState
     Write-WatchdogLog -Component 'watchdog' -State $overall -Action $lastAction -Result $(if ($recoveryFailed) { 'RECOVERY_FAILED' } else { 'OK' })
 
     Write-Step "Watchdog: overall=$overall lastAction=$lastAction"

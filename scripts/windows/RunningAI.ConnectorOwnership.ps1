@@ -258,8 +258,13 @@ function Set-RunningAiConnectorOwnerMetaFromLive {
 #                               ambiguous port query (2+ distinct owning PIDs reported), an outright
 #                               port-query failure, or a sidecar that conflicts with what's actually
 #                               observed. Never auto-managed by any caller.
+#   LAUNCHER_ALIVE_NO_LISTENER - nothing is listening, but the tracked launcher is alive and ours
+#                               (Phase 6I-1.7B-2B) - its listener child died or never started. NOT
+#                               the same as DOWN: starting a fresh connector here would race a second
+#                               launcher against the still-live one. Manageable - the stale launcher
+#                               itself is stopped before a fresh start is attempted.
 #   DOWN                      - nothing is listening on the port at all (confirmed, not merely
-#                               "unknown").
+#                               "unknown"), AND no live tracked launcher remains either.
 #
 # ManagedPids is the exact, order-independent set of live PIDs a caller may safely act on (stop,
 # restart) for verdicts SELF_OWNED / LAUNCHER_CHILD / ORPHANED_MANAGED_PROCESS, and is always empty
@@ -310,6 +315,19 @@ function Get-RunningAiConnectorOwnership {
         return New-RunningAiOwnershipResult -Verdict 'UNKNOWN_OWNER' -LauncherPid $null -ListenerPid $null -ManagedPids @() -Detail 'Port query failed unexpectedly; ownership cannot be established.'
     }
     if ($listenerQuery.Pids.Count -eq 0) {
+        # Phase 6I-1.7B-2B (STEP A-3): a confirmed-empty port is only a safe "start fresh" DOWN state
+        # when there is no live launcher left to conflict with a new one. If the tracked launcher is
+        # still alive and genuinely ours (its child listener died or never started, but the launcher
+        # itself is a zombie-ish survivor), blindly reporting DOWN would let a caller start a SECOND
+        # launcher alongside the first - two venv processes racing for the same port once their
+        # children come up. This is its own verdict, manageable (the stale launcher can be stopped
+        # before a fresh start), never silently folded into plain DOWN.
+        if ($TrackedPid) {
+            $trackedInfo = Get-RunningAiProcessInfo -ProcessId $TrackedPid
+            if ($trackedInfo -and (Test-ProcessIdentity -ProcessId $TrackedPid -Markers $Markers)) {
+                return New-RunningAiOwnershipResult -Verdict 'LAUNCHER_ALIVE_NO_LISTENER' -LauncherPid $TrackedPid -ListenerPid $null -ManagedPids @($TrackedPid) -Detail 'Tracked launcher is alive and ours, but nothing is listening on the port - its listener died or never started.' -LauncherInfo $trackedInfo
+            }
+        }
         return New-RunningAiOwnershipResult -Verdict 'DOWN' -LauncherPid $null -ListenerPid $null -ManagedPids @() -Detail 'Nothing is listening on the port.'
     }
     if ($listenerQuery.Pids.Count -gt 1) {
@@ -445,7 +463,7 @@ function Stop-RunningAiConnectorManaged {
         [int]$TimeoutSec = 15,
         [string]$Name = 'garmin-connector'
     )
-    $manageable = @('SELF_OWNED', 'LAUNCHER_CHILD', 'ORPHANED_MANAGED_PROCESS')
+    $manageable = @('SELF_OWNED', 'LAUNCHER_CHILD', 'ORPHANED_MANAGED_PROCESS', 'LAUNCHER_ALIVE_NO_LISTENER')
     $originalManagedCount = @($Ownership.ManagedPids).Count
     # Safe-optional read (same pattern as Get-RunningAiErrorDetails elsewhere in this codebase): a
     # legacy or hand-built Ownership-shaped object may not have ManagedPidSnapshot as a property at
@@ -476,8 +494,14 @@ function Stop-RunningAiConnectorManaged {
     # but reused must never be reported as if it simply exited cleanly.
     $aliveNow = @($baseline.Keys | Where-Object { Get-RunningAiProcessInfo -ProcessId $_ })
     if (@($aliveNow).Count -eq 0) {
-        Remove-RunningAiOwnerMeta -Name $Name
-        return New-RunningAiStopOutcome -Result 'already-gone' -Verdict $Ownership.Verdict -PortFreed (-not (Test-PortInUse $Port))
+        # Phase 6I-1.7B-2B (STEP A-2): the baseline-tracked PID(s) being gone does NOT by itself mean
+        # the metadata is safe to discard - a different, unrelated process may already have grabbed
+        # the port in the meantime. Only clear it when the port is ALSO confirmed free; otherwise a
+        # future orphan-recognition check would lose the one piece of evidence that could later prove
+        # whatever is on the port now is NOT a continuation of what we used to manage.
+        $portFreedNow = -not (Test-PortInUse $Port)
+        if ($portFreedNow) { Remove-RunningAiOwnerMeta -Name $Name }
+        return New-RunningAiStopOutcome -Result 'already-gone' -Verdict $Ownership.Verdict -PortFreed $portFreedNow
     }
     $validAtEntry = & $getStillValid $aliveNow
     if (@($validAtEntry).Count -ne $originalManagedCount) {

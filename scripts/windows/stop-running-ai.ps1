@@ -74,6 +74,15 @@ function Stop-GarminConnectorComponent {
     return $false
 }
 
+# Phase 6I-1.7B-2B (STEP F): serializes against a concurrent start-running-ai.ps1 (or another
+# stop-running-ai.ps1) targeting this SAME runtime - see RunningAI.Common.ps1's
+# Enter-RunningAiRuntimeLock. A busy runtime stops nothing at all rather than racing the other run.
+$runtimeLock = Enter-RunningAiRuntimeLock -TimeoutSec 5
+if (-not $runtimeLock) {
+    Write-Step 'Another start-running-ai.ps1 or stop-running-ai.ps1 is already in progress for this runtime; skipping (no service state changed).'
+    exit $ExitCode.Busy
+}
+
 try {
     Stop-Component 'External relay' 'external-relay' (Get-ExternalRelayMarkers) $RelayTimeoutSec
     Stop-Component 'Spring Boot' 'spring' (Get-SpringMarkers) $SpringTimeoutSec
@@ -96,4 +105,6 @@ try {
 } catch {
     Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
     exit (Get-ExitCodeFromError $_)
+} finally {
+    Exit-RunningAiRuntimeLock $runtimeLock
 }

@@ -86,6 +86,18 @@ function Stop-NewConnectorOnFailure {
     }
 }
 
+# Phase 6I-1.7B-2B (STEP F): serializes against a concurrent stop-running-ai.ps1 (or another
+# start-running-ai.ps1) targeting this SAME runtime. See RunningAI.Common.ps1's
+# Enter-RunningAiRuntimeLock for why this is acquired HERE, by this script itself, and never by
+# RunningAI.Watchdog.ps1 (which only ever spawns this script as a separate process). A busy runtime
+# changes NOTHING - no Docker/connector/Spring call is made at all - and reports it distinctly
+# (Exit code 25) rather than silently proceeding to race the other run.
+$runtimeLock = Enter-RunningAiRuntimeLock -TimeoutSec 5
+if (-not $runtimeLock) {
+    Write-Step 'Another start-running-ai.ps1 or stop-running-ai.ps1 is already in progress for this runtime; skipping (no service state changed).'
+    exit $ExitCode.Busy
+}
+
 try {
     New-Item -ItemType Directory -Force $script:LogDir | Out-Null
     Remove-ExpiredLogs -LogDir $script:LogDir | Out-Null
@@ -149,6 +161,23 @@ try {
     } else {
         if (Test-PortInUse $ConnectorPort) {
             Stop-WithError $ExitCode.Connector "Port $ConnectorPort is in use but is not a healthy Garmin connector. Free the port or pass -ConnectorPort."
+        }
+        # Phase 6I-1.7B-2B (STEP A-3): nothing is listening, but a stale tracked launcher may still be
+        # alive (its listener child died or never started) - starting a brand new one here without
+        # checking would race a second launcher against the still-live one. Stop the stale survivor
+        # first; a failure to fully stop it aborts the start rather than risk a duplicate.
+        $staleTrackedPid = Read-PidFile 'garmin-connector'
+        if ($staleTrackedPid) {
+            $staleOwnership = Get-RunningAiConnectorOwnership -Port $ConnectorPort -TrackedPid $staleTrackedPid -Markers (Get-ConnectorMarkers)
+            if ($staleOwnership.Verdict -eq 'LAUNCHER_ALIVE_NO_LISTENER') {
+                Write-Step "Garmin connector: tracked launcher (PID $staleTrackedPid) is alive but nothing is listening; stopping it before starting fresh."
+                $staleStopResult = Stop-RunningAiConnectorManaged -Ownership $staleOwnership -Port $ConnectorPort -TimeoutSec 15
+                if (Test-RunningAiConnectorStopWasClean -StopResult $staleStopResult) {
+                    Remove-PidFile 'garmin-connector'
+                } else {
+                    Stop-WithError $ExitCode.Connector "A stale Garmin connector launcher (PID $staleTrackedPid) could not be fully stopped (result=$($staleStopResult.Result)); refusing to start a second one. See logs and .runtime\garmin-connector.pid."
+                }
+            }
         }
         $py = Join-Path $script:ConnectorDir '.venv\Scripts\python.exe'
         if (-not (Test-Path $py)) {
@@ -276,4 +305,6 @@ try {
     $code = Get-ExitCodeFromError $_
     Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
     exit $code
+} finally {
+    Exit-RunningAiRuntimeLock $runtimeLock
 }
