@@ -20,7 +20,7 @@ $script:ConnectorDir = Join-Path $script:RepoRoot 'tools\garmin-connector'
 $script:ServerDir    = Join-Path $script:RepoRoot 'server'
 
 # Exit codes shared by start/stop/status so a Scheduled Task result identifies the failing layer.
-$script:ExitCode = @{ Ok = 0; Docker = 10; Postgres = 11; Connector = 12; Java = 13; Spring = 14; ExternalRelay = 15; Usage = 2; Other = 1; WatchdogError = 20; RecoveryFailed = 21; Cloudflared = 22; ExternalAccess = 23 }
+$script:ExitCode = @{ Ok = 0; Docker = 10; Postgres = 11; Connector = 12; Java = 13; Spring = 14; ExternalRelay = 15; Usage = 2; Other = 1; WatchdogError = 20; RecoveryFailed = 21; Cloudflared = 22; ExternalAccess = 23; ConnectorStopIncomplete = 24 }
 
 function Get-RepoRoot { $script:RepoRoot }
 

@@ -109,6 +109,15 @@ try {
     foreach ($c in $script:AllTrackedComponents) { $componentStatus[$c] = $finalStates[$c].State }
     $lastAction = if ($steps.Count -gt 0) { ($steps | ForEach-Object { "$($_.Action):$($_.Result)" }) -join ',' } else { 'NONE' }
 
+    # Phase 6I-1.7B-2A: surfaces the connector's resolved ownership verdict for operator diagnosis -
+    # a new, additive top-level field. Never includes a CommandLine, credential or any raw process
+    # detail - just the fixed verdict vocabulary (Get-RunningAiConnectorOwnership). $null when the
+    # connector state has no verdict attached at all (should not normally happen once -ConnectorPort
+    # is passed, kept as a safe default regardless). Existing fields (components/blocked/
+    # restartBudget) are completely unchanged - this is additive only.
+    $connectorOwnershipProp = $finalStates['connector'].PSObject.Properties['OwnershipVerdict']
+    $connectorOwnership = if ($connectorOwnershipProp) { [ordered]@{ verdict = $connectorOwnershipProp.Value } } else { $null }
+
     Write-JsonAtomic -Path $script:StatusPath -Object ([ordered]@{
         checkedAt = $now.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
         overall = $overall
@@ -117,6 +126,7 @@ try {
         garminHint = $hint
         lastAction = $lastAction
         restartBudget = [ordered]@{ windowMinutes = $WindowMinutes; maxRestarts = $MaxRestarts; used = $budget }
+        connectorOwnership = $connectorOwnership
     })
     Save-WatchdogState -History $history
     Write-WatchdogLog -Component 'watchdog' -State $overall -Action $lastAction -Result $(if ($recoveryFailed) { 'RECOVERY_FAILED' } else { 'OK' })

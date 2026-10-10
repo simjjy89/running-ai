@@ -264,6 +264,39 @@ function Set-RunningAiConnectorOwnerMetaFromLive {
 # ManagedPids is the exact, order-independent set of live PIDs a caller may safely act on (stop,
 # restart) for verdicts SELF_OWNED / LAUNCHER_CHILD / ORPHANED_MANAGED_PROCESS, and is always empty
 # otherwise - callers must never derive a "safe to touch" set any other way.
+#
+# ManagedPidSnapshot (Phase 6I-1.7B-2A) carries the exact {ProcessId; CreationDate} this function
+# itself observed for each entry in ManagedPids, AT THE MOMENT OF CLASSIFICATION - never re-derived
+# later. This closes a gap 1.7B-1R did not: a caller (e.g. Stop-RunningAiConnectorManaged) that only
+# re-queries "is this PID still alive" at its OWN entry, independently of when classification ran,
+# could be fooled by a PID that was reused in the gap BETWEEN classification and the stop call itself
+# (not just within the stop call's own multi-stage execution, which 1.7B-1R already covered). Anchoring
+# the expected CreationDate to classification time, not stop-call-entry time, detects that gap too.
+function New-RunningAiOwnershipResult {
+    param(
+        [Parameter(Mandatory)][string]$Verdict,
+        $LauncherPid,
+        $ListenerPid,
+        [Parameter(Mandatory)][AllowEmptyCollection()][array]$ManagedPids,
+        [Parameter(Mandatory)][string]$Detail,
+        $LauncherInfo = $null,
+        $ListenerInfo = $null
+    )
+    $snapshot = @()
+    foreach ($p in $ManagedPids) {
+        $info = if ($LauncherInfo -and $LauncherInfo.ProcessId -eq $p) { $LauncherInfo } elseif ($ListenerInfo -and $ListenerInfo.ProcessId -eq $p) { $ListenerInfo } else { $null }
+        if ($info) { $snapshot += [pscustomobject]@{ ProcessId = [int]$p; CreationDate = $info.CreationDate } }
+    }
+    [pscustomobject]@{
+        Verdict            = $Verdict
+        LauncherPid        = $LauncherPid
+        ListenerPid        = $ListenerPid
+        ManagedPids        = $ManagedPids
+        ManagedPidSnapshot = $snapshot
+        Detail             = $Detail
+    }
+}
+
 function Get-RunningAiConnectorOwnership {
     param(
         [Parameter(Mandatory)][int]$Port,
@@ -274,13 +307,13 @@ function Get-RunningAiConnectorOwnership {
 
     $listenerQuery = Get-RunningAiListenerProcessIds -Port $Port
     if (-not $listenerQuery.Ok) {
-        return [pscustomobject]@{ Verdict = 'UNKNOWN_OWNER'; LauncherPid = $null; ListenerPid = $null; ManagedPids = @(); Detail = 'Port query failed unexpectedly; ownership cannot be established.' }
+        return New-RunningAiOwnershipResult -Verdict 'UNKNOWN_OWNER' -LauncherPid $null -ListenerPid $null -ManagedPids @() -Detail 'Port query failed unexpectedly; ownership cannot be established.'
     }
     if ($listenerQuery.Pids.Count -eq 0) {
-        return [pscustomobject]@{ Verdict = 'DOWN'; LauncherPid = $null; ListenerPid = $null; ManagedPids = @(); Detail = 'Nothing is listening on the port.' }
+        return New-RunningAiOwnershipResult -Verdict 'DOWN' -LauncherPid $null -ListenerPid $null -ManagedPids @() -Detail 'Nothing is listening on the port.'
     }
     if ($listenerQuery.Pids.Count -gt 1) {
-        return [pscustomobject]@{ Verdict = 'UNKNOWN_OWNER'; LauncherPid = $null; ListenerPid = $null; ManagedPids = @(); Detail = 'Multiple distinct processes report owning the port; cannot safely identify a single owner.' }
+        return New-RunningAiOwnershipResult -Verdict 'UNKNOWN_OWNER' -LauncherPid $null -ListenerPid $null -ManagedPids @() -Detail 'Multiple distinct processes report owning the port; cannot safely identify a single owner.'
     }
     $listenerPid = [int]$listenerQuery.Pids[0]
 
@@ -288,18 +321,18 @@ function Get-RunningAiConnectorOwnership {
     if (-not $listenerInfo) {
         # It WAS listening an instant ago (the query above found it) and is now gone - a race, not a
         # confirmed "nothing is listening". Never conflate the two: DOWN means confirmed unoccupied.
-        return [pscustomobject]@{ Verdict = 'UNKNOWN_OWNER'; LauncherPid = $null; ListenerPid = $null; ManagedPids = @(); Detail = 'Listener PID vanished before it could be inspected (race, not confirmed down).' }
+        return New-RunningAiOwnershipResult -Verdict 'UNKNOWN_OWNER' -LauncherPid $null -ListenerPid $null -ManagedPids @() -Detail 'Listener PID vanished before it could be inspected (race, not confirmed down).'
     }
     $listenerIsOurs = Test-ProcessIdentity -ProcessId $listenerPid -Markers $Markers
 
     if (-not $TrackedPid) {
         if ($listenerIsOurs) {
-            return [pscustomobject]@{ Verdict = 'SELF_OWNED'; LauncherPid = $listenerPid; ListenerPid = $listenerPid; ManagedPids = @($listenerPid); Detail = 'No tracked PID; listener itself carries every expected marker.' }
+            return New-RunningAiOwnershipResult -Verdict 'SELF_OWNED' -LauncherPid $listenerPid -ListenerPid $listenerPid -ManagedPids @($listenerPid) -Detail 'No tracked PID; listener itself carries every expected marker.' -ListenerInfo $listenerInfo
         }
         if (Test-RunningAiConnectorShape -ProcessInfo $listenerInfo) {
-            return [pscustomobject]@{ Verdict = 'FOREIGN_PROCESS'; LauncherPid = $null; ListenerPid = $listenerPid; ManagedPids = @(); Detail = 'Port is held by a garmin_connector process for a different repository/worktree.' }
+            return New-RunningAiOwnershipResult -Verdict 'FOREIGN_PROCESS' -LauncherPid $null -ListenerPid $listenerPid -ManagedPids @() -Detail 'Port is held by a garmin_connector process for a different repository/worktree.'
         }
-        return [pscustomobject]@{ Verdict = 'UNKNOWN_OWNER'; LauncherPid = $null; ListenerPid = $listenerPid; ManagedPids = @(); Detail = 'No tracked PID and the current listener has no recognizable connector markers.' }
+        return New-RunningAiOwnershipResult -Verdict 'UNKNOWN_OWNER' -LauncherPid $null -ListenerPid $listenerPid -ManagedPids @() -Detail 'No tracked PID and the current listener has no recognizable connector markers.'
     }
 
     $trackedInfo = Get-RunningAiProcessInfo -ProcessId $TrackedPid
@@ -307,16 +340,16 @@ function Get-RunningAiConnectorOwnership {
 
     if ($listenerPid -eq $TrackedPid) {
         if ($trackedIsOurs) {
-            return [pscustomobject]@{ Verdict = 'SELF_OWNED'; LauncherPid = $TrackedPid; ListenerPid = $listenerPid; ManagedPids = @($listenerPid); Detail = 'Tracked PID is itself the listener.' }
+            return New-RunningAiOwnershipResult -Verdict 'SELF_OWNED' -LauncherPid $TrackedPid -ListenerPid $listenerPid -ManagedPids @($listenerPid) -Detail 'Tracked PID is itself the listener.' -ListenerInfo $listenerInfo
         }
-        return [pscustomobject]@{ Verdict = 'UNKNOWN_OWNER'; LauncherPid = $null; ListenerPid = $listenerPid; ManagedPids = @(); Detail = 'Tracked PID is the listener but no longer matches the expected markers (likely a recycled PID).' }
+        return New-RunningAiOwnershipResult -Verdict 'UNKNOWN_OWNER' -LauncherPid $null -ListenerPid $listenerPid -ManagedPids @() -Detail 'Tracked PID is the listener but no longer matches the expected markers (likely a recycled PID).'
     }
 
     if ($trackedIsOurs) {
         if ($listenerInfo.ParentProcessId -eq $TrackedPid -and $listenerInfo.CreationDate -ge $trackedInfo.CreationDate) {
-            return [pscustomobject]@{ Verdict = 'LAUNCHER_CHILD'; LauncherPid = $TrackedPid; ListenerPid = $listenerPid; ManagedPids = @($TrackedPid, $listenerPid); Detail = 'Listener is a live-verified direct child of the tracked launcher, created at/after it.' }
+            return New-RunningAiOwnershipResult -Verdict 'LAUNCHER_CHILD' -LauncherPid $TrackedPid -ListenerPid $listenerPid -ManagedPids @($TrackedPid, $listenerPid) -Detail 'Listener is a live-verified direct child of the tracked launcher, created at/after it.' -LauncherInfo $trackedInfo -ListenerInfo $listenerInfo
         }
-        return [pscustomobject]@{ Verdict = 'UNKNOWN_OWNER'; LauncherPid = $TrackedPid; ListenerPid = $listenerPid; ManagedPids = @(); Detail = 'Tracked launcher is alive and ours, but the port listener is not its child.' }
+        return New-RunningAiOwnershipResult -Verdict 'UNKNOWN_OWNER' -LauncherPid $TrackedPid -ListenerPid $listenerPid -ManagedPids @() -Detail 'Tracked launcher is alive and ours, but the port listener is not its child.'
     }
 
     # Tracked PID is gone or no longer matches: only recorded metadata (never a bare PID guess) can
@@ -328,22 +361,22 @@ function Get-RunningAiConnectorOwnership {
     if ($meta -and $meta.Name -eq $Name -and $meta.RepoRoot -eq $script:RepoRoot -and $meta.Port -eq $Port -and
         $meta.Listener.ProcessId -eq $listenerPid -and
         (Test-RunningAiCreationDateMatches -Expected $meta.Listener.CreationDate -Actual $listenerInfo.CreationDate)) {
-        return [pscustomobject]@{ Verdict = 'ORPHANED_MANAGED_PROCESS'; LauncherPid = $null; ListenerPid = $listenerPid; ManagedPids = @($listenerPid); Detail = 'Tracked launcher is gone; the listener matches a previously recorded managed process (name, repoRoot, port, PID and creation time all confirmed).' }
+        return New-RunningAiOwnershipResult -Verdict 'ORPHANED_MANAGED_PROCESS' -LauncherPid $null -ListenerPid $listenerPid -ManagedPids @($listenerPid) -Detail 'Tracked launcher is gone; the listener matches a previously recorded managed process (name, repoRoot, port, PID and creation time all confirmed).' -ListenerInfo $listenerInfo
     }
     if ($meta -and (($meta.Name -ne $Name) -or ($meta.RepoRoot -ne $script:RepoRoot) -or ($meta.Port -ne $Port))) {
         # A sidecar exists but describes something else entirely (wrong name/repo/port) - this is a
         # genuine conflict, not silence, so it is surfaced distinctly rather than silently falling
         # through to the generic UNKNOWN_OWNER paths below for the same reason.
-        return [pscustomobject]@{ Verdict = 'UNKNOWN_OWNER'; LauncherPid = $null; ListenerPid = $listenerPid; ManagedPids = @(); Detail = 'Sidecar metadata conflicts with the expected name/repoRoot/port; refusing to use it.' }
+        return New-RunningAiOwnershipResult -Verdict 'UNKNOWN_OWNER' -LauncherPid $null -ListenerPid $listenerPid -ManagedPids @() -Detail 'Sidecar metadata conflicts with the expected name/repoRoot/port; refusing to use it.'
     }
 
     if ($listenerIsOurs) {
-        return [pscustomobject]@{ Verdict = 'SELF_OWNED'; LauncherPid = $listenerPid; ListenerPid = $listenerPid; ManagedPids = @($listenerPid); Detail = 'Tracked launcher is gone/foreign, but the listener independently carries every expected marker.' }
+        return New-RunningAiOwnershipResult -Verdict 'SELF_OWNED' -LauncherPid $listenerPid -ListenerPid $listenerPid -ManagedPids @($listenerPid) -Detail 'Tracked launcher is gone/foreign, but the listener independently carries every expected marker.' -ListenerInfo $listenerInfo
     }
     if (Test-RunningAiConnectorShape -ProcessInfo $listenerInfo) {
-        return [pscustomobject]@{ Verdict = 'FOREIGN_PROCESS'; LauncherPid = $null; ListenerPid = $listenerPid; ManagedPids = @(); Detail = 'Port is held by a garmin_connector process for a different repository/worktree, and no metadata links it to this one.' }
+        return New-RunningAiOwnershipResult -Verdict 'FOREIGN_PROCESS' -LauncherPid $null -ListenerPid $listenerPid -ManagedPids @() -Detail 'Port is held by a garmin_connector process for a different repository/worktree, and no metadata links it to this one.'
     }
-    return [pscustomobject]@{ Verdict = 'UNKNOWN_OWNER'; LauncherPid = $null; ListenerPid = $listenerPid; ManagedPids = @(); Detail = 'Tracked PID is gone or no longer matches, and the current listener cannot be confirmed as ours by any available evidence.' }
+    return New-RunningAiOwnershipResult -Verdict 'UNKNOWN_OWNER' -LauncherPid $null -ListenerPid $listenerPid -ManagedPids @() -Detail 'Tracked PID is gone or no longer matches, and the current listener cannot be confirmed as ours by any available evidence.'
 }
 
 # ---- safe stop ------------------------------------------------------------------------------
@@ -358,17 +391,53 @@ function Test-RunningAiManagedPidStillValid {
     [bool]$info -and (Test-RunningAiCreationDateMatches -Expected $ExpectedCreationDate -Actual $info.CreationDate)
 }
 
-# Stops ONLY a positively-verified connector process set. Refuses (returns 'refused', touches
-# nothing) for anything but SELF_OWNED/LAUNCHER_CHILD/ORPHANED_MANAGED_PROCESS. Takes a fresh
-# PID+CreationDate baseline snapshot before doing anything, then re-verifies every managed PID
-# against that exact snapshot before the graceful signal, after the graceful wait, immediately before
-# any forced kill, and one final time before declaring success - a PID that still exists but whose
-# CreationDate no longer matches (a reused PID) is never signaled, never killed, and turns the result
-# into 'ownership-changed' rather than silently skipping it or treating it as "still running".
-# Confirms the actual port AND every managed PID are gone before declaring success, and - only on a
-# graceful timeout - force-stops exactly the still-valid managed PID(s), one Stop-Process -Id call
-# per PID, never a process-tree or taskkill /T /F. Never touches conhost.exe or anything outside the
-# verified set.
+# Maps the low-level Result to the unified ResultCode contract (Phase 6I-1.7B-2A): STOPPED /
+# ALREADY_DOWN / REFUSED_UNKNOWN_OWNER / OWNERSHIP_CHANGED / PORT_STILL_OCCUPIED / PROCESS_REMAINING /
+# STOP_FAILED. Result itself is kept unchanged (every existing caller/test keeps working against it
+# verbatim) - ResultCode is purely additive, built from Result + PortFreed + RemainingPids so a caller
+# can switch on one small, fixed vocabulary instead of re-deriving the same judgment everywhere.
+function New-RunningAiStopOutcome {
+    param(
+        [Parameter(Mandatory)][string]$Result,
+        [Parameter(Mandatory)]$Verdict,
+        [Parameter(Mandatory)][bool]$PortFreed,
+        [array]$RemainingPids = @()
+    )
+    $remaining = @($RemainingPids)
+    $code = switch ($Result) {
+        'already-gone'      { 'ALREADY_DOWN' }
+        'graceful'          { 'STOPPED' }
+        'forced'            { 'STOPPED' }
+        'refused'           { 'REFUSED_UNKNOWN_OWNER' }
+        'ownership-changed' { 'OWNERSHIP_CHANGED' }
+        'orphan-remaining'  { if ($remaining.Count -gt 0) { 'PROCESS_REMAINING' } else { 'PORT_STILL_OCCUPIED' } }
+        default             { 'STOP_FAILED' }
+    }
+    [pscustomobject]@{ Result = $Result; ResultCode = $code; Verdict = $Verdict; PortFreed = $PortFreed; RemainingPids = $remaining }
+}
+
+# Stops ONLY a positively-verified connector process set. Refuses (ResultCode REFUSED_UNKNOWN_OWNER,
+# touches nothing) for anything but SELF_OWNED/LAUNCHER_CHILD/ORPHANED_MANAGED_PROCESS, or when the
+# Ownership object's own ManagedPidSnapshot is missing/incomplete (a malformed or legacy-shaped
+# Ownership object is treated as unverifiable, never "assume it's fine").
+#
+# The expected PID+CreationDate baseline comes from Ownership.ManagedPidSnapshot - CLASSIFICATION-TIME
+# identity, not a fresh snapshot re-derived here (Phase 6I-1.7B-2A). This closes the gap between "when
+# ownership was determined" and "when this function actually runs": a PID reused in that window is
+# caught immediately (entry check below), not just later drift within this function's own execution
+# (which 1.7B-1R already covered via stage-to-stage re-verification). The same baseline is then
+# re-verified before the graceful signal, after the graceful wait, immediately before any forced kill,
+# and once more before declaring success - a PID that still exists but whose CreationDate no longer
+# matches (reused) is never signaled, never killed, and turns the result into 'ownership-changed'.
+# The forced-kill step itself holds one single Get-Process handle per PID from its own CreationDate
+# check through to .Kill() - unlike a separate Stop-Process -Id call (which re-resolves the PID number
+# fresh, reopening the exact TOCTOU race this whole function exists to close), reusing one handle
+# means the verified identity and the kill target are provably the same OS process end to end. A
+# residual, now very small window remains between obtaining that handle and the CreationDate
+# comparison completing - eliminating it entirely would require a kernel-level atomic
+# "compare-identity-then-terminate" primitive Windows does not expose via PowerShell; the fail-safe
+# posture (never kill without exclusively that handle AND a matching CreationDate) is the practical
+# ceiling available here.
 function Stop-RunningAiConnectorManaged {
     param(
         [Parameter(Mandatory)]$Ownership,
@@ -377,39 +446,42 @@ function Stop-RunningAiConnectorManaged {
         [string]$Name = 'garmin-connector'
     )
     $manageable = @('SELF_OWNED', 'LAUNCHER_CHILD', 'ORPHANED_MANAGED_PROCESS')
-    if (($Ownership.Verdict -notin $manageable) -or (@($Ownership.ManagedPids).Count -eq 0)) {
-        return [pscustomobject]@{ Result = 'refused'; Verdict = $Ownership.Verdict; PortFreed = (-not (Test-PortInUse $Port)); RemainingPids = @() }
+    $originalManagedCount = @($Ownership.ManagedPids).Count
+    # Safe-optional read (same pattern as Get-RunningAiErrorDetails elsewhere in this codebase): a
+    # legacy or hand-built Ownership-shaped object may not have ManagedPidSnapshot as a property at
+    # all, which Set-StrictMode would otherwise turn into a PropertyNotFoundException here rather than
+    # the clean "refused" outcome this is meant to produce.
+    $snapshotProp = $Ownership.PSObject.Properties['ManagedPidSnapshot']
+    $snapshot = @(if ($snapshotProp) { $snapshotProp.Value })
+    if (($Ownership.Verdict -notin $manageable) -or ($originalManagedCount -eq 0) -or ($snapshot.Count -ne $originalManagedCount)) {
+        # The snapshot-count mismatch case covers a malformed/legacy Ownership object (missing
+        # ManagedPidSnapshot, or one that does not match ManagedPids 1:1) - fail-safe refusal, exactly
+        # as if ownership were unverified, rather than falling back to some other, less-anchored check.
+        return New-RunningAiStopOutcome -Result 'refused' -Verdict $Ownership.Verdict -PortFreed (-not (Test-PortInUse $Port))
     }
 
-    # Baseline snapshot, captured now - never trust the Ownership object's own (possibly already
-    # stale-by-the-time-we-run) view of "alive". A plain hashtable, not [ordered]@{} - an
-    # OrderedDictionary's indexer treats an [int] key as a POSITIONAL index rather than a dictionary
-    # key (throws "index out of range" for any key beyond the current Count), which a plain Hashtable
-    # never does regardless of key type.
-    $originalManagedCount = @($Ownership.ManagedPids).Count
     $baseline = @{}
-    foreach ($p in @($Ownership.ManagedPids)) {
-        $info = Get-RunningAiProcessInfo -ProcessId $p
-        if ($info) { $baseline[[int]$p] = $info.CreationDate }
-    }
-    if ($baseline.Count -eq 0) {
-        Remove-RunningAiOwnerMeta -Name $Name
-        return [pscustomobject]@{ Result = 'already-gone'; Verdict = $Ownership.Verdict; PortFreed = (-not (Test-PortInUse $Port)); RemainingPids = @() }
-    }
+    foreach ($snap in $snapshot) { $baseline[[int]$snap.ProcessId] = $snap.CreationDate }
 
     $getStillValid = {
         param($Pids)
         @($Pids | Where-Object { Test-RunningAiManagedPidStillValid -ProcessId $_ -ExpectedCreationDate $baseline[[int]$_] })
     }
 
-    # Re-verify before the graceful signal: against the ORIGINALLY requested managed-PID count, not
-    # merely the (already-reduced) baseline count - comparing against baseline alone could never
-    # detect "one of the requested managed PIDs was already gone/changed before we started", since
-    # baseline is built FROM whatever already resolved. Any shortfall here is an ownership change that
-    # happened before we ever touched anything - abort without signaling anyone.
-    $validBeforeSignal = & $getStillValid @($baseline.Keys)
-    if (@($validBeforeSignal).Count -ne $originalManagedCount) {
-        return [pscustomobject]@{ Result = 'ownership-changed'; Verdict = $Ownership.Verdict; PortFreed = (-not (Test-PortInUse $Port)); RemainingPids = @($validBeforeSignal) }
+    # Entry check, anchored to CLASSIFICATION-time identity (see function comment) - not merely
+    # "still matches whatever I see right now", which would miss a PID reused between classification
+    # and this call. "Nothing alive at all" (truly gone, the clean/expected end state) is distinguished
+    # from "alive but identity mismatch" (ownership-changed) by liveness ALONE first, never folding a
+    # CreationDate mismatch into "already-gone" - a single-managed-PID case whose one entry is alive
+    # but reused must never be reported as if it simply exited cleanly.
+    $aliveNow = @($baseline.Keys | Where-Object { Get-RunningAiProcessInfo -ProcessId $_ })
+    if (@($aliveNow).Count -eq 0) {
+        Remove-RunningAiOwnerMeta -Name $Name
+        return New-RunningAiStopOutcome -Result 'already-gone' -Verdict $Ownership.Verdict -PortFreed (-not (Test-PortInUse $Port))
+    }
+    $validAtEntry = & $getStillValid $aliveNow
+    if (@($validAtEntry).Count -ne $originalManagedCount) {
+        return New-RunningAiStopOutcome -Result 'ownership-changed' -Verdict $Ownership.Verdict -PortFreed (-not (Test-PortInUse $Port)) -RemainingPids $aliveNow
     }
 
     # Signal every verified managed PID individually - never only the launcher. Live testing
@@ -423,8 +495,8 @@ function Stop-RunningAiConnectorManaged {
     # pass this and are completely unaffected.
     $helper = Join-Path $PSScriptRoot 'Send-CtrlC.ps1'
     $ps = (Get-Command powershell.exe).Source
-    $allowedArg = ($validBeforeSignal -join ',')
-    foreach ($candidatePid in $validBeforeSignal) {
+    $allowedArg = ($validAtEntry -join ',')
+    foreach ($candidatePid in $validAtEntry) {
         $argLine = "-NoProfile -ExecutionPolicy Bypass -File $(Quote-Argument $helper) -ProcessId $candidatePid -AllowedProcessIds $allowedArg"
         Start-Process -FilePath $ps -ArgumentList $argLine -WindowStyle Hidden -Wait | Out-Null
     }
@@ -434,7 +506,7 @@ function Stop-RunningAiConnectorManaged {
     }
     if ($graceful) {
         Remove-RunningAiOwnerMeta -Name $Name
-        return [pscustomobject]@{ Result = 'graceful'; Verdict = $Ownership.Verdict; PortFreed = $true; RemainingPids = @() }
+        return New-RunningAiStopOutcome -Result 'graceful' -Verdict $Ownership.Verdict -PortFreed $true
     }
 
     # Immediately before any forced kill: re-check every baseline PID one more time. A PID that is
@@ -444,13 +516,19 @@ function Stop-RunningAiConnectorManaged {
     $stillValidPreForce = @(& $getStillValid $stillAliveRaw)
     $reusedPids = @($stillAliveRaw | Where-Object { $stillValidPreForce -notcontains $_ })
     if (@($reusedPids).Count -gt 0) {
-        return [pscustomobject]@{ Result = 'ownership-changed'; Verdict = $Ownership.Verdict; PortFreed = (-not (Test-PortInUse $Port)); RemainingPids = @($stillAliveRaw) }
+        return New-RunningAiStopOutcome -Result 'ownership-changed' -Verdict $Ownership.Verdict -PortFreed (-not (Test-PortInUse $Port)) -RemainingPids $stillAliveRaw
     }
 
     if (@($stillValidPreForce).Count -gt 0) {
         Write-Step "Connector managed PID(s) $($stillValidPreForce -join ', ') did not exit within ${TimeoutSec}s; forcing stop of verified process(es) only."
         foreach ($candidatePid in $stillValidPreForce) {
-            Stop-Process -Id $candidatePid -Force -ErrorAction SilentlyContinue
+            # One Get-Process handle, held from this CreationDate check through to .Kill() itself -
+            # see function comment for why this (not a separate Stop-Process -Id call, which re-opens
+            # the PID fresh) is the TOCTOU-safe way to force-stop a classification-verified PID.
+            $handle = Get-Process -Id $candidatePid -ErrorAction SilentlyContinue
+            if ($handle -and (Test-RunningAiCreationDateMatches -Expected $baseline[[int]$candidatePid] -Actual $handle.StartTime)) {
+                try { $handle.Kill() } catch { }
+            }
         }
     }
 
@@ -460,20 +538,17 @@ function Stop-RunningAiConnectorManaged {
     $remaining = @(& $getStillValid @($baseline.Keys))
     if ($portFreed -and $remaining.Count -eq 0) { Remove-RunningAiOwnerMeta -Name $Name }
 
-    [pscustomobject]@{
-        Result        = if ($remaining.Count -gt 0) { 'orphan-remaining' } else { 'forced' }
-        Verdict       = $Ownership.Verdict
-        PortFreed     = $portFreed
-        RemainingPids = $remaining
-    }
+    $finalResult = if ($remaining.Count -gt 0) { 'orphan-remaining' } else { 'forced' }
+    New-RunningAiStopOutcome -Result $finalResult -Verdict $Ownership.Verdict -PortFreed $portFreed -RemainingPids $remaining
 }
 
-# Shared policy (Phase 6I-1.7B-1R), used identically by start-/stop-running-ai.ps1 and
-# RunningAI.Watchdog.ps1: a Stop-RunningAiConnectorManaged result counts as a fully confirmed stop
-# ONLY when its Result is one that represents an actual clean end state ('graceful'/'forced'/
-# 'already-gone' - never 'refused' or 'ownership-changed'), AND the port is actually free, AND no
-# managed PID remains. RemainingPids.Count=0 is never read alone - a 'refused' result also reports an
-# empty RemainingPids (nothing was ever touched), which must never be mistaken for success.
+# Shared policy (Phase 6I-1.7B-1R, kept as the single success predicate in 6I-1.7B-2A), used
+# identically by start-/stop-running-ai.ps1 and RunningAI.Watchdog.ps1: a Stop-RunningAiConnectorManaged
+# result counts as a fully confirmed stop ONLY when its Result is one that represents an actual clean
+# end state ('graceful'/'forced'/'already-gone' - equivalently, ResultCode 'STOPPED'/'ALREADY_DOWN'),
+# AND the port is actually free, AND no managed PID remains. RemainingPids.Count=0 is never read alone
+# - a 'refused' result also reports an empty RemainingPids (nothing was ever touched), which must
+# never be mistaken for success.
 function Test-RunningAiConnectorStopWasClean {
     param([Parameter(Mandatory)]$StopResult)
     ($StopResult.Result -in @('graceful', 'forced', 'already-gone')) -and $StopResult.PortFreed -and (@($StopResult.RemainingPids).Count -eq 0)

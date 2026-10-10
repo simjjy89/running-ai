@@ -219,32 +219,34 @@ function Get-ProcessComponentState {
 # behavior byte-for-byte, which is what every existing hand-built Observation in tests still gets.
 function Get-ConnectorComponentState {
     param([bool]$Health, [bool]$PortUsed, $ManagedPid, $Port = $null)
-    if ($Health) {
-        # Phase 6I-1.7B-1R: a passing health check proves the connector answers HTTP correctly, not
-        # that ownership is confirmed - it is never, on its own, treated as "ownership verified". The
-        # existing behavior (no action taken while healthy, restart policy untouched) is preserved
-        # exactly: State/Reason stay 'UP'/'' regardless of what ownership resolves to. The verdict is
-        # attached as a separate, purely informational property for status reporting/diagnosis only -
-        # best-effort (never lets a diagnostic failure affect the State determination above it).
-        $state = New-State 'UP'
-        if ($null -ne $Port) {
-            try {
-                $ownership = Get-RunningAiConnectorOwnership -Port $Port -TrackedPid (Read-PidFile 'garmin-connector') -Markers (Get-ConnectorMarkers)
-                $state | Add-Member -NotePropertyName 'OwnershipVerdict' -NotePropertyValue $ownership.Verdict -Force
-            } catch { }
-        }
-        return $state
+
+    # Phase 6I-1.7B-2A: resolved once, up front, and attached to WHATEVER state is ultimately returned
+    # (purely informational - .OwnershipVerdict never feeds into State/Reason/the restart decision) so
+    # an operator can see a mismatch even on a healthy connector. $Port omitted (the default, what
+    # every existing hand-built Observation in tests still gets) skips this entirely and reproduces
+    # the exact legacy behavior byte-for-byte - no ownership call, no extra property, at all.
+    $ownership = $null
+    if ($null -ne $Port) {
+        try { $ownership = Get-RunningAiConnectorOwnership -Port $Port -TrackedPid (Read-PidFile 'garmin-connector') -Markers (Get-ConnectorMarkers) } catch { }
     }
-    if ($ManagedPid) { return (New-State 'UNHEALTHY' 'PROCESS_ALIVE_HEALTH_FAILING') }
-    if (-not $PortUsed) { return (New-State 'DOWN' 'PROCESS_DEAD') }
+    $tag = { param($s) if ($ownership) { $s | Add-Member -NotePropertyName 'OwnershipVerdict' -NotePropertyValue $ownership.Verdict -Force }; $s }
+
+    if ($Health) {
+        # A passing health check proves the connector answers HTTP correctly, not that ownership is
+        # confirmed - never, on its own, treated as "ownership verified". Existing behavior (no action
+        # taken while healthy, restart policy untouched) is preserved exactly: State/Reason stay
+        # 'UP'/'' regardless of what ownership resolves to.
+        return (& $tag (New-State 'UP'))
+    }
+    if ($ManagedPid) { return (& $tag (New-State 'UNHEALTHY' 'PROCESS_ALIVE_HEALTH_FAILING')) }
+    if (-not $PortUsed) { return (& $tag (New-State 'DOWN' 'PROCESS_DEAD')) }
     if ($null -eq $Port) { return (New-State 'DEGRADED' 'FOREIGN_PROCESS') }   # legacy fallback, unchanged
 
-    $ownership = Get-RunningAiConnectorOwnership -Port $Port -TrackedPid (Read-PidFile 'garmin-connector') -Markers (Get-ConnectorMarkers)
     switch ($ownership.Verdict) {
-        'ORPHANED_MANAGED_PROCESS' { return (New-State 'UNHEALTHY' 'ORPHANED_MANAGED_PROCESS') }
-        'UNKNOWN_OWNER'            { return (New-State 'DEGRADED' 'UNKNOWN_OWNER') }
-        'DOWN'                     { return (New-State 'DOWN' 'PROCESS_DEAD') }
-        default                    { return (New-State 'DEGRADED' 'FOREIGN_PROCESS') }
+        'ORPHANED_MANAGED_PROCESS' { return (& $tag (New-State 'UNHEALTHY' 'ORPHANED_MANAGED_PROCESS')) }
+        'UNKNOWN_OWNER'            { return (& $tag (New-State 'DEGRADED' 'UNKNOWN_OWNER')) }
+        'DOWN'                     { return (& $tag (New-State 'DOWN' 'PROCESS_DEAD')) }
+        default                    { return (& $tag (New-State 'DEGRADED' 'FOREIGN_PROCESS')) }
     }
 }
 
@@ -415,19 +417,45 @@ function Invoke-RecoveryAction {
             # silently leave the port occupied, so the subsequent restart's bind would fail.
             $tracked = Read-PidFile 'garmin-connector'
             $ownership = Get-RunningAiConnectorOwnership -Port $ConnectorPort -TrackedPid $tracked -Markers (Get-ConnectorMarkers)
-            if ($ownership.ManagedPids.Count -gt 0) {
-                $stopResult = Stop-RunningAiConnectorManaged -Ownership $ownership -Port $ConnectorPort -TimeoutSec 15
-                $cleanStop = Test-RunningAiConnectorStopWasClean -StopResult $stopResult
-                if ($cleanStop) {
-                    Remove-PidFile 'garmin-connector'
-                } else {
-                    # Phase 6I-1.7B-1R: a failed/partial pre-stop must never be followed by starting a
-                    # new connector anyway - the port may still be occupied by what we just failed to
-                    # clear. PID file and metadata are preserved (not touched above) so the next tick
-                    # sees the real state; this tick's recovery step is reported as failed, same as
-                    # any other failed action, rather than silently launching start-running-ai.ps1
-                    # straight into a bind-in-use failure.
-                    Write-Step "Garmin connector pre-stop did not fully succeed (result=$($stopResult.Result), portFreed=$($stopResult.PortFreed), remaining=$($stopResult.RemainingPids -join ',')); not starting a new connector this tick."
+            # Phase 6I-1.7B-2A: explicit per-verdict gate, not just "ManagedPids.Count -gt 0" - that
+            # condition is ALSO true for... nothing, actually: ManagedPids is empty for every
+            # non-manageable verdict by construction. The real 1.7B-1R gap was that when it WAS empty
+            # (DOWN, FOREIGN_PROCESS, UNKNOWN_OWNER, or a query error folded into UNKNOWN_OWNER), the
+            # old code simply skipped this whole block with no action and fell straight through to the
+            # start-running-ai.ps1 launch below - correct for DOWN (nothing to stop, safe to start),
+            # silently wrong for every other case (restarting a connector whose port ownership was
+            # never verified). Each case is now explicit.
+            switch ($ownership.Verdict) {
+                'DOWN' {
+                    # Confirmed nothing is listening - safe to fall through to the start attempt below.
+                }
+                { $_ -in @('SELF_OWNED', 'LAUNCHER_CHILD', 'ORPHANED_MANAGED_PROCESS') } {
+                    if (@($ownership.ManagedPids).Count -eq 0) {
+                        # Should not happen given the verdict, but fail-safe regardless of why.
+                        Write-Step "Garmin connector pre-stop blocked: verdict $($ownership.Verdict) reported no manageable PIDs; refusing to restart."
+                        return $false
+                    }
+                    $stopResult = Stop-RunningAiConnectorManaged -Ownership $ownership -Port $ConnectorPort -TimeoutSec 15
+                    $cleanStop = Test-RunningAiConnectorStopWasClean -StopResult $stopResult
+                    if ($cleanStop) {
+                        Remove-PidFile 'garmin-connector'
+                    } else {
+                        # A failed/partial pre-stop must never be followed by starting a new connector
+                        # anyway - the port may still be occupied by what we just failed to clear. PID
+                        # file and metadata are preserved (not touched above) so the next tick sees the
+                        # real state; this tick's recovery step is reported as failed, same as any
+                        # other failed action, rather than silently launching start-running-ai.ps1
+                        # straight into a bind-in-use failure.
+                        Write-Step "Garmin connector pre-stop did not fully succeed (result=$($stopResult.Result), resultCode=$($stopResult.ResultCode), portFreed=$($stopResult.PortFreed), remaining=$($stopResult.RemainingPids -join ',')); not starting a new connector this tick."
+                        return $false
+                    }
+                }
+                default {
+                    # FOREIGN_PROCESS, UNKNOWN_OWNER, or any future verdict not explicitly handled
+                    # above - ownership of whatever is on the port could not be verified. Block the
+                    # restart entirely rather than risk starting a second connector alongside (or
+                    # instead of stopping) a process we cannot positively identify.
+                    Write-Step "Garmin connector pre-stop blocked: ownership verdict is $($ownership.Verdict) ($($ownership.Detail)); refusing to restart an unverified process on port $ConnectorPort."
                     return $false
                 }
             }

@@ -1,4 +1,4 @@
-# Garmin Connector Process Ownership (Phase 6I-1.7B-1, hardened in 6I-1.7B-1R)
+# Garmin Connector Process Ownership (Phase 6I-1.7B-1, hardened in 6I-1.7B-1R and 6I-1.7B-2A)
 
 ## Problem
 
@@ -157,6 +157,43 @@ A safety review of the 1.7B-1 implementation found and fixed several real gaps b
   (`System.ArgumentOutOfRangeException`) - fixed by using a plain `Hashtable`; and matching the
   "nothing listening" condition on `Get-NetTCPConnection`'s (locale-dependent - this machine's own
   error text is Korean) exception message instead of its stable `FullyQualifiedErrorId`.
+
+## Phase 6I-1.7B-2A hardening
+
+- **Classification-time anchoring** (`ManagedPidSnapshot`): every ownership verdict now carries the
+  exact `{ProcessId; CreationDate}` it observed for each `ManagedPids` entry, AT the moment of
+  classification. `Stop-RunningAiConnectorManaged` uses this - not a snapshot it re-derives itself at
+  entry - as its baseline, closing the gap 1.7B-1R did not: a PID reused in the window BETWEEN
+  classification and the stop call (not just within the stop call's own execution) is now caught
+  immediately. An Ownership object missing this field entirely (a legacy/hand-built shape) is refused
+  outright (`REFUSED_UNKNOWN_OWNER`), never assumed valid.
+- **Liveness and identity are checked separately at the stop-entry gate**: "nothing in the baseline is
+  alive at all" (`ALREADY_DOWN` - a clean, expected end state) is now distinguished from "something is
+  alive but its identity no longer matches" (`OWNERSHIP_CHANGED`) - a single-managed-PID case whose one
+  entry is alive-but-reused is never misreported as if it simply exited.
+- **Handle-based forced kill**: the force-stop step now holds one `Get-Process` handle per PID from its
+  CreationDate check straight through to `.Kill()`, instead of a separate `Stop-Process -Id` call
+  (which re-resolves the PID number fresh, reopening the exact TOCTOU race this model exists to
+  close). A residual, now very small window remains between obtaining the handle and completing the
+  comparison - eliminating it fully would need a kernel-level atomic primitive PowerShell does not
+  expose; fail-safe (same handle AND a matching CreationDate, or no kill at all) is the practical
+  ceiling.
+- **Unified `ResultCode` contract**: `STOPPED` / `ALREADY_DOWN` / `REFUSED_UNKNOWN_OWNER` /
+  `OWNERSHIP_CHANGED` / `PORT_STILL_OCCUPIED` / `PROCESS_REMAINING` / `STOP_FAILED`, added alongside
+  (never replacing) the original lowercase `Result` - every existing caller/test keeps working against
+  `Result` verbatim.
+- **Watchdog PreStop is explicitly gated per verdict**: `DOWN` proceeds to the start attempt (the only
+  case with nothing to stop); `SELF_OWNED`/`LAUNCHER_CHILD`/`ORPHANED_MANAGED_PROCESS` attempt a stop
+  and require `Test-RunningAiConnectorStopWasClean`; anything else (`FOREIGN_PROCESS`, `UNKNOWN_OWNER`,
+  a query error folded into `UNKNOWN_OWNER`) blocks the restart entirely - closing the 1.7B-1R gap
+  where an empty `ManagedPids` for a non-DOWN verdict silently fell through to the real
+  `start-running-ai.ps1` launch with no ownership check at all.
+- **`stop-running-ai.ps1` exit-code contract**: a connector that did not fully stop now produces a
+  dedicated non-zero exit code (`ExitCode.ConnectorStopIncomplete`, 24) - the script no longer reports
+  success just because the relay and Spring stopped cleanly while the connector did not.
+- **`watchdog-status.json` gains `connectorOwnership.verdict`** (additive only - `components`/
+  `blocked`/`restartBudget` are byte-for-byte unchanged in shape): the connector's resolved ownership
+  verdict, nothing else - never a CommandLine, PID list, or credential.
 
 ## What this phase deliberately does NOT do
 

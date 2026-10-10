@@ -450,6 +450,36 @@ Check 'status JSON components and restartBudget.used include external-relay (nor
     }
 }
 
+# Phase 6I-1.7B-2A: the status JSON gains a new, additive "connectorOwnership" field - this proves
+# (a) the pre-existing fields (components/blocked/restartBudget) are completely unchanged in shape
+# (backward compatibility - STEP 5 item 11) and (b) the new field is actually present and carries
+# nothing but the fixed verdict vocabulary string, never a CommandLine or credential.
+Check 'status JSON is backward compatible and additionally carries connectorOwnership.verdict' {
+    $temp = Join-Path $env:TEMP "selftest-watchdog-statusdir2-$([guid]::NewGuid().ToString('N'))"
+    $originalEnv = $env:RUNNING_AI_TEST_RUNTIME_DIR
+    $env:RUNNING_AI_TEST_RUNTIME_DIR = $temp
+    try {
+        $script = Join-Path $scripts 'watch-running-ai.ps1'
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $script -NoRecovery -RecheckDelaySec 0 | Out-Null
+        $statusPath = Join-Path $temp 'watchdog-status.json'
+        if (-not (Test-Path -LiteralPath $statusPath)) { throw 'watchdog-status.json was not written' }
+        $status = ConvertFrom-Json (Get-Content -LiteralPath $statusPath -Raw)
+        $names = $status.PSObject.Properties.Name
+        # Backward compatibility: every pre-existing top-level field is still present with its
+        # original shape untouched.
+        ($names -contains 'checkedAt') -and ($names -contains 'overall') -and ($names -contains 'components') -and
+        ($names -contains 'blocked') -and ($names -contains 'garminHint') -and ($names -contains 'lastAction') -and
+        ($names -contains 'restartBudget') -and ($status.components.PSObject.Properties.Name -contains 'connector') -and
+        ($status.restartBudget.PSObject.Properties.Name -contains 'used') -and
+        # Additive: the new field exists and (when present) is just a verdict string.
+        ($names -contains 'connectorOwnership') -and
+        (($null -eq $status.connectorOwnership) -or ($status.connectorOwnership.PSObject.Properties.Name -contains 'verdict'))
+    } finally {
+        $env:RUNNING_AI_TEST_RUNTIME_DIR = $originalEnv
+        Remove-Item -Recurse -Force $temp -ErrorAction SilentlyContinue
+    }
+}
+
 if ($failures.Count) {
     Write-Host ("{0} check(s) failed: {1}" -f $failures.Count, ($failures -join '; ')) -ForegroundColor Red
     exit 1

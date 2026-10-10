@@ -280,7 +280,7 @@ Check 'graceful timeout falls back to forced stop of verified PIDs only; a bysta
 Check 'Stop-RunningAiConnectorManaged refuses an UNKNOWN_OWNER verdict - the process is left untouched' {
     $single = Start-SelfTestSingleProcess
     try {
-        $fakeOwnership = [pscustomobject]@{ Verdict = 'UNKNOWN_OWNER'; LauncherPid = $null; ListenerPid = $single.ListenerPid; ManagedPids = @() }
+        $fakeOwnership = [pscustomobject]@{ Verdict = 'UNKNOWN_OWNER'; LauncherPid = $null; ListenerPid = $single.ListenerPid; ManagedPids = @(); ManagedPidSnapshot = @() }
         $result = Stop-RunningAiConnectorManaged -Ownership $fakeOwnership -Port $single.Port -TimeoutSec 2
         ($result.Result -eq 'refused') -and ([bool](Get-Process -Id $single.ListenerPid -ErrorAction SilentlyContinue))
     } finally { Stop-SelfTestPair $single }
@@ -289,7 +289,7 @@ Check 'Stop-RunningAiConnectorManaged refuses an UNKNOWN_OWNER verdict - the pro
 Check 'Stop-RunningAiConnectorManaged refuses a FOREIGN_PROCESS verdict - the process is left untouched' {
     $single = Start-SelfTestSingleProcess
     try {
-        $fakeOwnership = [pscustomobject]@{ Verdict = 'FOREIGN_PROCESS'; LauncherPid = $null; ListenerPid = $single.ListenerPid; ManagedPids = @() }
+        $fakeOwnership = [pscustomobject]@{ Verdict = 'FOREIGN_PROCESS'; LauncherPid = $null; ListenerPid = $single.ListenerPid; ManagedPids = @(); ManagedPidSnapshot = @() }
         $result = Stop-RunningAiConnectorManaged -Ownership $fakeOwnership -Port $single.Port -TimeoutSec 2
         ($result.Result -eq 'refused') -and ([bool](Get-Process -Id $single.ListenerPid -ErrorAction SilentlyContinue))
     } finally { Stop-SelfTestPair $single }
@@ -437,7 +437,15 @@ Check 'a port query failure (invalid port) resolves to UNKNOWN_OWNER, never DOWN
 Check 'Stop-RunningAiConnectorManaged detects a managed PID missing before any signal is sent (ownership-changed)' {
     $single = Start-SelfTestSingleProcess
     try {
-        $fakeOwnership = [pscustomobject]@{ Verdict = 'LAUNCHER_CHILD'; LauncherPid = $single.LauncherPid; ListenerPid = 999999; ManagedPids = @($single.LauncherPid, 999999) }
+        $launcherInfo = Get-RunningAiProcessInfo -ProcessId $single.LauncherPid
+        $fakeOwnership = [pscustomobject]@{
+            Verdict = 'LAUNCHER_CHILD'; LauncherPid = $single.LauncherPid; ListenerPid = 999999
+            ManagedPids = @($single.LauncherPid, 999999)
+            ManagedPidSnapshot = @(
+                [pscustomobject]@{ ProcessId = $single.LauncherPid; CreationDate = $launcherInfo.CreationDate }
+                [pscustomobject]@{ ProcessId = 999999; CreationDate = $launcherInfo.CreationDate }
+            )
+        }
         $result = Stop-RunningAiConnectorManaged -Ownership $fakeOwnership -Port $single.Port -TimeoutSec 5 -Name ('selftest-ownership-' + [guid]::NewGuid().ToString('N'))
         ($result.Result -eq 'ownership-changed') -and ([bool](Get-Process -Id $single.LauncherPid -ErrorAction SilentlyContinue))
     } finally { Stop-SelfTestPair $single }
@@ -528,6 +536,143 @@ Check 'Send-CtrlC.ps1 omitting -AllowedProcessIds performs the legacy unconditio
         Start-Sleep -Milliseconds 500
         ($p.ExitCode -eq 0) -and (-not (Get-Process -Id $single.LauncherPid -ErrorAction SilentlyContinue))
     } finally { Stop-SelfTestPair $single }
+}
+
+# ---- Phase 6I-1.7B-2A additions -----------------------------------------------------------------
+
+# STEP 1 items 1-3: source-level lock-in, the same pattern already used above for "never starts a new
+# connector after a non-clean pre-stop". Deliberately NOT exercised by actually calling
+# Invoke-RecoveryAction with PreStop=true for a real UNKNOWN_OWNER/FOREIGN_PROCESS/empty-ManagedPids
+# ownership picture: any gap in the gate would make it fall through to the REAL
+# start-running-ai.ps1 launch a few lines later (Docker/PostgreSQL/the real connector) - exactly the
+# kind of "touches real services from a test" this work order forbids. Source inspection proves the
+# gate exists without ever risking that fall-through.
+Check 'Invoke-RecoveryAction connector PreStop: DOWN proceeds, every other verdict blocks (source check)' {
+    $src = Get-Content (Join-Path $scripts 'RunningAI.Watchdog.ps1') -Raw
+    $fn = [regex]::Match($src, "(?s)function Invoke-RecoveryAction \{.*?\n\}\r?\n").Value
+    $connectorBlock = [regex]::Match($fn, "(?s)if \(\`$Action\.Component -eq 'connector'\) \{.*?\n        \} elseif").Value
+    # 'DOWN' case has an empty/comment-only body (falls through to the start attempt below).
+    $downCase = [regex]::Match($connectorBlock, "(?s)'DOWN' \{(.*?)\}\r?\n\s*\{")
+    # Every other explicitly-manageable verdict requires ManagedPids non-empty, else blocks.
+    $hasManagedPidsGuard = $connectorBlock -match "(?s)ManagedPids\).Count -eq 0.*?return \`$false"
+    # The catch-all default (FOREIGN_PROCESS, UNKNOWN_OWNER, anything unrecognized) blocks too.
+    $hasDefaultBlock = $connectorBlock -match "(?s)default \{.*?return \`$false"
+    ($connectorBlock -match "'DOWN' \{") -and $hasManagedPidsGuard -and $hasDefaultBlock
+}
+
+# STEP 1 item 3 / STEP 5 item 4: the DOWN case's own body must contain no stop/block logic at all -
+# confirms it is a deliberate pass-through, not an accidental empty case that happens to work.
+Check 'Invoke-RecoveryAction connector PreStop: DOWN case body is a pure pass-through comment, no action (source check)' {
+    $src = Get-Content (Join-Path $scripts 'RunningAI.Watchdog.ps1') -Raw
+    $fn = [regex]::Match($src, "(?s)function Invoke-RecoveryAction \{.*?\n\}\r?\n").Value
+    $downBody = [regex]::Match($fn, "(?s)'DOWN' \{(.*?)\}\r?\n\s*\{ \`$_ -in").Groups[1].Value
+    (-not [string]::IsNullOrWhiteSpace($downBody)) -and ($downBody -notmatch 'Stop-RunningAiConnectorManaged|return \$false')
+}
+
+# STEP 5 #5: classification-time identity (Ownership.ManagedPidSnapshot), not merely "is this PID
+# alive right now", is what Stop-RunningAiConnectorManaged anchors to - a snapshot CreationDate tampered
+# to no longer match the live process (simulating "classification time and stop time disagree") must
+# abort as ownership-changed, touching nothing, even though the live process itself never changed.
+Check 'a tampered ManagedPidSnapshot CreationDate (classification/stop-time mismatch) aborts as ownership-changed' {
+    $single = Start-SelfTestSingleProcess
+    try {
+        $o = Get-RunningAiConnectorOwnership -Port $single.Port -TrackedPid $single.LauncherPid -Markers $testMarkers -Name ('selftest-ownership-' + [guid]::NewGuid().ToString('N'))
+        $tampered = [pscustomobject]@{
+            Verdict = $o.Verdict; LauncherPid = $o.LauncherPid; ListenerPid = $o.ListenerPid; ManagedPids = $o.ManagedPids
+            ManagedPidSnapshot = @($o.ManagedPidSnapshot | ForEach-Object { [pscustomobject]@{ ProcessId = $_.ProcessId; CreationDate = $_.CreationDate.AddHours(-3) } })
+        }
+        $result = Stop-RunningAiConnectorManaged -Ownership $tampered -Port $single.Port -TimeoutSec 5 -Name ('selftest-ownership-' + [guid]::NewGuid().ToString('N'))
+        ($result.Result -eq 'ownership-changed') -and ($result.ResultCode -eq 'OWNERSHIP_CHANGED') -and ([bool](Get-Process -Id $single.LauncherPid -ErrorAction SilentlyContinue))
+    } finally { Stop-SelfTestPair $single }
+}
+
+# STEP 5 #6: the listener Ownership captured is no longer the port's current listener at all (the
+# original was killed and an unrelated process now occupies the port) - the stale Ownership object
+# must detect the mismatch and never touch the new, unrelated occupant.
+Check 'a stale Ownership whose listener no longer matches the current port occupant never touches the new occupant' {
+    $single = Start-SelfTestSingleProcess
+    $replacement = $null
+    try {
+        $o = Get-RunningAiConnectorOwnership -Port $single.Port -TrackedPid $single.LauncherPid -Markers $testMarkers -Name ('selftest-ownership-' + [guid]::NewGuid().ToString('N'))
+        Stop-Process -Id $single.LauncherPid -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Milliseconds 500
+        # A new, unrelated process now happens to occupy the same port. Retried: the OS may not
+        # release a just-closed LISTEN socket instantly, so the first bind attempt can legitimately
+        # fail with "address already in use" for a brief moment after the original process exits.
+        $bound = $false
+        for ($attempt = 0; $attempt -lt 5 -and -not $bound; $attempt++) {
+            if ($replacement -and -not $replacement.HasExited) { Stop-Process -Id $replacement.Id -Force -ErrorAction SilentlyContinue }
+            $replacement = Start-Process -FilePath $psExe -ArgumentList @('-NoProfile', '-WindowStyle', 'Hidden', '-File', $listenerScriptPath, '-Port', $single.Port) -WindowStyle Hidden -PassThru
+            $bound = Wait-ForPortListening -Port $single.Port -TimeoutSec 3
+            if (-not $bound) { Start-Sleep -Milliseconds 500 }
+        }
+        if (-not $bound) { throw 'replacement listener never bound the port' }
+
+        $result = Stop-RunningAiConnectorManaged -Ownership $o -Port $single.Port -TimeoutSec 5 -Name ('selftest-ownership-' + [guid]::NewGuid().ToString('N'))
+        # The ORIGINAL baseline PID genuinely exited (a different PID number now holds the port, not a
+        # reused one) - 'already-gone' is the correct, accurate Result here, not 'ownership-changed'
+        # (that is specifically for the SAME PID number now meaning something else). The safety
+        # property under test is that the new, unrelated occupant is never touched either way.
+        ($result.Result -eq 'already-gone') -and ($result.ResultCode -eq 'ALREADY_DOWN') -and ([bool](Get-Process -Id $replacement.Id -ErrorAction SilentlyContinue))
+    } finally {
+        Stop-SelfTestPair $single
+        if ($replacement) { Stop-Process -Id $replacement.Id -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+# STEP 5 #7 (ResultCode contract): 'orphan-remaining' maps to PROCESS_REMAINING when a managed PID is
+# still reported alive, and to PORT_STILL_OCCUPIED when none is (something else grabbed the port) -
+# both are distinct, neither is ever read as success.
+Check 'New-RunningAiStopOutcome maps orphan-remaining to PROCESS_REMAINING vs PORT_STILL_OCCUPIED correctly' {
+    $withRemaining = New-RunningAiStopOutcome -Result 'orphan-remaining' -Verdict 'LAUNCHER_CHILD' -PortFreed $false -RemainingPids @(4242)
+    $withoutRemaining = New-RunningAiStopOutcome -Result 'orphan-remaining' -Verdict 'LAUNCHER_CHILD' -PortFreed $false -RemainingPids @()
+    ($withRemaining.ResultCode -eq 'PROCESS_REMAINING') -and ($withoutRemaining.ResultCode -eq 'PORT_STILL_OCCUPIED') -and
+    (-not (Test-RunningAiConnectorStopWasClean -StopResult $withRemaining)) -and (-not (Test-RunningAiConnectorStopWasClean -StopResult $withoutRemaining))
+}
+
+# STEP 5 #7/#9/#10 (ResultCode contract, full vocabulary): every Result value maps to exactly the
+# unified code this phase introduces, and only STOPPED/ALREADY_DOWN are ever a clean outcome.
+Check 'New-RunningAiStopOutcome covers the full ResultCode vocabulary' {
+    $cases = @{
+        'already-gone'      = 'ALREADY_DOWN'
+        'graceful'          = 'STOPPED'
+        'forced'            = 'STOPPED'
+        'refused'           = 'REFUSED_UNKNOWN_OWNER'
+        'ownership-changed' = 'OWNERSHIP_CHANGED'
+    }
+    $ok = $true
+    foreach ($kv in $cases.GetEnumerator()) {
+        $outcome = New-RunningAiStopOutcome -Result $kv.Key -Verdict 'LAUNCHER_CHILD' -PortFreed $true
+        if ($outcome.ResultCode -ne $kv.Value) { $ok = $false }
+    }
+    $unknown = New-RunningAiStopOutcome -Result 'something-unexpected' -Verdict 'LAUNCHER_CHILD' -PortFreed $false
+    $ok -and ($unknown.ResultCode -eq 'STOP_FAILED')
+}
+
+# STEP 5 #3/malformed-input fail-safe: an Ownership object missing ManagedPidSnapshot entirely (e.g.
+# a legacy or hand-built shape that predates this phase) is refused outright, never assumed valid.
+Check 'Stop-RunningAiConnectorManaged refuses an Ownership object with no ManagedPidSnapshot at all' {
+    $single = Start-SelfTestSingleProcess
+    try {
+        $legacyShaped = [pscustomobject]@{ Verdict = 'SELF_OWNED'; LauncherPid = $single.LauncherPid; ListenerPid = $single.ListenerPid; ManagedPids = @($single.LauncherPid) }
+        $result = Stop-RunningAiConnectorManaged -Ownership $legacyShaped -Port $single.Port -TimeoutSec 5
+        ($result.ResultCode -eq 'REFUSED_UNKNOWN_OWNER') -and ([bool](Get-Process -Id $single.LauncherPid -ErrorAction SilentlyContinue))
+    } finally { Stop-SelfTestPair $single }
+}
+
+# STEP 5 #9/#10: stop-running-ai.ps1's exit-code contract (source check - this script's own top-level
+# try/catch runs for real the moment it is dot-sourced or invoked, touching the real tracked PID
+# files, so it is never executed directly by this isolated suite).
+Check 'stop-running-ai.ps1 exits non-zero when the connector did not fully stop, Ok otherwise (source check)' {
+    $src = Get-Content (Join-Path $scripts 'stop-running-ai.ps1') -Raw
+    ($src -match '\$connectorStopped\s*=\s*Stop-GarminConnectorComponent') -and
+    ($src -match 'if \(-not \$connectorStopped\) \{ exit \$ExitCode\.ConnectorStopIncomplete \}') -and
+    ($src -match 'exit \$ExitCode\.Ok')
+}
+
+Check 'ExitCode.ConnectorStopIncomplete is defined and distinct from Ok/other codes' {
+    ($ExitCode.ConnectorStopIncomplete -is [int]) -and ($ExitCode.ConnectorStopIncomplete -ne 0) -and
+    ($ExitCode.ConnectorStopIncomplete -ne $ExitCode.Connector)
 }
 
 } finally {

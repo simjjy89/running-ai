@@ -43,6 +43,9 @@ function Stop-Component {
 # above (unchanged, still used for Spring/relay) only ever stops the single tracked PID, so it was
 # never safe here - an unhealthy-but-tracked-gone orphan child would survive it, still holding the
 # port, while Remove-PidFile made it look stopped.
+# Returns $true when the connector ended up fully stopped (or was already down) - $false for any
+# ownership-unverified or partial/failed outcome. Phase 6I-1.7B-2A: the caller uses this to pick a
+# non-zero exit code rather than always exiting 0 regardless of what actually happened.
 function Stop-GarminConnectorComponent {
     param([int]$Port, [int]$TimeoutSec)
     $tracked = Read-PidFile 'garmin-connector'
@@ -50,11 +53,11 @@ function Stop-GarminConnectorComponent {
     if ($ownership.Verdict -eq 'DOWN') {
         Write-Step 'Garmin connector: not running under RunningAI control (nothing to stop)'
         Remove-PidFile 'garmin-connector'
-        return
+        return $true
     }
     if ($ownership.ManagedPids.Count -eq 0) {
         Write-Step "Garmin connector: NOT stopped - ownership could not be verified (verdict=$($ownership.Verdict)); refusing to touch an unidentified process on port $Port."
-        return
+        return $false
     }
     $result = Stop-RunningAiConnectorManaged -Ownership $ownership -Port $Port -TimeoutSec $TimeoutSec
     # Phase 6I-1.7B-1R: only a fully confirmed stop (port free AND no managed PID remaining) clears
@@ -65,15 +68,16 @@ function Stop-GarminConnectorComponent {
     if ($cleanStop) {
         Remove-PidFile 'garmin-connector'
         Write-Step "Garmin connector: stopped ($($result.Result), verdict $($ownership.Verdict), managed PID(s) $($ownership.ManagedPids -join ', '))"
-    } else {
-        Write-Step "Garmin connector: NOT fully stopped (result=$($result.Result), portFreed=$($result.PortFreed), remaining PID(s)=$($result.RemainingPids -join ', ')); PID file and metadata preserved."
+        return $true
     }
+    Write-Step "Garmin connector: NOT fully stopped (result=$($result.Result), resultCode=$($result.ResultCode), portFreed=$($result.PortFreed), remaining PID(s)=$($result.RemainingPids -join ', ')); PID file and metadata preserved."
+    return $false
 }
 
 try {
     Stop-Component 'External relay' 'external-relay' (Get-ExternalRelayMarkers) $RelayTimeoutSec
     Stop-Component 'Spring Boot' 'spring' (Get-SpringMarkers) $SpringTimeoutSec
-    Stop-GarminConnectorComponent -Port $ConnectorPort -TimeoutSec $ConnectorTimeoutSec
+    $connectorStopped = Stop-GarminConnectorComponent -Port $ConnectorPort -TimeoutSec $ConnectorTimeoutSec
 
     if ($StopDatabase) {
         $compose = Join-Path (Get-RepoRoot) 'docker-compose.yml'
@@ -84,6 +88,10 @@ try {
     } else {
         Write-Step 'PostgreSQL: left running (use -StopDatabase to stop it; data is never deleted)'
     }
+    # Phase 6I-1.7B-2A: a connector that did not fully stop (ownership unverified, partial/failed
+    # stop) must never be reported via exit code 0 - relay/Spring having stopped cleanly does not
+    # change that; the operator or a caller script checking $LASTEXITCODE needs to see this failed.
+    if (-not $connectorStopped) { exit $ExitCode.ConnectorStopIncomplete }
     exit $ExitCode.Ok
 } catch {
     Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
