@@ -60,7 +60,8 @@ STEP F 15개 항목 중 "두 개 이상의 LISTEN PID"(#9)는 Windows가 한 포
 
 ## 9. Commit SHA 및 원격 브랜치 상태
 
-(커밋 후 기록)
+`8bc81ef` (`fix(windows): enforce connector ownership before termination`, `a7c2967` 위). Fast-forward
+only로 `origin/main-3`에 Push 완료, Merge Commit 없음, `origin/main`은 미변경.
 
 ## 10. 운영환경 불변 확인
 
