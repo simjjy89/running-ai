@@ -388,6 +388,235 @@ try { while ($true) { Start-Sleep -Seconds 1 } } finally { $listener.Stop() }
 }
 
 # ======================================================================================
+# Phase 6I-1.7D-2, STEP C: ownership-aware connector classification/planning, end to end.
+# Test-ConnectorOwnership.ps1 already proves Get-RunningAiConnectorOwnership itself resolves
+# FOREIGN_PROCESS/UNKNOWN_OWNER/ORPHANED_MANAGED_PROCESS correctly; these three checks close a
+# different gap - that Get-ConnectorComponentState (which calls that ownership model internally,
+# never injectable) and Get-RecoveryPlan built on top of it actually translate each verdict into
+# the right State/Reason/Action/Blocked outcome. Get-ConnectorComponentState hard-codes the REAL
+# sidecar/PID-file name ("garmin-connector") and reads it from $script:RuntimeDir, so - exactly
+# like the BUSY/lock-contention checks above - this can only be run safely from a FRESHLY SPAWNED
+# child process that inherits RUNNING_AI_TEST_RUNTIME_DIR (set by With-TempRuntimeDir) and
+# dot-sources RunningAI.Watchdog.ps1 for the first time in its own session; calling it in THIS
+# process would touch the real dev-worktree ".runtime\garmin-connector.*" files.
+# ======================================================================================
+
+function Invoke-ConnectorClassificationInIsolatedProcess {
+    param([string]$Dir, [int]$Port)
+    $resultPath = Join-Path $Dir ('classify-result-' + [guid]::NewGuid().ToString('N') + '.json')
+    $runnerScript = Join-Path $Dir ('classify-run-' + [guid]::NewGuid().ToString('N') + '.ps1')
+    @"
+. "`$env:RA_TEST_WATCHDOG_PATH"
+`$state = Get-ConnectorComponentState -Health `$false -PortUsed `$true -ManagedPid `$null -Port $Port
+`$states = [ordered]@{
+    docker = [pscustomobject]@{ State = 'UP'; Reason = '' }
+    postgres = [pscustomobject]@{ State = 'UP'; Reason = '' }
+    connector = `$state
+    spring = [pscustomobject]@{ State = 'UP'; Reason = '' }
+    'external-relay' = [pscustomobject]@{ State = 'UP'; Reason = '' }
+}
+`$plan = Get-RecoveryPlan -States `$states -History (New-EmptyHistory) -Now (Get-Date)
+`$connectorAction = `$plan.Actions | Where-Object { `$_.Component -eq 'connector' }
+`$connectorBlocked = `$plan.Blocked | Where-Object { `$_.Component -eq 'connector' }
+[pscustomobject]@{
+    State = `$state.State
+    Reason = `$state.Reason
+    OwnershipVerdict = `$state.OwnershipVerdict
+    ActionName = if (`$connectorAction) { `$connectorAction.Action } else { `$null }
+    PreStop = if (`$connectorAction) { [bool]`$connectorAction.PreStop } else { `$null }
+    BlockedReason = if (`$connectorBlocked) { `$connectorBlocked.Reason } else { `$null }
+} | ConvertTo-Json -Compress | Set-Content -LiteralPath `$env:RA_TEST_RESULT_PATH -Encoding ascii
+"@ | Set-Content -LiteralPath $runnerScript -Encoding ascii
+    $psExe = (Get-Command powershell.exe).Source
+    $env:RA_TEST_WATCHDOG_PATH = Join-Path $scripts 'RunningAI.Watchdog.ps1'
+    $env:RA_TEST_RESULT_PATH = $resultPath
+    try {
+        Start-Process -FilePath $psExe -ArgumentList @('-NoProfile', '-WindowStyle', 'Hidden', '-File', $runnerScript) -WindowStyle Hidden -Wait
+        if (Test-Path -LiteralPath $resultPath) { Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json } else { $null }
+    } finally {
+        Remove-Item Env:\RA_TEST_WATCHDOG_PATH, Env:\RA_TEST_RESULT_PATH -ErrorAction SilentlyContinue
+    }
+}
+
+function Start-RunningAiTestLoopbackListener {
+    param([string]$Dir, [int]$Port, [string]$ExtraCommentMarker = '')
+    $script = Join-Path $Dir ('listener-' + [guid]::NewGuid().ToString('N') + '.ps1')
+    @"
+# $ExtraCommentMarker
+param([int]`$Port)
+`$listener = New-Object System.Net.Sockets.TcpListener ([System.Net.IPAddress]::Parse('127.0.0.1'), `$Port)
+`$listener.Start()
+try { while (`$true) { Start-Sleep -Seconds 1 } } finally { `$listener.Stop() }
+"@ | Set-Content -LiteralPath $script -Encoding ascii
+    $psExe = (Get-Command powershell.exe).Source
+    $proc = Start-Process -FilePath $psExe -ArgumentList @('-NoProfile', '-WindowStyle', 'Hidden', '-File', $script, '-Port', $Port) -WindowStyle Hidden -PassThru
+    $deadline = (Get-Date).AddSeconds(5)
+    while ((Get-Date) -lt $deadline -and -not (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)) { Start-Sleep -Milliseconds 200 }
+    [pscustomobject]@{ Proc = $proc; Script = $script }
+}
+
+Check 'connector FOREIGN_PROCESS (ownership-aware, real $Port): DEGRADED, never an action, blocked with reason FOREIGN_PROCESS' {
+    With-TempRuntimeDir {
+        param($dir)
+        $port = Get-Random -Minimum 20000 -Maximum 30000
+        # Connector-shaped command line (contains 'garmin_connector' and ' serve') but under a
+        # DIFFERENT repository root than this repo - exactly what Test-RunningAiConnectorShape
+        # recognizes as "some garmin_connector, not ours" (FOREIGN_PROCESS, never UNKNOWN_OWNER).
+        $foreignRepoDir = Join-Path ([IO.Path]::GetTempPath()) ('ra-foreignrepo-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Force $foreignRepoDir | Out-Null
+        $listener = $null
+        try {
+            $script = Join-Path $dir ('foreign-' + [guid]::NewGuid().ToString('N') + '.ps1')
+            @'
+param([int]$Port, [string]$ConnectorMarker, [string]$RepoMarker)
+$listener = New-Object System.Net.Sockets.TcpListener ([System.Net.IPAddress]::Parse('127.0.0.1'), $Port)
+$listener.Start()
+try { while ($true) { Start-Sleep -Seconds 1 } } finally { $listener.Stop() }
+'@ | Set-Content -LiteralPath $script -Encoding ascii
+            $psExe = (Get-Command powershell.exe).Source
+            # -ConnectorMarker/-RepoMarker are never read by the script - passing them as plain
+            # arguments is only a way to make THIS live process's own real CommandLine (as Win32_Process
+            # reports it) literally contain "garmin_connector" and " serve" (so Test-RunningAiConnectorShape
+            # recognizes it as connector-shaped) while never containing this repo's own root path (so
+            # Test-ProcessIdentity, which requires ALL of Get-ConnectorMarkers, never matches it as ours).
+            $listener = Start-Process -FilePath $psExe -ArgumentList @('-NoProfile', '-WindowStyle', 'Hidden', '-File', $script, '-Port', $port, '-ConnectorMarker', 'garmin_connector', '-RepoMarker', "x serve $foreignRepoDir") -WindowStyle Hidden -PassThru
+            $deadline = (Get-Date).AddSeconds(5)
+            while ((Get-Date) -lt $deadline -and -not (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)) { Start-Sleep -Milliseconds 200 }
+            if (-not (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)) { throw 'foreign listener never bound the port' }
+            $result = Invoke-ConnectorClassificationInIsolatedProcess -Dir $dir -Port $port
+            ($null -ne $result) -and ($result.State -eq 'DEGRADED') -and ($result.Reason -eq 'FOREIGN_PROCESS') -and
+            ($null -eq $result.ActionName) -and ($result.BlockedReason -eq 'FOREIGN_PROCESS')
+        } finally {
+            if ($listener) { Stop-Process -Id $listener.Id -Force -ErrorAction SilentlyContinue }
+            Remove-Item -Recurse -Force $foreignRepoDir -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Check 'connector UNKNOWN_OWNER (ownership-aware, real $Port): DEGRADED, never an action, blocked with reason UNKNOWN_OWNER' {
+    With-TempRuntimeDir {
+        param($dir)
+        $port = Get-Random -Minimum 20000 -Maximum 30000
+        $held = $null
+        try {
+            # A plain, innocuous loopback listener with no connector markers at all.
+            $held = Start-RunningAiTestLoopbackListener -Dir $dir -Port $port -ExtraCommentMarker 'plain bystander, not connector-shaped'
+            if (-not (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)) { throw 'bystander listener never bound the port' }
+            $result = Invoke-ConnectorClassificationInIsolatedProcess -Dir $dir -Port $port
+            ($null -ne $result) -and ($result.State -eq 'DEGRADED') -and ($result.Reason -eq 'UNKNOWN_OWNER') -and
+            ($null -eq $result.ActionName) -and ($result.BlockedReason -eq 'UNKNOWN_OWNER')
+        } finally {
+            if ($held) { Stop-Process -Id $held.Proc.Id -Force -ErrorAction SilentlyContinue }
+        }
+    }
+}
+
+Check 'connector ORPHANED_MANAGED_PROCESS (ownership-aware, real $Port): UNHEALTHY, plans RESTART_CONNECTOR with PreStop, never blocked' {
+    With-TempRuntimeDir {
+        param($dir)
+        $port = Get-Random -Minimum 20000 -Maximum 30000
+        $held = $null
+        try {
+            $held = Start-RunningAiTestLoopbackListener -Dir $dir -Port $port -ExtraCommentMarker 'orphaned former-launcher connector listener'
+            if (-not (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)) { throw 'listener never bound the port' }
+            $info = Get-RunningAiProcessInfo -ProcessId $held.Proc.Id
+            # Get-RunningAiConnectorOwnership only ever consults the sidecar when $TrackedPid is
+            # present but no longer verifiably ours (a truly ABSENT TrackedPid takes an entirely
+            # different, earlier branch and can never reach ORPHANED_MANAGED_PROCESS) - so a dead PID
+            # (a short-lived helper process, already exited) is written to garmin-connector.pid first,
+            # exactly modelling "the launcher is gone". No real launcher is ever involved.
+            $deadPidHelper = Start-Process -FilePath (Get-Command powershell.exe).Source -ArgumentList @('-NoProfile', '-Command', 'exit 0') -PassThru
+            $deadPidHelper.WaitForExit()
+            Set-Content -LiteralPath (Join-Path $dir 'garmin-connector.pid') -Value $deadPidHelper.Id -Encoding ascii
+            # The sidecar, matching name/repoRoot/port/PID/CreationDate exactly, is the ONLY way
+            # Get-RunningAiConnectorOwnership can re-identify an orphan (never a bare PID guess).
+            # Written directly as raw JSON (same schema Write-RunningAiOwnerMeta produces) to the
+            # isolated temp RuntimeDir, since this OUTER process's own $script:RuntimeDir is
+            # permanently bound to the real dev-worktree path (dot-sourced before any
+            # RUNNING_AI_TEST_RUNTIME_DIR was ever set - same gotcha as every other cross-process
+            # check in this file).
+            $metaObj = [ordered]@{
+                version = 1; name = 'garmin-connector'; port = $port; repoRoot = (Get-RepoRoot)
+                recordedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+                launcher = $null
+                listener = [ordered]@{ processId = $held.Proc.Id; creationDate = $info.CreationDate.ToUniversalTime().ToString('o') }
+            }
+            $metaPath = Join-Path $dir 'garmin-connector.owner.json'
+            ($metaObj | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $metaPath -Encoding ascii
+            $result = Invoke-ConnectorClassificationInIsolatedProcess -Dir $dir -Port $port
+            ($null -ne $result) -and ($result.State -eq 'UNHEALTHY') -and ($result.Reason -eq 'ORPHANED_MANAGED_PROCESS') -and
+            ($result.ActionName -eq 'RESTART_CONNECTOR') -and ($result.PreStop -eq $true) -and ($null -eq $result.BlockedReason)
+        } finally {
+            if ($held) { Stop-Process -Id $held.Proc.Id -Force -ErrorAction SilentlyContinue }
+        }
+    }
+}
+
+# ======================================================================================
+# Phase 6I-1.7D-2, STEP D: BLOCKED end-to-end (Invoke-WatchdogRecovery), and the "exit 0 is not
+# proof of success" re-observation rule (Test-RunningAiRecoverySucceeded). Both use only synthetic
+# loopback listeners/responders on disposable high ports - never 8765/18080/17845.
+# ======================================================================================
+
+Check 'Invoke-WatchdogRecovery: a BLOCKED runner result stops the tick (.Failed true) but charges NO restart/long-term budget (distinct from UNKNOWN_FAILURE, which DOES consume the short-term attempt budget)' {
+    $history = New-EmptyHistory
+    $lt = New-EmptyLongTermState
+    $runner = { param($a) New-RunningAiRecoveryOutcome -AttemptedComponent $a.Component -ResultCode 'BLOCKED' -ActionPerformed $a.Action }
+    # ConnectorPortUsed=$false (plain PROCESS_DEAD -> DOWN -> START_CONNECTOR planned) - not $true,
+    # which (with no ConnectorPort passed to Invoke-WatchdogRecovery, so the legacy non-ownership-aware
+    # classifier applies) would resolve to DEGRADED/FOREIGN_PROCESS and never reach the Runner at all.
+    $fakeObserve = {
+        [pscustomobject]@{ Docker='UP'; Postgres='healthy'; ConnectorHealth=$false; ConnectorPortUsed=$false; ConnectorPid=$null; SpringHealth=$true; SpringPortUsed=$true; SpringPid=1; ExternalRelayHealth=$true; ExternalRelayPortUsed=$true; ExternalRelayPid=1 }
+    }
+    $result = Invoke-WatchdogRecovery -Observe $fakeObserve -Runner $runner -History $history -HistoryAvailable $true -Now $now -LongTermState $lt
+    ($result.Failed) -and (-not $result.Busy) -and (@($lt['connector'].Failures).Count -eq 0) -and
+    (@($result.Deltas.LongTermFailures).Count -eq 0) -and
+    (@(@($result.Deltas.Restarts) | Where-Object { $_.Component -eq 'connector' }).Count -eq 1)   # BLOCKED still records a short-term attempt, exactly like UNKNOWN_FAILURE
+}
+
+Check 'Test-RunningAiRecoverySucceeded (rule 5/6): exit 0 is not proof of success - a component with NOTHING listening is reported not-succeeded, one with a correct health responder is reported succeeded' {
+    $springPort = Get-Random -Minimum 20000 -Maximum 25000     # nothing ever listens here
+    $connectorPort = Get-Random -Minimum 25001 -Maximum 30000
+    $d = New-TempRuntimeDir
+    $listenerProc = $null
+    try {
+        $script = Join-Path $d ('fake-connector-health-' + [guid]::NewGuid().ToString('N') + '.ps1')
+        # Minimal HttpListener answering exactly the shape Test-ConnectorHealth expects:
+        # GET http://127.0.0.1:<port>/health -> {"status":"UP"}.
+        @"
+param([int]`$Port)
+`$http = New-Object System.Net.HttpListener
+`$http.Prefixes.Add("http://127.0.0.1:`$Port/")
+`$http.Start()
+try {
+    while (`$true) {
+        `$ctx = `$http.GetContext()
+        `$bytes = [System.Text.Encoding]::UTF8.GetBytes('{"status":"UP"}')
+        `$ctx.Response.ContentType = 'application/json'
+        `$ctx.Response.OutputStream.Write(`$bytes, 0, `$bytes.Length)
+        `$ctx.Response.OutputStream.Close()
+    }
+} finally { `$http.Stop() }
+"@ | Set-Content -LiteralPath $script -Encoding ascii
+        $psExe = (Get-Command powershell.exe).Source
+        $listenerProc = Start-Process -FilePath $psExe -ArgumentList @('-NoProfile', '-WindowStyle', 'Hidden', '-File', $script, '-Port', $connectorPort) -WindowStyle Hidden -PassThru
+        $deadline = (Get-Date).AddSeconds(5)
+        $up = $false
+        while ((Get-Date) -lt $deadline -and -not $up) {
+            try { $up = [bool](Test-ConnectorHealth -Port $connectorPort) } catch { }
+            if (-not $up) { Start-Sleep -Milliseconds 200 }
+        }
+        if (-not $up) { throw 'fake connector health responder never came up' }
+        $springNeverUp = -not (Test-RunningAiRecoverySucceeded -Component 'spring' -ConnectorPort $connectorPort -SpringPort $springPort)
+        $connectorIsUp = Test-RunningAiRecoverySucceeded -Component 'connector' -ConnectorPort $connectorPort -SpringPort $springPort
+        $springNeverUp -and $connectorIsUp
+    } finally {
+        if ($listenerProc) { Stop-Process -Id $listenerProc.Id -Force -ErrorAction SilentlyContinue }
+        Remove-Item -Recurse -Force $d -ErrorAction SilentlyContinue
+    }
+}
+
+# ======================================================================================
 # STEP F: cross-process start/stop runtime lock
 # ======================================================================================
 
