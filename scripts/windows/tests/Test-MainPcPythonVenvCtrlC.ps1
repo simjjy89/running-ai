@@ -159,12 +159,41 @@ finally:
 sys.exit(0)
 '@ | Set-Content -LiteralPath $listenerScript -Encoding utf8
 
+    # listener_ignore_sigint.py (Phase 6I-1.7D-2R, STEP 2): a SECOND, separate fixture script used only
+    # by the forced-fallback check below. Identical socket/bind/listen shape to listener.py above, except
+    # it installs signal.SIG_IGN for SIGINT instead of a handler that exits cleanly - so a real Ctrl+C
+    # delivered to it is GUARANTEED to have no effect, deterministically forcing
+    # Stop-RunningAiConnectorManaged's own graceful-wait-then-kill logic to actually reach and exercise
+    # its forced path, rather than depending on this execution environment's current (and, per Phase
+    # 6I-1.7D-2's own investigation, apparently now variable) Ctrl+C delivery timing. The original
+    # listener.py is left completely unchanged and still used by the "graceful Ctrl+C" check above - this
+    # phase does not touch that scenario.
+    $ignoreSigintListenerScript = Join-Path $testRoot 'listener_ignore_sigint.py'
+    @'
+import socket
+import sys
+import signal
+import time
+
+signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+port = int(sys.argv[sys.argv.index("--port") + 1])
+srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(("127.0.0.1", port))
+srv.listen(1)
+
+while True:
+    time.sleep(0.2)
+'@ | Set-Content -LiteralPath $ignoreSigintListenerScript -Encoding utf8
+
     function Start-RunningAiTestVenvPair {
+        param([string]$ListenerScript = $listenerScript)
         $port = Get-SelfTestPort
         # Exactly how start-running-ai.ps1 invokes the real connector: one Start-Process call against
         # the venv's own python.exe with a script file argument. $trackedPid is what Write-PidFile would
         # record in a real deployment.
-        $tracked = Start-Process -FilePath $venvPython -ArgumentList @($listenerScript, '--port', $port) -WindowStyle Hidden -PassThru
+        $tracked = Start-Process -FilePath $venvPython -ArgumentList @($ListenerScript, '--port', $port) -WindowStyle Hidden -PassThru
         if (-not (Wait-ForPortListening -Port $port)) {
             Stop-RunningAiTestProcessTree -RootProcessId $tracked.Id
             throw "test listener never bound port $port"
@@ -230,8 +259,21 @@ sys.exit(0)
 
     # ---- items 8-10: forced fallback safety, port release, bystander preservation --------------------
 
-    Check 'real Python 3.12 venv pair: if Ctrl+C does not stop it, forced fallback stops ONLY the verified managed PIDs, frees the port, and a bystander python.exe survives untouched' {
-        $pair = Start-RunningAiTestVenvPair
+    # Phase 6I-1.7D-2R (STEP 1-3): the previous version of this check used the ordinary,
+    # SIGINT-cooperative listener.py and TimeoutSec 0, assuming TimeoutSec 0 would "skip straight to the
+    # forced path" regardless of whether Ctrl+C worked. That assumption broke once this environment's
+    # Ctrl+C delivery started succeeding quickly enough that Stop-RunningAiConnectorManaged's very first
+    # Wait-Until check already observed the process gone - returning a genuine, correct 'graceful' result
+    # instead of 'forced' (root-caused in the Phase 6I-1.7D-2 result doc; not a production defect, and the
+    # safety guarantees the check cares about - bystander untouched, managed PIDs gone, port freed - held
+    # either way). Rather than loosen the assertion (explicitly forbidden - the point is to prove the
+    # FORCED code path itself), this check now uses the dedicated listener_ignore_sigint.py fixture, whose
+    # SIG_IGN makes "Ctrl+C has no effect" a guaranteed fact of the fixture rather than a timing accident -
+    # and explicitly VERIFIES that fact (by sending a real Ctrl+C and confirming survival) before ever
+    # calling the real Stop-RunningAiConnectorManaged, so a fixture regression fails loudly here instead
+    # of silently producing a false pass.
+    Check 'real Python 3.12 venv pair (SIGINT-ignoring fixture): Ctrl+C has no effect (verified), so forced fallback genuinely engages and stops ONLY the verified managed PIDs, frees the port, and a bystander python.exe survives untouched' {
+        $pair = Start-RunningAiTestVenvPair -ListenerScript $ignoreSigintListenerScript
         $bystanderScript = Join-Path $testRoot ('bystander-' + [guid]::NewGuid().ToString('N') + '.py')
         'import time' + "`n" + 'time.sleep(120)' | Set-Content -LiteralPath $bystanderScript -Encoding utf8
         $bystanderTop = $null
@@ -245,10 +287,37 @@ sys.exit(0)
             $bystanderPid = if ($bystanderChild) { [int]$bystanderChild.ProcessId } else { $bystanderTop.Id }
 
             $o = Get-RunningAiConnectorOwnership -Port $pair.Port -TrackedPid $pair.LauncherPid -Markers $testMarkers -Name ('pyvenv-forced-' + [guid]::NewGuid().ToString('N'))
-            # TimeoutSec 0: skip straight to the forced path regardless of whether graceful Ctrl+C would
-            # have worked - this check is specifically about the FORCED fallback's own safety guarantees.
-            $result = Stop-RunningAiConnectorManaged -Ownership $o -Port $pair.Port -TimeoutSec 0 -Name ('pyvenv-forced-' + [guid]::NewGuid().ToString('N'))
-            ($result.Result -eq 'forced') -and ($result.PortFreed) -and
+            # STEP 3 item 1-2: initial classification and snapshot, before anything is signaled.
+            if ($o.Verdict -ne 'LAUNCHER_CHILD') { throw "expected initial Verdict LAUNCHER_CHILD, got $($o.Verdict)" }
+            if (@($o.ManagedPidSnapshot).Count -ne 2) { throw "expected a 2-PID ManagedPidSnapshot (launcher+listener), got $(@($o.ManagedPidSnapshot).Count)" }
+
+            # STEP 2's own precondition: prove SIGINT is genuinely ignored by THIS fixture, independently
+            # of Stop-RunningAiConnectorManaged, using the same per-PID Send-CtrlC.ps1 helper that function
+            # calls internally. If the listener does not survive this, the fixture itself is broken and
+            # this check must fail here - never silently fall through to a false pass.
+            $sendCtrlC = Join-Path $scripts 'Send-CtrlC.ps1'
+            $ps = (Get-Command powershell.exe).Source
+            foreach ($candidatePid in @($pair.LauncherPid, $pair.ListenerPid)) {
+                & $ps -NoProfile -ExecutionPolicy Bypass -File $sendCtrlC -ProcessId $candidatePid | Out-Null
+            }
+            Start-Sleep -Seconds 2
+            $listenerSurvivedProbe = [bool](Get-Process -Id $pair.ListenerPid -ErrorAction SilentlyContinue)
+            $launcherSurvivedProbe = [bool](Get-Process -Id $pair.LauncherPid -ErrorAction SilentlyContinue)
+            $portStillUsedAfterProbe = [bool](Get-NetTCPConnection -LocalPort $pair.Port -State Listen -ErrorAction SilentlyContinue)
+            if (-not ($listenerSurvivedProbe -and $launcherSurvivedProbe -and $portStillUsedAfterProbe)) {
+                throw 'SIGINT-ignore fixture precondition failed: a direct Ctrl+C probe stopped the listener/launcher or freed the port - the fixture no longer guarantees "Ctrl+C has no effect", so the forced-fallback code path below cannot be trusted and this check must not be reported as a pass'
+            }
+
+            # STEP 3 items 3-9: the REAL production function, given a listener proven immune to Ctrl+C -
+            # a non-zero TimeoutSec so its own Wait-Until loop genuinely signals, waits, and times out
+            # (never bypassed via TimeoutSec 0) before falling through to the forced kill.
+            $result = Stop-RunningAiConnectorManaged -Ownership $o -Port $pair.Port -TimeoutSec 3 -Name ('pyvenv-forced-' + [guid]::NewGuid().ToString('N'))
+
+            # STEP 3 item 12 (PID-reuse/CreationDate re-verification immediately before the forced kill) is
+            # exercised end to end by the separate tamper check below, against this same real venv pair
+            # shape - not duplicated here to keep this check focused on the forced-path outcome itself.
+            ($result.Result -eq 'forced') -and ($result.ResultCode -eq 'STOPPED') -and ($result.PortFreed) -and
+            (@($result.RemainingPids).Count -eq 0) -and
             (-not (Get-Process -Id $pair.LauncherPid -ErrorAction SilentlyContinue)) -and
             (-not (Get-Process -Id $pair.ListenerPid -ErrorAction SilentlyContinue)) -and
             ([bool](Get-Process -Id $bystanderPid -ErrorAction SilentlyContinue))
