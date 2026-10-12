@@ -182,6 +182,17 @@ running-ai:
       fixed-delay: 1h
       initial-delay: 1m
 
+  injury-safety:
+    # Server-enforced athlete-reported injury/pain safety gate (Phase 7B-2), consulted by every
+    # workout-producing path (AI-coach draft generation/revision/approval, approved-draft publish,
+    # the legacy deterministic publish pipeline and, through it, its scheduler and the MCP tool).
+    # No report ever, an UNKNOWN status, an ACTIVE report, or a report older than this many hours
+    # all block anything but a REST workout; only an explicit, fresh RESOLVED report allows normal
+    # training to be considered. 48h: long enough that a same-day confirmation does not need
+    # repeating on every coach call, short enough that a multi-day-old reading is never silently
+    # treated as still describing today.
+    staleness-hours: ${RUNNING_AI_INJURY_SAFETY_STALENESS_HOURS:48}
+
   training:
     # Training decision context (TrainingDecisionContextService). Heuristics and descriptive labels only.
     classification:

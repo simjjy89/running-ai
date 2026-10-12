@@ -1,5 +1,6 @@
 package com.runningai.integration.intervals;
 
+import com.runningai.injury.WorkoutSafetyGateService;
 import com.runningai.integration.intervals.IntervalsException.Reason;
 import com.runningai.training.CandidateTrainingType;
 import com.runningai.training.StructuredWorkoutMapper;
@@ -146,7 +147,7 @@ class WorkoutPublishingSchedulerTest {
         IntervalsWorkoutPublisher publisher = mock(IntervalsWorkoutPublisher.class);
         WorkoutPublishProperties masterOff = properties(false, "Asia/Seoul");
         WorkoutPublishApplicationService realService = new WorkoutPublishApplicationService(masterOff, targetService,
-                new StructuredWorkoutMapper(), new IntervalsWorkoutRenderer(), publisher);
+                new StructuredWorkoutMapper(), new IntervalsWorkoutRenderer(), publisher, mock(WorkoutSafetyGateService.class));
 
         assertThatCode(() -> new WorkoutPublishingScheduler(realService, masterOff, BOUNDARY).runScheduledPublish())
                 .doesNotThrowAnyException();

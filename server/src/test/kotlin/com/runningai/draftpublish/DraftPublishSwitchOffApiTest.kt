@@ -1,11 +1,14 @@
 package com.runningai.draftpublish
 
+import com.runningai.athlete.AthleteService
 import com.runningai.coach.CoachTestFixtures.draft
 import com.runningai.coach.CoachTestFixtures.restDraft
 import com.runningai.coach.WorkoutDraft
 import com.runningai.coach.WorkoutDraftApprovalRepository
 import com.runningai.coach.WorkoutDraftRepository
 import com.runningai.coach.WorkoutDraftStore
+import com.runningai.injury.InjuryReportRepository
+import com.runningai.injury.InjuryTestFixtures
 import com.runningai.integration.intervals.IntervalsWorkoutClient
 import com.runningai.integration.intervals.IntervalsWorkoutPublisher
 import com.runningai.integration.intervals.WorkoutPublishApplicationService
@@ -13,6 +16,7 @@ import com.runningai.integration.intervals.WorkoutPublishProperties
 import com.runningai.integration.intervals.WorkoutPublishingScheduler
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.mockito.Mockito.verifyNoInteractions
 import org.springframework.beans.factory.annotation.Autowired
@@ -26,6 +30,7 @@ import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
+import java.time.Clock
 import java.time.LocalDate
 import java.util.UUID
 
@@ -46,10 +51,18 @@ class DraftPublishSwitchOffApiTest {
     @Autowired private lateinit var properties: DraftPublishingProperties
     @Autowired private lateinit var legacyProperties: WorkoutPublishProperties
     @Autowired private lateinit var context: ApplicationContext
+    @Autowired private lateinit var injuryReportRepository: InjuryReportRepository
+    @Autowired private lateinit var athleteService: AthleteService
+    @Autowired private lateinit var clock: Clock
 
     @MockitoBean private lateinit var publisher: IntervalsWorkoutPublisher
     @MockitoBean private lateinit var intervalsClient: IntervalsWorkoutClient
     @MockitoBean private lateinit var legacyPublishService: WorkoutPublishApplicationService
+
+    @BeforeEach
+    fun seedSafeInjuryState() {
+        InjuryTestFixtures.seedResolved(injuryReportRepository, athleteService, clock)
+    }
 
     @AfterEach
     fun cleanUp() {
@@ -57,6 +70,7 @@ class DraftPublishSwitchOffApiTest {
         publications.deleteAll()
         approvals.deleteAll()
         drafts.deleteAll()
+        injuryReportRepository.deleteAll()
     }
 
     private fun approved(d: WorkoutDraft): Long {

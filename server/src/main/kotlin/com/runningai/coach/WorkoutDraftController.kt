@@ -2,6 +2,7 @@ package com.runningai.coach
 
 import com.fasterxml.jackson.annotation.JsonInclude
 import com.runningai.common.exception.ErrorResponse
+import com.runningai.injury.WorkoutSafetyViolationException
 import com.runningai.training.IntensityClass
 import com.runningai.training.PrimaryTargetType
 import com.runningai.training.SegmentType
@@ -253,6 +254,15 @@ class WorkoutDraftExceptionHandler {
     @ExceptionHandler(TrainingContextTooLargeException::class)
     fun contextTooLarge(e: TrainingContextTooLargeException): ResponseEntity<ErrorResponse> =
         body(HttpStatus.INTERNAL_SERVER_ERROR, "TRAINING_CONTEXT_TOO_LARGE", e.message)
+
+    /**
+     * Fail-closed (Phase 7B-2): the injury/pain safety policy forbids a non-REST workout right now,
+     * and either the AI coach returned one anyway or the safety state changed while it was thinking.
+     * Nothing is stored; the caller sees exactly why via [WorkoutSafetyViolationException.decision].
+     */
+    @ExceptionHandler(WorkoutSafetyViolationException::class)
+    fun safetyBlocked(e: WorkoutSafetyViolationException): ResponseEntity<ErrorResponse> =
+        body(HttpStatus.UNPROCESSABLE_ENTITY, "WORKOUT_SAFETY_${e.decision.reasonCode.name}", e.message)
 
     @ExceptionHandler(AiCoachException::class)
     fun coach(e: AiCoachException): ResponseEntity<ErrorResponse> {

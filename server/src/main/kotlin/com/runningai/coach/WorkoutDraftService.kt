@@ -3,6 +3,7 @@ package com.runningai.coach
 import com.fasterxml.jackson.core.type.TypeReference
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.runningai.athlete.AthleteService
+import com.runningai.injury.WorkoutSafetyGateService
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
@@ -165,16 +166,29 @@ class WorkoutDraftService(
     private val contextBuilder: CoachTrainingContextBuilder,
     private val serializer: CoachContextSerializer,
     private val store: WorkoutDraftStore,
+    private val safetyGate: WorkoutSafetyGateService,
     private val clock: java.time.Clock,
 ) {
 
     fun today(): LocalDate = contextBuilder.today()
 
+    /**
+     * Server-enforced injury/pain safety (Phase 7B-2): the current [com.runningai.injury.InjurySafetyDecision]
+     * is read fresh for every call (never cached) and applied twice -
+     *  - *before* the coach call, by prepending a structured, authoritative constraint ahead of
+     *    whatever free-text [SessionConstraints.painOrFatigueFeedback] this request carries, so the
+     *    stored status always outranks this call's own words;
+     *  - *after* the coach call, re-read (the AI call takes seconds, so the stored status could have
+     *    changed meanwhile) and independently verified against what the coach actually returned: a
+     *    REST-only decision rejects any non-REST draft before it is ever persisted, regardless of
+     *    what the coach said or why.
+     */
     fun generate(date: LocalDate, constraints: SessionConstraints): WorkoutDraft {
-        val context = contextBuilder.build(date, constraints)
+        val context = contextBuilder.build(date, applySafetyConstraint(constraints))
         // Serialized and size-guarded BEFORE the coach call: an oversized context never reaches Claude.
         val snapshot = serializer.snapshot(context, java.time.Instant.now(clock))
         val designed = coach.createWorkout(context)
+        safetyGate.requireAllowed(safetyGate.currentDecision(), designed.isRest, "workout draft generation for $date")
         return store.save(designed, UUID.randomUUID().toString(), supersede = null, context = snapshot)
     }
 
@@ -182,9 +196,17 @@ class WorkoutDraftService(
 
     fun revise(id: Long, userRequest: String, constraints: SessionConstraints? = null): WorkoutDraft {
         val current = store.loadForRevision(id)
-        val context = contextBuilder.build(current.date, constraints ?: SessionConstraints())
+        val context = contextBuilder.build(current.date, applySafetyConstraint(constraints ?: SessionConstraints()))
         val snapshot = serializer.snapshot(context, java.time.Instant.now(clock))
         val revised = coach.reviseWorkout(context, current, userRequest)
+        safetyGate.requireAllowed(safetyGate.currentDecision(), revised.isRest, "workout draft revision of $id")
         return store.save(revised, requireNotNull(current.draftGroupId), supersede = current.id, context = snapshot)
+    }
+
+    private fun applySafetyConstraint(constraints: SessionConstraints): SessionConstraints {
+        val constraintText = safetyGate.constraintText(safetyGate.currentDecision()) ?: return constraints
+        val merged = listOfNotNull(constraintText, constraints.painOrFatigueFeedback?.takeIf(String::isNotBlank))
+            .joinToString("\n\n")
+        return constraints.copy(painOrFatigueFeedback = merged)
     }
 }

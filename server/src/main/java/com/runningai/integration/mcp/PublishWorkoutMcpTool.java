@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.runningai.common.exception.ResourceNotFoundException;
 import com.runningai.common.exception.UnprocessableRequestException;
+import com.runningai.injury.WorkoutSafetyViolationException;
 import com.runningai.integration.intervals.IntervalsException;
 import com.runningai.integration.intervals.WorkoutPublishAlreadyRunningException;
 import com.runningai.integration.intervals.WorkoutPublishApplicationService;
@@ -100,6 +101,8 @@ public class PublishWorkoutMcpTool {
             return failure("WORKOUT_PUBLISHING_DISABLED", e.getMessage(), date);
         } catch (WorkoutPublishAlreadyRunningException e) {
             return failure("WORKOUT_PUBLISH_ALREADY_RUNNING", e.getMessage(), date);
+        } catch (WorkoutSafetyViolationException e) {
+            return failure("WORKOUT_SAFETY_" + e.getDecision().getReasonCode().name(), e.getMessage(), date);
         } catch (IntervalsException e) {
             return failure(e.getCode(), e.getMessage(), date);
         } catch (UnprocessableRequestException e) {

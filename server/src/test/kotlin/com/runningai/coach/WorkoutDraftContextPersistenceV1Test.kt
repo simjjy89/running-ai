@@ -1,6 +1,10 @@
 package com.runningai.coach
 
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.runningai.athlete.AthleteService
+import com.runningai.injury.InjuryReportRepository
+import com.runningai.injury.InjuryTestFixtures
+import java.time.Clock
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
@@ -42,12 +46,21 @@ class WorkoutDraftContextPersistenceV1Test {
     @Autowired private lateinit var objectMapper: ObjectMapper
     @Autowired private lateinit var repository: WorkoutDraftRepository
     @Autowired private lateinit var coach: FakeAiCoach
+    @Autowired private lateinit var injuryReportRepository: InjuryReportRepository
+    @Autowired private lateinit var athleteService: AthleteService
+    @Autowired private lateinit var clock: Clock
 
     @BeforeEach
-    fun reset() = coach.reset()
+    fun reset() {
+        coach.reset()
+        InjuryTestFixtures.seedResolved(injuryReportRepository, athleteService, clock)
+    }
 
     @AfterEach
-    fun cleanUp() = repository.deleteAll()
+    fun cleanUp() {
+        repository.deleteAll()
+        injuryReportRepository.deleteAll()
+    }
 
     @Test
     fun `a V1 draft persists its own context_version and a valid snapshot plus hash`() {

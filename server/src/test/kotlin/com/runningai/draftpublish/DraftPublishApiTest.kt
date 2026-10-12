@@ -1,6 +1,9 @@
 package com.runningai.draftpublish
 
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.runningai.athlete.AthleteService
+import com.runningai.injury.InjuryReportRepository
+import com.runningai.injury.InjuryTestFixtures
 import com.runningai.coach.CoachTestFixtures.draft
 import com.runningai.coach.CoachTestFixtures.restDraft
 import com.runningai.coach.CoachTestFixtures.segment
@@ -25,6 +28,7 @@ import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.hamcrest.Matchers.nullValue
 import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.mockito.ArgumentMatchers.any
 import org.mockito.Mockito.doAnswer
@@ -47,6 +51,7 @@ import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
+import java.time.Clock
 import java.time.LocalDate
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
@@ -81,6 +86,9 @@ class DraftPublishApiTest {
     @Autowired private lateinit var publications: WorkoutDraftPublicationRepository
     @Autowired private lateinit var service: ApprovedWorkoutDraftPublishService
     @Autowired private lateinit var jdbc: JdbcTemplate
+    @Autowired private lateinit var injuryReportRepository: InjuryReportRepository
+    @Autowired private lateinit var athleteService: AthleteService
+    @Autowired private lateinit var clock: Clock
 
     @MockitoBean private lateinit var publisher: IntervalsWorkoutPublisher
     @MockitoBean private lateinit var intervalsClient: IntervalsWorkoutClient
@@ -89,6 +97,13 @@ class DraftPublishApiTest {
     @MockitoBean private lateinit var legacyMapper: StructuredWorkoutMapper
     @MockitoSpyBean private lateinit var renderer: IntervalsWorkoutRenderer
 
+    @BeforeEach
+    fun seedSafeInjuryState() {
+        // Phase 7B-2: approval/preview/publish of a non-REST draft is blocked without a fresh
+        // RESOLVED report; this suite tests the publish pipeline, not injury safety.
+        InjuryTestFixtures.seedResolved(injuryReportRepository, athleteService, clock)
+    }
+
     @AfterEach
     fun cleanUp() {
         // The legacy deterministic path and the raw client are never used by the draft path.
@@ -96,6 +111,7 @@ class DraftPublishApiTest {
         publications.deleteAll()
         approvals.deleteAll()
         drafts.deleteAll()
+        injuryReportRepository.deleteAll()
     }
 
     // ---- helpers --------------------------------------------------------------------------------
@@ -544,5 +560,37 @@ class DraftPublishApiTest {
         assertThatThrownBy { jdbc.update(insert, restId, restApproval, "PUBLISHED", null, null, null) }
             .isInstanceOf(org.springframework.dao.DataIntegrityViolationException::class.java)
         verify(publisher, never()).publish(any(), any())
+    }
+
+    // ---- Phase 7B-2: injury/pain safety re-checked at preview and publish time -----------------
+
+    @Test
+    fun `preview of a non-REST draft is blocked when the injury safety state worsened after approval`() {
+        val id = approved(draft(workoutType = "EASY"))
+        com.runningai.injury.InjuryTestFixtures.seedActive(injuryReportRepository, athleteService, clock, painOnWalking = true)
+
+        assertThatThrownBy { service.preview(id) }
+            .isInstanceOf(com.runningai.injury.WorkoutSafetyViolationException::class.java)
+        verify(publisher, never()).publish(any(), any())
+    }
+
+    @Test
+    fun `publish of a non-REST draft is blocked when the injury safety state worsened after approval`() {
+        val id = approved(draft(workoutType = "EASY"))
+        com.runningai.injury.InjuryTestFixtures.seedActive(injuryReportRepository, athleteService, clock, painOnWalking = true)
+
+        mockMvc.perform(post("/api/v1/workout-drafts/$id/publish"))
+            .andExpect(status().isUnprocessableEntity)
+            .andExpect(jsonPath("$.code").value("WORKOUT_SAFETY_INJURY_ACTIVE"))
+        verify(publisher, never()).publish(any(), any())
+        assertThat(publications.count()).isZero()
+    }
+
+    @Test
+    fun `a REST draft can still be published even while the injury safety state is ACTIVE`() {
+        val id = approved(restDraft())
+        com.runningai.injury.InjuryTestFixtures.seedActive(injuryReportRepository, athleteService, clock, painOnWalking = true)
+
+        mockMvc.perform(post("/api/v1/workout-drafts/$id/publish")).andExpect(status().isOk)
     }
 }

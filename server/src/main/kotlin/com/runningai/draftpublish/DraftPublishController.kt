@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonInclude
 import com.runningai.coach.WorkoutDraftNotFoundException
 import com.runningai.coach.WorkoutDraftStatus
 import com.runningai.common.exception.ErrorResponse
+import com.runningai.injury.WorkoutSafetyViolationException
 import com.runningai.integration.intervals.IntervalsException
 import com.runningai.integration.intervals.IntervalsPublishOperation
 import org.springframework.core.Ordered
@@ -155,6 +156,11 @@ class DraftPublishExceptionHandler {
     @ExceptionHandler(DraftPublishAlreadyRunningException::class)
     fun alreadyRunning(e: DraftPublishAlreadyRunningException) =
         body(HttpStatus.CONFLICT, "DRAFT_PUBLISH_ALREADY_RUNNING", e.message)
+
+    /** Phase 7B-2: the injury/pain safety policy no longer allows this non-REST draft to be sent. */
+    @ExceptionHandler(WorkoutSafetyViolationException::class)
+    fun safetyBlocked(e: WorkoutSafetyViolationException): ResponseEntity<ErrorResponse> =
+        body(HttpStatus.UNPROCESSABLE_ENTITY, "WORKOUT_SAFETY_${e.decision.reasonCode.name}", e.message)
 
     @ExceptionHandler(UnpublishableDraftException::class)
     fun unpublishable(e: UnpublishableDraftException): ResponseEntity<ErrorResponse> =

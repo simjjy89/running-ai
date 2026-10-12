@@ -1,6 +1,7 @@
 package com.runningai.integration.intervals;
 
 import com.runningai.common.exception.ErrorResponse;
+import com.runningai.injury.WorkoutSafetyViolationException;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.http.HttpStatus;
@@ -24,6 +25,12 @@ public class WorkoutPublishExceptionHandler {
     @ExceptionHandler(WorkoutPublishAlreadyRunningException.class)
     public ResponseEntity<ErrorResponse> alreadyRunning(WorkoutPublishAlreadyRunningException e) {
         return body(HttpStatus.CONFLICT, "WORKOUT_PUBLISH_ALREADY_RUNNING", e.getMessage());
+    }
+
+    /** Phase 7B-2: the injury/pain safety policy forbids a non-REST publish right now. */
+    @ExceptionHandler(WorkoutSafetyViolationException.class)
+    public ResponseEntity<ErrorResponse> safetyBlocked(WorkoutSafetyViolationException e) {
+        return body(HttpStatus.UNPROCESSABLE_ENTITY, "WORKOUT_SAFETY_" + e.getDecision().getReasonCode().name(), e.getMessage());
     }
 
     @ExceptionHandler(IntervalsException.class)

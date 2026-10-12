@@ -1,5 +1,7 @@
 package com.runningai.integration.intervals;
 
+import com.runningai.injury.WorkoutSafetyGateService;
+import com.runningai.training.CandidateTrainingType;
 import com.runningai.training.StructuredWorkout;
 import com.runningai.training.StructuredWorkoutMapper;
 import com.runningai.training.TargetedWorkoutPrescription;
@@ -34,18 +36,21 @@ public class WorkoutPublishApplicationService {
     private final StructuredWorkoutMapper mapper;
     private final IntervalsWorkoutRenderer renderer;
     private final IntervalsWorkoutPublisher publisher;
+    private final WorkoutSafetyGateService safetyGate;
     private final Set<LocalDate> inFlight = ConcurrentHashMap.newKeySet();
 
     public WorkoutPublishApplicationService(WorkoutPublishProperties properties,
                                             WorkoutIntensityTargetService targetService,
                                             StructuredWorkoutMapper mapper,
                                             IntervalsWorkoutRenderer renderer,
-                                            IntervalsWorkoutPublisher publisher) {
+                                            IntervalsWorkoutPublisher publisher,
+                                            WorkoutSafetyGateService safetyGate) {
         this.properties = properties;
         this.targetService = targetService;
         this.mapper = mapper;
         this.renderer = renderer;
         this.publisher = publisher;
+        this.safetyGate = safetyGate;
     }
 
     public WorkoutPublishResponse publish(LocalDate scheduledDate) {
@@ -61,6 +66,11 @@ public class WorkoutPublishApplicationService {
         }
         try {
             TargetedWorkoutPrescription prescription = targetService.targetedPrescribe(scheduledDate);
+            // Phase 7B-2: this deterministic pipeline has no concept of injury/pain at all, so the
+            // same server-enforced policy the AI-coach draft path uses is applied here independently -
+            // this path must not become a way to bypass it just because it never asked about pain.
+            boolean isRest = prescription.intent() == CandidateTrainingType.REST;
+            safetyGate.requireAllowed(safetyGate.currentDecision(), isRest, "deterministic workout publish for " + scheduledDate);
             StructuredWorkout workout = mapper.map(prescription);
             RenderedIntervalsWorkout rendered = renderer.render(workout);
             IntervalsPublishResult result = publisher.publish(scheduledDate, rendered);

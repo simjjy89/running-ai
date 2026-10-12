@@ -1,5 +1,6 @@
 package com.runningai.coach
 
+import com.runningai.injury.WorkoutSafetyGateService
 import jakarta.persistence.Column
 import jakarta.persistence.Entity
 import jakarta.persistence.GeneratedValue
@@ -85,6 +86,7 @@ class WorkoutDraftApprovalService(
     private val drafts: WorkoutDraftRepository,
     private val approvals: WorkoutDraftApprovalRepository,
     private val store: WorkoutDraftStore,
+    private val safetyGate: WorkoutSafetyGateService,
 ) {
 
     private val log = LoggerFactory.getLogger(WorkoutDraftApprovalService::class.java)
@@ -97,6 +99,16 @@ class WorkoutDraftApprovalService(
             WorkoutDraftStatus.SUPERSEDED -> throw superseded(draft)
             WorkoutDraftStatus.DRAFT -> Unit
         }
+
+        // Phase 7B-2: the safety state may have worsened since this draft was generated (for example
+        // a new ACTIVE injury report arrived in between) - re-checked here, independently of whatever
+        // the AI coach decided at generation time, before this draft becomes the athlete's approved
+        // choice for the day.
+        safetyGate.requireAllowed(
+            safetyGate.currentDecision(),
+            store.toDomain(draft).isRest,
+            "approval of workout draft $id",
+        )
 
         approvals.findByAthleteIdAndWorkoutDate(draft.athleteId, draft.workoutDate)?.let {
             throw WorkoutDateAlreadyApprovedException(id, draft.workoutDate, it.draftId)

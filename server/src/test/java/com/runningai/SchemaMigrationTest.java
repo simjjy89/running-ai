@@ -77,15 +77,15 @@ class SchemaMigrationTest {
         assertThat(applied).extracting(MigrationInfo::getVersion)
                 .extracting(Object::toString)
                 .containsExactly("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16",
-                        "17", "18", "19", "20");
+                        "17", "18", "19", "20", "21");
         assertThat(applied).extracting(MigrationInfo::getState)
                 .containsOnly(MigrationState.SUCCESS);
         assertThat(flyway.info().pending()).isEmpty();
 
         Integer historyRows = jdbcTemplate.queryForObject(
-                "select count(*) from flyway_schema_history where success = true and version in ('1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '20')",
+                "select count(*) from flyway_schema_history where success = true and version in ('1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21')",
                 Integer.class);
-        assertThat(historyRows).isEqualTo(20);
+        assertThat(historyRows).isEqualTo(21);
     }
 
     @Test
@@ -101,6 +101,7 @@ class SchemaMigrationTest {
                         + "'activity_source_link', 'intervals_raw_payload', 'activity_intervals_metrics', "
                         + "'intervals_fitness_daily', "
                         + "'historical_backfill_run', 'historical_backfill_activity', "
+                        + "'injury_report', "
                         + "'flyway_schema_history')",
                 String.class);
 
@@ -113,6 +114,7 @@ class SchemaMigrationTest {
                 "activity_source_link", "intervals_raw_payload", "activity_intervals_metrics",
                 "intervals_fitness_daily",
                 "historical_backfill_run", "historical_backfill_activity",
+                "injury_report",
                 "flyway_schema_history");
     }
 

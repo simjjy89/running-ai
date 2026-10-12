@@ -1,13 +1,17 @@
 package com.runningai.coach
 
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.runningai.athlete.AthleteService
 import com.runningai.coach.CoachTestFixtures.draft
+import com.runningai.injury.InjuryReportRepository
+import com.runningai.injury.InjuryTestFixtures
 import com.runningai.integration.intervals.IntervalsWorkoutClient
 import com.runningai.integration.intervals.IntervalsWorkoutPublisher
 import com.runningai.integration.intervals.WorkoutPublishApplicationService
 import com.runningai.recovery.RecoveryDailyValues
 import com.runningai.recovery.RecoveryRepository
 import com.runningai.recovery.RecoverySnapshotService
+import java.time.Clock
 import java.time.LocalDate
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.AfterEach
@@ -63,6 +67,9 @@ class WorkoutDraftApiTest {
     @Autowired private lateinit var validator: WorkoutDraftValidator
     @Autowired private lateinit var recoverySnapshots: RecoverySnapshotService
     @Autowired private lateinit var recoveryRepository: RecoveryRepository
+    @Autowired private lateinit var injuryReportRepository: InjuryReportRepository
+    @Autowired private lateinit var athleteService: AthleteService
+    @Autowired private lateinit var clock: Clock
 
     @MockitoBean private lateinit var publishService: WorkoutPublishApplicationService
     @MockitoBean private lateinit var publisher: IntervalsWorkoutPublisher
@@ -71,6 +78,9 @@ class WorkoutDraftApiTest {
     @BeforeEach
     fun reset() {
         coach.reset()
+        // Phase 7B-2: non-REST generation is blocked without an explicit, fresh RESOLVED injury
+        // report on file; this suite is not testing injury safety, so it starts from "known clear".
+        InjuryTestFixtures.seedResolved(injuryReportRepository, athleteService, clock)
     }
 
     @AfterEach
@@ -78,6 +88,7 @@ class WorkoutDraftApiTest {
         approvalRepository.deleteAll()
         repository.deleteAll()
         recoveryRepository.deleteAll()
+        injuryReportRepository.deleteAll()
         verifyNoInteractions(publishService, publisher, intervalsClient)
     }
 

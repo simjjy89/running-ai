@@ -1,16 +1,21 @@
 package com.runningai.coach
 
+import com.runningai.athlete.AthleteService
 import com.runningai.coach.CoachTestFixtures.draft
 import com.runningai.coach.CoachTestFixtures.restDraft
+import com.runningai.injury.InjuryReportRepository
+import com.runningai.injury.InjuryTestFixtures
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.test.context.ActiveProfiles
+import java.time.Clock
 import java.time.LocalDate
 import java.util.UUID
 
@@ -27,12 +32,23 @@ class WorkoutDraftApprovalTest {
     @Autowired private lateinit var approvals: WorkoutDraftApprovalRepository
     @Autowired private lateinit var repository: WorkoutDraftRepository
     @Autowired private lateinit var jdbc: JdbcTemplate
+    @Autowired private lateinit var injuryReportRepository: InjuryReportRepository
+    @Autowired private lateinit var athleteService: AthleteService
+    @Autowired private lateinit var clock: Clock
+
+    @BeforeEach
+    fun seedSafeInjuryState() {
+        // Phase 7B-2: approval of a non-REST draft is blocked without a fresh RESOLVED report; this
+        // suite tests approval lifecycle, not injury safety, so it starts from "known clear".
+        InjuryTestFixtures.seedResolved(injuryReportRepository, athleteService, clock)
+    }
 
     @AfterEach
     fun cleanUp() {
         jdbc.update("delete from workout_draft_publication")
         approvals.deleteAll()
         repository.deleteAll()
+        injuryReportRepository.deleteAll()
     }
 
     private fun saved(d: WorkoutDraft = draft()): WorkoutDraft = store.save(d, UUID.randomUUID().toString(), supersede = null)
@@ -180,5 +196,30 @@ class WorkoutDraftApprovalTest {
 
         assertThatThrownBy { jdbc.update(insert, a.id, athleteId, a.date.plusDays(1)) }
             .isInstanceOf(DataIntegrityViolationException::class.java)
+    }
+
+    // ---- Phase 7B-2: injury/pain safety re-checked at approval time ---------------------------
+
+    @Test
+    fun `approval is blocked when the injury safety state worsened after the draft was generated`() {
+        val d = saved(draft(workoutType = "EASY"))
+        // The RESOLVED report from seedSafeInjuryState() made this draft generatable; a new ACTIVE
+        // report now arrives (e.g. the athlete reports pain) before the athlete gets to approve it.
+        InjuryTestFixtures.seedActive(injuryReportRepository, athleteService, clock, painOnWalking = true)
+
+        assertThatThrownBy { approvalService.approve(d.id!!) }
+            .isInstanceOf(com.runningai.injury.WorkoutSafetyViolationException::class.java)
+
+        assertThat(store.get(d.id!!).status).isEqualTo(WorkoutDraftStatus.DRAFT)
+    }
+
+    @Test
+    fun `a REST draft can still be approved even while the injury safety state is ACTIVE`() {
+        val d = saved(restDraft())
+        InjuryTestFixtures.seedActive(injuryReportRepository, athleteService, clock, painOnWalking = true)
+
+        val approved = approvalService.approve(d.id!!)
+
+        assertThat(approved.draft.status).isEqualTo(WorkoutDraftStatus.APPROVED)
     }
 }

@@ -1,5 +1,6 @@
 package com.runningai.integration.intervals;
 
+import com.runningai.injury.WorkoutSafetyGateService;
 import com.runningai.integration.intervals.IntervalsException.Reason;
 import com.runningai.training.CandidateTrainingType;
 import com.runningai.training.HeartRateTarget;
@@ -56,6 +57,11 @@ class WorkoutPublishApiTest {
 
     @MockitoBean
     private WorkoutIntensityTargetService targetService;
+
+    // Phase 7B-2: this suite exercises the HTTP contract of the publish trigger, not injury safety;
+    // a mocked gate's requireAllowed(...) no-ops by default, matching the pre-7B-2 behaviour.
+    @MockitoBean
+    private WorkoutSafetyGateService safetyGate;
 
     @BeforeEach
     void setUp() {

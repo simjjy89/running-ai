@@ -1,5 +1,6 @@
 package com.runningai.integration.intervals;
 
+import com.runningai.injury.WorkoutSafetyGateService;
 import com.runningai.training.CandidateTrainingType;
 import com.runningai.training.HeartRateTarget;
 import com.runningai.training.IntensityClass;
@@ -26,6 +27,8 @@ import java.util.concurrent.TimeUnit;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -47,6 +50,9 @@ class WorkoutPublishApplicationServiceTest {
     private final StructuredWorkoutMapper mapper = new StructuredWorkoutMapper();
     private final IntervalsWorkoutRenderer renderer = new IntervalsWorkoutRenderer();
     private ExecutorService executor;
+    // Mockito's default stub for a void method (requireAllowed) is a no-op, i.e. "always allowed" -
+    // exactly this test class's pre-7B-2 behaviour, since injury safety is not what it exercises.
+    private final WorkoutSafetyGateService safetyGate = mock(WorkoutSafetyGateService.class);
 
     @BeforeEach
     void setUp() {
@@ -64,7 +70,7 @@ class WorkoutPublishApplicationServiceTest {
         IntervalsProperties intervals = new IntervalsProperties("https://intervals.test", "test-athlete", "test-api-key",
                 Duration.ofSeconds(3), Duration.ofSeconds(15));
         return new WorkoutPublishApplicationService(new WorkoutPublishProperties(enabled, WorkoutPublishProperties.Scheduler.defaults()), targetService, mapper, renderer,
-                new IntervalsWorkoutPublisher(client, intervals));
+                new IntervalsWorkoutPublisher(client, intervals), safetyGate);
     }
 
     private static TargetedWorkoutPrescription prescription(LocalDate date, int mainMinutes) {
@@ -159,7 +165,7 @@ class WorkoutPublishApplicationServiceTest {
                 .thenReturn(new IntervalsPublishResult(IntervalsPublishOperation.CREATED, "remote", true, DATE));
 
         WorkoutPublishResponse response = new WorkoutPublishApplicationService(new WorkoutPublishProperties(true, WorkoutPublishProperties.Scheduler.defaults()),
-                targetService, mockMapper, mockRenderer, mockPublisher).publish(DATE);
+                targetService, mockMapper, mockRenderer, mockPublisher, safetyGate).publish(DATE);
 
         assertThat(response.operation()).isEqualTo(IntervalsPublishOperation.CREATED);
         assertThat(response.stepCount()).isEqualTo(3);
@@ -271,5 +277,34 @@ class WorkoutPublishApplicationServiceTest {
         assertThatThrownBy(() -> disabled.publish(DATE)).isInstanceOf(WorkoutPublishDisabledException.class);
         assertThatThrownBy(() -> disabled.publish(DATE)).isInstanceOf(WorkoutPublishDisabledException.class);
         verify(targetService, never()).targetedPrescribe(any());
+    }
+
+    // ---- Phase 7B-2: the same injury/pain safety policy applies to this deterministic path --------------------------
+
+    private static com.runningai.injury.InjurySafetyDecision blockedDecision() {
+        return new com.runningai.injury.InjurySafetyDecision(
+                false, com.runningai.injury.InjurySafetyReasonCode.INJURY_ACTIVE, "blocked for test", null, java.time.Instant.now());
+    }
+
+    @Test
+    void aNonRestPrescriptionIsRefusedWhenTheSafetyGateBlocksNonRestTraining() {
+        prescribe(DATE, 3);
+        doThrow(new com.runningai.injury.WorkoutSafetyViolationException(blockedDecision(), "test"))
+                .when(safetyGate).requireAllowed(any(), eq(false), any());
+
+        assertThatThrownBy(() -> service(true).publish(DATE))
+                .isInstanceOf(com.runningai.injury.WorkoutSafetyViolationException.class);
+
+        assertThat(client.events).isEmpty();
+    }
+
+    @Test
+    void aNonRestPrescriptionIsAllowedWhenTheSafetyGateAllowsIt() {
+        prescribe(DATE, 3);
+        // The default mock (no stubbing) already no-ops, but this pins the exact call shape: the
+        // computed intent (EASY, i.e. isRest=false) is what reaches the gate, not a hard-coded value.
+        assertThat(service(true).publish(DATE).operation()).isEqualTo(IntervalsPublishOperation.CREATED);
+
+        verify(safetyGate).requireAllowed(any(), eq(false), any());
     }
 }

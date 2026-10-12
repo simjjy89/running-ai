@@ -1,5 +1,6 @@
 package com.runningai.integration.mcp;
 
+import com.runningai.injury.WorkoutSafetyGateService;
 import com.runningai.integration.intervals.IntervalsPublishOperation;
 import com.runningai.integration.intervals.IntervalsPublishResult;
 import com.runningai.integration.intervals.IntervalsWorkoutPublisher;
@@ -56,6 +57,10 @@ class McpSingleFlightTest {
 
     @MockitoBean
     private WorkoutIntensityTargetService targetService;
+
+    // Phase 7B-2: this test exercises the single-flight guard, not injury safety.
+    @MockitoBean
+    private WorkoutSafetyGateService safetyGate;
 
     @Test
     @SuppressWarnings("unchecked")

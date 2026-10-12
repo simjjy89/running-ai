@@ -4,6 +4,7 @@ import com.runningai.coach.ApprovedWorkoutDraft
 import com.runningai.coach.WorkoutDraftApprovalService
 import com.runningai.coach.WorkoutDraftStatus
 import com.runningai.coach.WorkoutDraftStore
+import com.runningai.injury.WorkoutSafetyGateService
 import com.runningai.integration.intervals.IntervalsWorkoutPublisher
 import com.runningai.integration.intervals.IntervalsWorkoutRenderer
 import com.runningai.integration.intervals.RenderedIntervalsWorkout
@@ -86,6 +87,7 @@ class ApprovedWorkoutDraftPublishService(
     private val mapper: WorkoutDraftStructuredWorkoutMapper,
     private val renderer: IntervalsWorkoutRenderer,
     private val publisher: IntervalsWorkoutPublisher,
+    private val safetyGate: WorkoutSafetyGateService,
 ) {
 
     private val log = LoggerFactory.getLogger(ApprovedWorkoutDraftPublishService::class.java)
@@ -98,6 +100,9 @@ class ApprovedWorkoutDraftPublishService(
         if (approved.draft.isRest) {
             return DraftPublishPreview(approved, null, null, emptyList(), publication)
         }
+        // Phase 7B-2: the safety state may have worsened since approval; a preview of a workout that
+        // may no longer be published must say so rather than quietly showing what would be sent.
+        safetyGate.requireAllowed(safetyGate.currentDecision(), isRest = false, context = "publish preview of workout draft $id")
         return when (val prepared = prepare(approved)) {
             is Prepared.Ready -> DraftPublishPreview(approved, prepared.workout, prepared.rendered, emptyList(), publication)
             is Prepared.Refused -> DraftPublishPreview(approved, null, null, prepared.reasons, publication)
@@ -125,6 +130,10 @@ class ApprovedWorkoutDraftPublishService(
                     id, approved.draft.date)
                 return DraftPublishOutcome(approved, skipped, structuredStepCount = 0, alreadyPublished = false)
             }
+
+            // Phase 7B-2: re-checked immediately before anything is sent to Intervals, independently
+            // of the safety state at generation or approval time.
+            safetyGate.requireAllowed(safetyGate.currentDecision(), isRest = false, context = "publish of workout draft $id")
 
             val ready = when (val prepared = prepare(approved)) {
                 is Prepared.Ready -> prepared
