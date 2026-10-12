@@ -15,6 +15,7 @@ tokens*
 server/build/
 server/out/
 server/.gradle/
+server/.kotlin/
 build/
 out/
 target/
