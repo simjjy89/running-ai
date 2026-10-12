@@ -176,6 +176,22 @@ class ClaudeCoachPromptBuilder {
               conclusion from an activity gap — say the uncertainty out loud instead of asserting a
               rest streak you cannot actually back up.
 
+            Reading 'lactateThresholdProvenance' and 'runningDynamics' (TRAINING CONTEXT V2; Phase 7B-3):
+            - 'lactateThresholdProvenance.sourceTracked' is currently always false: this build cannot
+              tell you whether the athlete's LTHR/threshold pace came from a manual entry or a Garmin
+              auto-sync, or how it compares with an older value. When 'warning' is present, read it
+              and temper how much weight you put on that threshold — do not silently treat it as
+              certain. A few bpm of LTHR uncertainty can swing a heart-rate-threshold-based read of a
+              session dramatically; say so if your recovery/load read leans heavily on it.
+            - 'runningDynamics' (inside 'runningAiAnalysis') is summary-only evidence per activity:
+              stride length and vertical oscillation in centimeters, vertical ratio as a dimensionless
+              percent, ground contact time in milliseconds, running power in watts, each with its own
+              '...ChangePercent' between the first and second half of that activity's laps (lap-order
+              halves, not the same elapsed-time halves as the session-level speed/HR split above).
+              'null' means the device or activity type did not report that metric for that session,
+              never zero. These numbers describe what the body did, not why — do not diagnose an
+              injury cause or call a stride pattern good or bad from them.
+
             How to handle missing and sensitive information:
             - A null value means the data genuinely does not exist. Treat it as unknown. Never
               estimate, assume or invent a recovery metric, a threshold, or a past session that is

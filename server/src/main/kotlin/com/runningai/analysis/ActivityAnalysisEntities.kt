@@ -82,6 +82,31 @@ class ActivityAnalysisEntity(
     @Column(name = "lap_hr_progression") var lapHrProgression: Double? = null
     @Column(name = "lap_cadence_mean") var lapCadenceMean: Double? = null
 
+    @Column(name = "laps_with_dynamics_count") var lapsWithDynamicsCount: Int? = null
+    @Column(name = "avg_stride_length_cm") var avgStrideLengthCm: Double? = null
+    @Column(name = "first_half_avg_stride_length_cm") var firstHalfAvgStrideLengthCm: Double? = null
+    @Column(name = "second_half_avg_stride_length_cm") var secondHalfAvgStrideLengthCm: Double? = null
+    @Column(name = "stride_length_change_percent") var strideLengthChangePercent: Double? = null
+    @Column(name = "same_pace_stride_length_change_cm") var samePaceStrideLengthChangeCm: Double? = null
+    @Column(name = "avg_vertical_oscillation_cm") var avgVerticalOscillationCm: Double? = null
+    @Column(name = "first_half_avg_vertical_oscillation_cm") var firstHalfAvgVerticalOscillationCm: Double? = null
+    @Column(name = "second_half_avg_vertical_oscillation_cm") var secondHalfAvgVerticalOscillationCm: Double? = null
+    @Column(name = "vertical_oscillation_change_percent") var verticalOscillationChangePercent: Double? = null
+    @Column(name = "avg_vertical_ratio_percent") var avgVerticalRatioPercent: Double? = null
+    @Column(name = "first_half_avg_vertical_ratio_percent") var firstHalfAvgVerticalRatioPercent: Double? = null
+    @Column(name = "second_half_avg_vertical_ratio_percent") var secondHalfAvgVerticalRatioPercent: Double? = null
+    @Column(name = "vertical_ratio_change_percent") var verticalRatioChangePercent: Double? = null
+    @Column(name = "avg_ground_contact_time_ms") var avgGroundContactTimeMs: Double? = null
+    @Column(name = "first_half_avg_ground_contact_time_ms") var firstHalfAvgGroundContactTimeMs: Double? = null
+    @Column(name = "second_half_avg_ground_contact_time_ms") var secondHalfAvgGroundContactTimeMs: Double? = null
+    @Column(name = "ground_contact_time_change_percent") var groundContactTimeChangePercent: Double? = null
+    @Column(name = "avg_running_power_watts") var avgRunningPowerWatts: Double? = null
+    @Column(name = "max_running_power_watts") var maxRunningPowerWatts: Double? = null
+    @Column(name = "first_half_avg_running_power_watts") var firstHalfAvgRunningPowerWatts: Double? = null
+    @Column(name = "second_half_avg_running_power_watts") var secondHalfAvgRunningPowerWatts: Double? = null
+    @Column(name = "running_power_change_percent") var runningPowerChangePercent: Double? = null
+    @Column(name = "same_pace_running_power_change_watts") var samePaceRunningPowerChangeWatts: Double? = null
+
     /** Replaces every derived value, so nothing from an earlier analysis survives a re-analysis. */
     fun apply(a: ActivityAnalysis) {
         analysisVersion = a.analysisVersion
@@ -127,6 +152,31 @@ class ActivityAnalysisEntity(
         lapHrMean = a.laps.hrMean
         lapHrProgression = a.laps.hrProgression
         lapCadenceMean = a.laps.cadenceMean
+        val dyn = a.runningDynamics
+        lapsWithDynamicsCount = dyn.lapsWithDynamicsCount
+        avgStrideLengthCm = dyn.avgStrideLengthCm
+        firstHalfAvgStrideLengthCm = dyn.firstHalfAvgStrideLengthCm
+        secondHalfAvgStrideLengthCm = dyn.secondHalfAvgStrideLengthCm
+        strideLengthChangePercent = dyn.strideLengthChangePercent
+        samePaceStrideLengthChangeCm = dyn.samePaceStrideLengthChangeCm
+        avgVerticalOscillationCm = dyn.avgVerticalOscillationCm
+        firstHalfAvgVerticalOscillationCm = dyn.firstHalfAvgVerticalOscillationCm
+        secondHalfAvgVerticalOscillationCm = dyn.secondHalfAvgVerticalOscillationCm
+        verticalOscillationChangePercent = dyn.verticalOscillationChangePercent
+        avgVerticalRatioPercent = dyn.avgVerticalRatioPercent
+        firstHalfAvgVerticalRatioPercent = dyn.firstHalfAvgVerticalRatioPercent
+        secondHalfAvgVerticalRatioPercent = dyn.secondHalfAvgVerticalRatioPercent
+        verticalRatioChangePercent = dyn.verticalRatioChangePercent
+        avgGroundContactTimeMs = dyn.avgGroundContactTimeMs
+        firstHalfAvgGroundContactTimeMs = dyn.firstHalfAvgGroundContactTimeMs
+        secondHalfAvgGroundContactTimeMs = dyn.secondHalfAvgGroundContactTimeMs
+        groundContactTimeChangePercent = dyn.groundContactTimeChangePercent
+        avgRunningPowerWatts = dyn.avgRunningPowerWatts
+        maxRunningPowerWatts = dyn.maxRunningPowerWatts
+        firstHalfAvgRunningPowerWatts = dyn.firstHalfAvgRunningPowerWatts
+        secondHalfAvgRunningPowerWatts = dyn.secondHalfAvgRunningPowerWatts
+        runningPowerChangePercent = dyn.runningPowerChangePercent
+        samePaceRunningPowerChangeWatts = dyn.samePaceRunningPowerChangeWatts
     }
 
     fun toData(groups: List<IntervalGroup>) = ActivityAnalysis(
@@ -160,6 +210,32 @@ class ActivityAnalysisEntity(
         threshold = ThresholdExposure(lthr90Seconds, lthr95Seconds, lthr100Seconds),
         laps = LapMetrics(
             lapCount ?: 0, lapSpeedMean, lapSpeedStdDev, lapSpeedCvPercent, lapHrMean, lapHrProgression, lapCadenceMean,
+        ),
+        runningDynamics = RunningDynamicsMetrics(
+            lapsWithDynamicsCount = lapsWithDynamicsCount ?: 0,
+            avgStrideLengthCm = avgStrideLengthCm,
+            firstHalfAvgStrideLengthCm = firstHalfAvgStrideLengthCm,
+            secondHalfAvgStrideLengthCm = secondHalfAvgStrideLengthCm,
+            strideLengthChangePercent = strideLengthChangePercent,
+            samePaceStrideLengthChangeCm = samePaceStrideLengthChangeCm,
+            avgVerticalOscillationCm = avgVerticalOscillationCm,
+            firstHalfAvgVerticalOscillationCm = firstHalfAvgVerticalOscillationCm,
+            secondHalfAvgVerticalOscillationCm = secondHalfAvgVerticalOscillationCm,
+            verticalOscillationChangePercent = verticalOscillationChangePercent,
+            avgVerticalRatioPercent = avgVerticalRatioPercent,
+            firstHalfAvgVerticalRatioPercent = firstHalfAvgVerticalRatioPercent,
+            secondHalfAvgVerticalRatioPercent = secondHalfAvgVerticalRatioPercent,
+            verticalRatioChangePercent = verticalRatioChangePercent,
+            avgGroundContactTimeMs = avgGroundContactTimeMs,
+            firstHalfAvgGroundContactTimeMs = firstHalfAvgGroundContactTimeMs,
+            secondHalfAvgGroundContactTimeMs = secondHalfAvgGroundContactTimeMs,
+            groundContactTimeChangePercent = groundContactTimeChangePercent,
+            avgRunningPowerWatts = avgRunningPowerWatts,
+            maxRunningPowerWatts = maxRunningPowerWatts,
+            firstHalfAvgRunningPowerWatts = firstHalfAvgRunningPowerWatts,
+            secondHalfAvgRunningPowerWatts = secondHalfAvgRunningPowerWatts,
+            runningPowerChangePercent = runningPowerChangePercent,
+            samePaceRunningPowerChangeWatts = samePaceRunningPowerChangeWatts,
         ),
         intervalGroups = groups,
     )

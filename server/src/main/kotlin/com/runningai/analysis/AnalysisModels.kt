@@ -155,5 +155,6 @@ data class ActivityAnalysis(
     val zones: ZoneExposure,
     val threshold: ThresholdExposure,
     val laps: LapMetrics,
+    val runningDynamics: RunningDynamicsMetrics = RunningDynamicsMetrics(),
     val intervalGroups: List<IntervalGroup>,
 )

@@ -467,6 +467,34 @@ class TrainingContextV2BuilderTest {
     }
 
     @Test
+    fun `lactate threshold provenance warns that source is untracked whenever a threshold is on file`() {
+        val ctxNoProfile = builder.build(d, SessionConstraints())
+        assertThat(ctxNoProfile.lactateThresholdProvenance.lactateThresholdHeartRateBpm).isNull()
+        assertThat(ctxNoProfile.lactateThresholdProvenance.sourceTracked).isFalse()
+        assertThat(ctxNoProfile.lactateThresholdProvenance.warning).isNull() // nothing to warn about yet
+
+        profileService.replaceDefaultProfile(AthleteIntensityProfileRequest(176, 290))
+        val ctx = builder.build(d, SessionConstraints())
+        assertThat(ctx.lactateThresholdProvenance.lactateThresholdHeartRateBpm).isEqualTo(176)
+        assertThat(ctx.lactateThresholdProvenance.sourceTracked).isFalse()
+        assertThat(ctx.lactateThresholdProvenance.profileLastUpdatedAt).isNotNull()
+        // The fixture's session date is in the past relative to the just-written updatedAt, so the
+        // age is negative here; what matters is that it is reported, from the real stored timestamp.
+        assertThat(ctx.lactateThresholdProvenance.profileAgeDays).isNotNull()
+        assertThat(ctx.lactateThresholdProvenance.warning).contains("not tracked")
+    }
+
+    @Test
+    fun `running dynamics evidence is a summary only, null for an activity with none stored`() {
+        val a = run("ext-no-dynamics", d.atTime(8, 0).atZone(zone).toInstant())
+        analysis(a.id)
+
+        val ctx = builder.build(d, SessionConstraints())
+
+        assertThat(ctx.recentActivities.single().runningAiAnalysis!!.runningDynamics).isNull()
+    }
+
+    @Test
     fun `V2 never includes a candidateTrainingTypes field anywhere in its type`() {
         val allFields = listOf(
             TrainingContextV2::class.java, DataCoverageV2::class.java, TrainingRhythmV2::class.java,

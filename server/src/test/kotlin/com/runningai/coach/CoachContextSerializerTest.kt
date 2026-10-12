@@ -24,13 +24,14 @@ class CoachContextSerializerTest {
             RecentActivityEvidence(
                 activity = RecentActivityFacts(date, com.runningai.activity.ActivityType.RUN, 1800, 6000.0, 150, 170, 170.0, null),
                 runningAiAnalysis = RunningAiAnalysisEvidence(3.0, -2.0, 4.2, -1.0, 300.0, 50.0, 10.0, 2.5,
-                    mapOf(1 to 10.0, 2 to 60.0, 3 to 30.0), 1800.0, emptyList()),
+                    mapOf(1 to 10.0, 2 to 60.0, 3 to 30.0), 1800.0, emptyList(), runningDynamics = null),
                 intervals = IntervalsActivityEvidence(50, 80.0, 30.0, 25.0),
                 dataQuality = ActivityDataQuality(com.runningai.activity.detail.SampleCompleteness.FULL,
                     com.runningai.analysis.AnalysisStatus.COMPLETE, "RUNNING_ANALYSIS_V1"),
             ),
         ),
         sourceFreshness = SourceFreshnessV2(date, date, 0, date, 0),
+        lactateThresholdProvenance = LactateThresholdProvenanceV2(170, 300, builtAt, 0, false, null),
         constraints = SessionConstraints(availableMinutes = 40),
     )
 

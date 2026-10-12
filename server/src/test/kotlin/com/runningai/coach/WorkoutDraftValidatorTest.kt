@@ -421,6 +421,9 @@ class WorkoutDraftValidatorTest {
         trainingRhythm = TrainingRhythmV2(0, 0, null, null, null, null, true, null, null),
         recentActivities = emptyList(),
         sourceFreshness = SourceFreshnessV2(null, null, null, null, null),
+        lactateThresholdProvenance = LactateThresholdProvenanceV2(
+            athlete.lactateThresholdHeartRateBpm, athlete.lactateThresholdPaceSecondsPerKm, null, null, false, null,
+        ),
         constraints = SessionConstraints(),
     )
 

@@ -7,6 +7,8 @@ import com.runningai.activity.detail.ActivityDetailStore
 import com.runningai.activity.detail.DetailPayloadType
 import com.runningai.activity.detail.SampleCompleteness
 import com.runningai.analysis.ActivityAnalysisStore
+import com.runningai.analysis.RunningDynamicsMetrics
+import com.runningai.athlete.AthleteIntensityProfileRepository
 import com.runningai.athlete.AthleteIntensityProfileService
 import com.runningai.athlete.AthleteService
 import com.runningai.enrichment.IntervalsEnrichmentStore
@@ -35,6 +37,7 @@ import java.time.temporal.ChronoUnit
 class TrainingContextV2Builder(
     private val athleteService: AthleteService,
     private val profileService: AthleteIntensityProfileService,
+    private val profileRepository: AthleteIntensityProfileRepository,
     private val recoveryContextBuilder: RecoveryContextBuilder,
     private val recoveryRepository: RecoveryRepository,
     private val activities: ActivityRepository,
@@ -89,7 +92,41 @@ class TrainingContextV2Builder(
             trainingRhythm = rhythm,
             recentActivities = recentEvidence,
             sourceFreshness = sourceFreshness(coverage, trainingLoad, recoveryContext),
+            lactateThresholdProvenance = lactateThresholdProvenance(date, zone, profile),
             constraints = constraints,
+        )
+    }
+
+    /**
+     * Phase 7B-3: this build has no MANUAL/GARMIN source column on `athlete_intensity_profile` (see
+     * [LactateThresholdProvenanceV2]), so [LactateThresholdProvenanceV2.sourceTracked] is always
+     * `false` and [LactateThresholdProvenanceV2.warning] says so explicitly whenever a threshold is
+     * actually on file - the coach is never left to assume a confidence this build does not have.
+     */
+    private fun lactateThresholdProvenance(
+        date: LocalDate,
+        zone: ZoneId,
+        profile: com.runningai.athlete.AthleteIntensityProfileResponse,
+    ): LactateThresholdProvenanceV2 {
+        val hasThreshold = profile.lactateThresholdHeartRateBpm() != null || profile.lactateThresholdPaceSecondsPerKm() != null
+        val entity = if (hasThreshold) profileRepository.findByAthleteId(athleteService.getDefaultAthlete().id).orElse(null) else null
+        val updatedAt = entity?.updatedAt
+        val ageDays = updatedAt?.let { daysSince(date, it.atZone(zone).toLocalDate()) }
+        val warnings = mutableListOf<String>()
+        if (hasThreshold) {
+            warnings += "Source (manual entry vs a Garmin auto-sync) is not tracked for this value; " +
+                "treat its provenance as unconfirmed."
+            if (ageDays != null && ageDays > STALE_LTHR_WARNING_DAYS) {
+                warnings += "This value has not changed in $ageDays days; it may no longer reflect the athlete's current fitness."
+            }
+        }
+        return LactateThresholdProvenanceV2(
+            lactateThresholdHeartRateBpm = profile.lactateThresholdHeartRateBpm(),
+            lactateThresholdPaceSecondsPerKm = profile.lactateThresholdPaceSecondsPerKm(),
+            profileLastUpdatedAt = updatedAt,
+            profileAgeDays = ageDays,
+            sourceTracked = false,
+            warning = warnings.takeIf { it.isNotEmpty() }?.joinToString(" "),
         )
     }
 
@@ -194,6 +231,7 @@ class TrainingContextV2Builder(
                         recoveryDurationSeconds = g.recovery.durationSeconds,
                     )
                 },
+                runningDynamics = runningDynamicsEvidence(a.runningDynamics),
             )
         }
         val intervalsEvidence = metrics?.let {
@@ -205,6 +243,23 @@ class TrainingContextV2Builder(
             analysisVersion = analysis?.analysisVersion,
         )
         return RecentActivityEvidence(facts, runningAiEvidence, intervalsEvidence, dataQuality)
+    }
+
+    /** Summary only (Phase 7B-3): never the per-sample stream. `null` when the run has no dynamics stored. */
+    private fun runningDynamicsEvidence(m: RunningDynamicsMetrics): RunningDynamicsEvidenceV2? {
+        if (m.lapsWithDynamicsCount == 0) return null
+        return RunningDynamicsEvidenceV2(
+            avgStrideLengthCm = m.avgStrideLengthCm,
+            strideLengthChangePercent = m.strideLengthChangePercent,
+            avgVerticalOscillationCm = m.avgVerticalOscillationCm,
+            verticalOscillationChangePercent = m.verticalOscillationChangePercent,
+            avgVerticalRatioPercent = m.avgVerticalRatioPercent,
+            verticalRatioChangePercent = m.verticalRatioChangePercent,
+            avgGroundContactTimeMs = m.avgGroundContactTimeMs,
+            groundContactTimeChangePercent = m.groundContactTimeChangePercent,
+            avgRunningPowerWatts = m.avgRunningPowerWatts,
+            runningPowerChangePercent = m.runningPowerChangePercent,
+        )
     }
 
     private fun streamCompleteness(activityId: Long): SampleCompleteness? =
@@ -242,5 +297,8 @@ class TrainingContextV2Builder(
         const val HISTORY_WINDOW_DAYS = 90
         const val FITNESS_WINDOW_DAYS = 90
         const val RECOVERY_WINDOW_DAYS = 28
+
+        /** Phase 7B-3: beyond this many days unchanged, the LTHR/threshold-pace warning mentions staleness. */
+        const val STALE_LTHR_WARNING_DAYS = 30
     }
 }

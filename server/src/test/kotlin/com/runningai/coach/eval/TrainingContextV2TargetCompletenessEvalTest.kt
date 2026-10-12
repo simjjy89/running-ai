@@ -57,6 +57,9 @@ class TrainingContextV2TargetCompletenessEvalTest {
         ),
         recentActivities = emptyList(),
         sourceFreshness = com.runningai.coach.SourceFreshnessV2(date.minusDays(1), date.minusDays(1), 1, date.minusDays(1), 1),
+        lactateThresholdProvenance = com.runningai.coach.LactateThresholdProvenanceV2(
+            athlete.lactateThresholdHeartRateBpm, athlete.lactateThresholdPaceSecondsPerKm, null, null, false, null,
+        ),
         constraints = SessionConstraints(),
     )
 

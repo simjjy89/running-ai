@@ -17,6 +17,7 @@ import com.runningai.analysis.IntervalStructureExtractor
 import com.runningai.analysis.LapMetricsCalculator
 import com.runningai.analysis.RUNNING_ANALYSIS_VERSION
 import com.runningai.analysis.RunningActivityAnalysisService
+import com.runningai.analysis.RunningDynamicsCalculator
 import com.runningai.analysis.SessionMetricsCalculator
 import com.runningai.analysis.ThresholdExposureCalculator
 import com.runningai.analysis.ZoneExposureCalculator
@@ -160,12 +161,13 @@ class HistoricalBackfillServiceTest {
         zoneExposure: ZoneExposureCalculator,
         thresholdExposure: ThresholdExposureCalculator,
         lapMetrics: LapMetricsCalculator,
+        dynamicsCalculator: RunningDynamicsCalculator,
         extractor: IntervalStructureExtractor,
         intervalMetrics: IntervalMetricsCalculator,
         store: ActivityAnalysisStore,
         clock: Clock,
     ) : RunningActivityAnalysisService(activities, detail, profiles, sessionMetrics, zoneExposure,
-        thresholdExposure, lapMetrics, extractor, intervalMetrics, store, clock) {
+        thresholdExposure, lapMetrics, dynamicsCalculator, extractor, intervalMetrics, store, clock) {
 
         val failFor = mutableSetOf<Long>()
         val analysedIds = mutableListOf<Long>()
@@ -197,12 +199,13 @@ class HistoricalBackfillServiceTest {
             zoneExposure: ZoneExposureCalculator,
             thresholdExposure: ThresholdExposureCalculator,
             lapMetrics: LapMetricsCalculator,
+            dynamicsCalculator: RunningDynamicsCalculator,
             extractor: IntervalStructureExtractor,
             intervalMetrics: IntervalMetricsCalculator,
             store: ActivityAnalysisStore,
             clock: Clock,
         ) = ScriptedAnalysisService(activities, detail, profiles, sessionMetrics, zoneExposure,
-            thresholdExposure, lapMetrics, extractor, intervalMetrics, store, clock)
+            thresholdExposure, lapMetrics, dynamicsCalculator, extractor, intervalMetrics, store, clock)
     }
 
     @Autowired private lateinit var service: HistoricalBackfillService

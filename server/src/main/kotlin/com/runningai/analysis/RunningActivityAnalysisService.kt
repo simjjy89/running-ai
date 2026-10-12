@@ -32,6 +32,7 @@ class RunningActivityAnalysisService(
     private val zoneExposure: ZoneExposureCalculator,
     private val thresholdExposure: ThresholdExposureCalculator,
     private val lapMetrics: LapMetricsCalculator,
+    private val runningDynamics: RunningDynamicsCalculator,
     private val extractor: IntervalStructureExtractor,
     private val intervalMetrics: IntervalMetricsCalculator,
     private val store: ActivityAnalysisStore,
@@ -73,6 +74,7 @@ class RunningActivityAnalysisService(
             zones = zoneExposure.calculate(zones),
             threshold = thresholdExposure.calculate(samples, lactateThresholdHrOf(activity.athleteId)),
             laps = lapMetrics.calculate(laps),
+            runningDynamics = runningDynamics.calculate(laps, isRun),
             intervalGroups = groups,
         )
         store.replace(analysis)

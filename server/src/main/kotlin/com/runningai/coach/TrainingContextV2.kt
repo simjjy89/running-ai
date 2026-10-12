@@ -3,6 +3,7 @@ package com.runningai.coach
 import com.runningai.activity.ActivityType
 import com.runningai.activity.detail.SampleCompleteness
 import com.runningai.analysis.AnalysisStatus
+import java.time.Instant
 import java.time.LocalDate
 
 /**
@@ -30,8 +31,29 @@ data class TrainingContextV2(
     val recentActivities: List<RecentActivityEvidence>,
     /** Additive (Phase 6H-9): when each DB-stored source was last current, nothing about *why*. */
     val sourceFreshness: SourceFreshnessV2,
+    /** Additive (Phase 7B-3): LTHR/threshold-pace freshness and provenance uncertainty. */
+    val lactateThresholdProvenance: LactateThresholdProvenanceV2,
     override val constraints: SessionConstraints,
 ) : CoachTrainingContext
+
+/**
+ * How trustworthy [TrainingContextV2.athlete]'s LTHR/threshold-pace actually is (Phase 7B-3).
+ *
+ * **This build does not track whether a value came from a manual entry or a Garmin auto-sync**
+ * (`athlete_intensity_profile` has no source column yet - see
+ * `docs/work-orders/2026-10-12-phase-7b-3-garmin-running-dynamics-lactate-threshold-instruction.md`
+ * STEP D for the proposed design, not implemented in this build). [sourceTracked] is therefore
+ * always `false` here; [warning] names this and any staleness explicitly, in plain language, so the
+ * coach never treats this number as more certain than RunningAI actually knows it to be.
+ */
+data class LactateThresholdProvenanceV2(
+    val lactateThresholdHeartRateBpm: Int?,
+    val lactateThresholdPaceSecondsPerKm: Int?,
+    val profileLastUpdatedAt: Instant?,
+    val profileAgeDays: Int?,
+    val sourceTracked: Boolean,
+    val warning: String?,
+)
 
 /**
  * When each DB-stored source was last current, by source date / age in days - **not** a verdict on
@@ -182,6 +204,28 @@ data class RunningAiAnalysisEvidence(
     val heartRateZonePercent: Map<Int, Double>,
     val totalZoneSeconds: Double?,
     val intervalGroups: List<IntervalGroupEvidence>,
+    /** Additive (Phase 7B-3). `null` for a non-running activity or a run with no dynamics stored. */
+    val runningDynamics: RunningDynamicsEvidenceV2?,
+)
+
+/**
+ * Summary-only running-dynamics evidence (Phase 7B-3): averages and first-half-vs-second-half
+ * change percentages from [com.runningai.analysis.RunningDynamicsMetrics], never the underlying
+ * per-sample stream - the coach gets a compact trend, not a Garmin data dump. Units: centimeters
+ * (stride length, vertical oscillation), a dimensionless percent (vertical ratio), milliseconds
+ * (ground contact time), watts (running power) - read from the source as reported, never estimated.
+ */
+data class RunningDynamicsEvidenceV2(
+    val avgStrideLengthCm: Double?,
+    val strideLengthChangePercent: Double?,
+    val avgVerticalOscillationCm: Double?,
+    val verticalOscillationChangePercent: Double?,
+    val avgVerticalRatioPercent: Double?,
+    val verticalRatioChangePercent: Double?,
+    val avgGroundContactTimeMs: Double?,
+    val groundContactTimeChangePercent: Double?,
+    val avgRunningPowerWatts: Double?,
+    val runningPowerChangePercent: Double?,
 )
 
 /** Intervals.icu per-activity training-model evidence (Phase 6H-5), never merged with Garmin's own. */

@@ -48,6 +48,7 @@ data class ActivityAnalysisResponse(
     val heartRateZones: ZoneResponse,
     val thresholdExposure: ThresholdExposure,
     val laps: LapMetrics,
+    val runningDynamics: RunningDynamicsMetrics,
     val intervalGroups: List<IntervalGroupResponse>,
 ) {
     companion object {
@@ -70,6 +71,7 @@ data class ActivityAnalysisResponse(
             ),
             thresholdExposure = a.threshold,
             laps = a.laps,
+            runningDynamics = a.runningDynamics,
             intervalGroups = a.intervalGroups.map { IntervalGroupResponse.of(it) },
         )
     }
