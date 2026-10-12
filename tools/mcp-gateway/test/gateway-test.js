@@ -155,6 +155,15 @@ try {
   const unknownMethod = await mcp({ jsonrpc: '2.0', id: 4, method: 'resources/read', params: {} }, await token());
   assert('non-allowlisted MCP method -> -32601, not proxied',
     unknownMethod.body.error && unknownMethod.body.error.code === -32601 && backendHits === 0);
+  // ChatGPT's real probe order (7C-2 smoke finding): server/discover arrives BEFORE initialize.
+  // Unauthenticated it must trigger the OAuth challenge; authenticated it must get a clean
+  // JSON-RPC -32601 (HTTP 200) and never a 5xx, or ChatGPT aborts app creation.
+  const discoverNoAuth = await mcp({ jsonrpc: '2.0', id: 40, method: 'server/discover', params: {} });
+  assert('unauthenticated server/discover -> 401 with resource_metadata (OAuth trigger)',
+    discoverNoAuth.status === 401 && /resource_metadata=/.test(discoverNoAuth.www || ''));
+  const discoverAuth = await mcp({ jsonrpc: '2.0', id: 41, method: 'server/discover', params: {} }, await token());
+  assert('authenticated server/discover -> HTTP 200 JSON-RPC -32601, never 5xx, not proxied',
+    discoverAuth.status === 200 && discoverAuth.body.error && discoverAuth.body.error.code === -32601 && backendHits === 0);
   assert('arbitrary path -> 404', (await fetch(`${BASE}/api/v1/activities`, { method: 'POST', body: '{}' })).status === 404);
   assert('GET /mcp -> 405', (await fetch(`${BASE}/mcp`)).status === 405);
   assert('still zero backend hits after path/method probing', backendHits === 0);
