@@ -5,6 +5,9 @@
   /health, and (read-only) the Tailscale Windows Service state and `tailscale funnel status`.
   No Garmin login, no Garmin activity fetch, no token access, and this command NEVER changes the
   Funnel configuration - "status" means read, nothing more, even for the Tailscale/Funnel rows.
+  Phase 6I-1.1-E2E-P3: all three Get-TrackedProcessId calls pass -ReadOnly, since without it a
+  stale or foreign PID in a *.pid file is silently deleted (Remove-PidFile) as a side effect of
+  merely checking status - this script now only reports what it sees, never removes anything.
 
   Exit code 0 when Docker, PostgreSQL, the connector, Spring and the external relay are all up;
   1 otherwise.
@@ -53,14 +56,14 @@ if ($pgState -ne 'HEALTHY') { $allUp = $false }
 
 # Connector
 $connectorUp = Test-ConnectorHealth $ConnectorPort
-$connectorPid = Get-TrackedProcessId 'garmin-connector' (Get-ConnectorMarkers)
+$connectorPid = Get-TrackedProcessId 'garmin-connector' (Get-ConnectorMarkers) -ReadOnly
 $detail = if ($connectorPid) { " (managed, PID $connectorPid)" } elseif ($connectorUp) { ' (not started by RunningAI scripts)' } else { '' }
 Format-Row 'GarminConnector' ($(if ($connectorUp) { 'UP' } else { 'DOWN' }) + " 127.0.0.1:$ConnectorPort$detail")
 if (-not $connectorUp) { $allUp = $false }
 
 # Spring
 $springUp = Test-SpringHealth $SpringPort
-$springPid = Get-TrackedProcessId 'spring' (Get-SpringMarkers)
+$springPid = Get-TrackedProcessId 'spring' (Get-SpringMarkers) -ReadOnly
 $detail = if ($springPid) { " (managed, PID $springPid)" } elseif ($springUp) { ' (not started by RunningAI scripts)' } else { '' }
 Format-Row 'Spring' ($(if ($springUp) { 'UP' } else { 'DOWN' }) + " port $SpringPort$detail")
 if (-not $springUp) { $allUp = $false }
@@ -69,7 +72,7 @@ if (-not $springUp) { $allUp = $false }
 # start/stop/watchdog never couple its state to Spring's)
 $relayPort = Get-ExternalRelayConfiguredPort
 $relayUp = Test-ExternalRelayHealth $relayPort
-$relayPid = Get-TrackedProcessId 'external-relay' (Get-ExternalRelayMarkers)
+$relayPid = Get-TrackedProcessId 'external-relay' (Get-ExternalRelayMarkers) -ReadOnly
 $detail = if ($relayPid) { " (managed, PID $relayPid)" } elseif ($relayUp) { ' (not started by RunningAI scripts)' } else { '' }
 Format-Row 'ExternalRelay' ($(if ($relayUp) { 'UP' } else { 'DOWN' }) + " 127.0.0.1:$relayPort$detail")
 if (-not $relayUp) { $allUp = $false }

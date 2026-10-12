@@ -806,12 +806,26 @@ foreach ($entry in @(
 # RUNNING_AI_TEST_ENV_ROOT keeps the .env off the real repo-root one - never a copy of the real
 # production .env.
 function Invoke-StatusScriptIsolated {
-    param([hashtable]$ProcessEnv = @{}, [string]$EnvFileContent = $null, [string[]]$ExtraArgs = @())
+    param([hashtable]$ProcessEnv = @{}, [string]$EnvFileContent = $null, [string[]]$ExtraArgs = @(), [hashtable]$SeedPidFiles = @{})
     $runtimeTemp = Join-Path $env:TEMP "selftest-status-runtimedir-$([guid]::NewGuid().ToString('N'))"
     $envDir = Join-Path $env:TEMP "selftest-status-envroot-$([guid]::NewGuid().ToString('N'))"
     New-Item -ItemType Directory -Force $runtimeTemp | Out-Null
     New-Item -ItemType Directory -Force $envDir | Out-Null
     if ($EnvFileContent) { Set-Content -LiteralPath (Join-Path $envDir '.env') -Value $EnvFileContent -Encoding utf8 }
+    # Phase 6I-1.1-E2E-P3: seeds *.pid files directly by path (Get-PidFilePath/Write-PidFile are never
+    # called here - this OUTER test process dot-sourced RunningAI.Common.ps1 at file-load time, before
+    # RUNNING_AI_TEST_RUNTIME_DIR below was ever set, so its own $script:RuntimeDir is permanently bound
+    # to the REAL repo-root .runtime; only the isolated CHILD process (spawned below, which dot-sources
+    # fresh) ever resolves $script:RuntimeDir against $runtimeTemp). Matches Write-PidFile's own encoding
+    # (ascii) exactly, byte for byte, so a SHA256 comparison against a real Write-PidFile output is valid.
+    $pidFilePaths = @{}
+    foreach ($name in $SeedPidFiles.Keys) {
+        $p = Join-Path $runtimeTemp "$name.pid"
+        Set-Content -LiteralPath $p -Value $SeedPidFiles[$name] -Encoding ascii
+        $pidFilePaths[$name] = $p
+    }
+    $beforeHashes = @{}
+    foreach ($name in $pidFilePaths.Keys) { $beforeHashes[$name] = (Get-FileHash -LiteralPath $pidFilePaths[$name] -Algorithm SHA256).Hash }
     try {
         $psExe = (Get-Command powershell.exe).Source
         $scriptPath = Join-Path $scripts 'status-running-ai.ps1'
@@ -830,7 +844,16 @@ function Invoke-StatusScriptIsolated {
         $stdout = $proc.StandardOutput.ReadToEnd()
         $stderr = $proc.StandardError.ReadToEnd()
         $proc.WaitForExit(30000) | Out-Null
-        [pscustomobject]@{ StdOut = $stdout; StdErr = $stderr }
+        $pidFileResults = @{}
+        foreach ($name in $pidFilePaths.Keys) {
+            $p = $pidFilePaths[$name]
+            $existsAfter = Test-Path -LiteralPath $p
+            $pidFileResults[$name] = [pscustomobject]@{
+                ExistedAfter = $existsAfter
+                HashPreserved = $existsAfter -and ((Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash -eq $beforeHashes[$name])
+            }
+        }
+        [pscustomobject]@{ StdOut = $stdout; StdErr = $stderr; PidFiles = $pidFileResults }
     } finally {
         Remove-Item -Recurse -Force $runtimeTemp -ErrorAction SilentlyContinue
         Remove-Item -Recurse -Force $envDir -ErrorAction SilentlyContinue
@@ -855,6 +878,85 @@ Check 'status-running-ai.ps1 (isolated standalone process): explicit -SpringPort
 Check 'status-running-ai.ps1 (isolated standalone process): no .env, no process env -> default 8080' {
     $r = Invoke-StatusScriptIsolated
     $r.StdOut -match 'port 8080'
+}
+
+# ======================================================================================
+# Phase 6I-1.1-E2E-P3: status-running-ai.ps1 must never remove a *.pid file, for any of the
+# three components it reports on - it is documented as read-only, but before this phase its three
+# Get-TrackedProcessId calls omitted -ReadOnly, so a stale (process exited) or foreign (PID reused by
+# an unrelated process) *.pid file was silently deleted (Remove-PidFile) as a side effect of merely
+# running "status". Every check below seeds a *.pid file directly in the isolated runtime dir (never
+# via Write-PidFile - see Invoke-StatusScriptIsolated's own comment) and asserts it is BYTE-IDENTICAL
+# (SHA256) after the isolated child process runs - "preserved", never "cleaned up".
+# ======================================================================================
+
+# A short-lived helper's own PID, guaranteed exited by the time it is used as a "stale" PID.
+function Get-SelfTestDeadPid {
+    $p = Start-Process -FilePath (Get-Command powershell.exe).Source -ArgumentList @('-NoProfile', '-Command', 'exit 0') -PassThru
+    $p.WaitForExit()
+    return $p.Id
+}
+
+# A real, live, long-running process whose command line does NOT contain any of this component's
+# markers - models a PID file pointing at an unrelated process that happens to reuse the old PID.
+function Start-SelfTestForeignProcess {
+    Start-Process -FilePath (Get-Command powershell.exe).Source -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 120') -WindowStyle Hidden -PassThru
+}
+
+foreach ($component in @(
+    @{ Name = 'garmin-connector'; Label = 'GarminConnector' },
+    @{ Name = 'spring'; Label = 'Spring' },
+    @{ Name = 'external-relay'; Label = 'ExternalRelay' }
+)) {
+    Check "status-running-ai.ps1: a STALE $($component.Name).pid (process already exited) is preserved, never deleted" {
+        $deadPid = Get-SelfTestDeadPid
+        $r = Invoke-StatusScriptIsolated -SeedPidFiles @{ $($component.Name) = $deadPid }
+        $r.PidFiles[$component.Name].ExistedAfter -and $r.PidFiles[$component.Name].HashPreserved -and
+            ($r.StdOut -match [regex]::Escape($component.Label))
+    }
+
+    Check "status-running-ai.ps1: a FOREIGN $($component.Name).pid (live PID, different process) is preserved, never deleted" {
+        $foreign = Start-SelfTestForeignProcess
+        try {
+            $r = Invoke-StatusScriptIsolated -SeedPidFiles @{ $($component.Name) = $foreign.Id }
+            $r.PidFiles[$component.Name].ExistedAfter -and $r.PidFiles[$component.Name].HashPreserved -and
+                ($r.StdOut -match [regex]::Escape($component.Label)) -and
+                ($r.StdOut -notmatch "managed, PID $($foreign.Id)")   # never reported as "ours"
+        } finally {
+            Stop-Process -Id $foreign.Id -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Check 'status-running-ai.ps1: a genuinely MANAGED (live, marker-matching) connector PID is reported as managed, and its .pid file is untouched' {
+    $script = Join-Path $env:TEMP "selftest-status-managed-$([guid]::NewGuid().ToString('N')).ps1"
+    'while ($true) { Start-Sleep -Seconds 1 }' | Set-Content -LiteralPath $script -Encoding utf8
+    # Extra positional args are never read by the script above - only here to make THIS live process's
+    # own real CommandLine (as Win32_Process reports it) contain every Get-ConnectorMarkers string
+    # ('garmin_connector', ' serve', the repo root), the same trick Phase 6I-1.7D-2's ownership tests use.
+    $managed = Start-Process -FilePath (Get-Command powershell.exe).Source `
+        -ArgumentList @('-NoProfile', '-File', $script, 'garmin_connector', 'serve', $repo) -WindowStyle Hidden -PassThru
+    try {
+        Start-Sleep -Milliseconds 300
+        $r = Invoke-StatusScriptIsolated -SeedPidFiles @{ 'garmin-connector' = $managed.Id }
+        $r.PidFiles['garmin-connector'].ExistedAfter -and $r.PidFiles['garmin-connector'].HashPreserved -and
+            ($r.StdOut -match "managed, PID $($managed.Id)")
+    } finally {
+        Stop-Process -Id $managed.Id -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $script -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Check 'status-running-ai.ps1 isolated PID-file tests never touch the REAL .runtime *.pid files' {
+    $realPidFiles = @('garmin-connector.pid', 'spring.pid', 'external-relay.pid') | ForEach-Object { Join-Path $script:RuntimeDir $_ }
+    $before = @{}
+    foreach ($f in $realPidFiles) { if (Test-Path -LiteralPath $f) { $before[$f] = (Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash } }
+    # Re-run one representative isolated scenario from above as the "during" action.
+    $deadPid = Get-SelfTestDeadPid
+    Invoke-StatusScriptIsolated -SeedPidFiles @{ 'garmin-connector' = $deadPid } | Out-Null
+    $after = @{}
+    foreach ($f in $realPidFiles) { if (Test-Path -LiteralPath $f) { $after[$f] = (Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash } }
+    ($before.Keys.Count -eq $after.Keys.Count) -and (@($before.Keys | Where-Object { $before[$_] -ne $after[$_] }).Count -eq 0)
 }
 
 Check 'stop script never removes volumes' {
