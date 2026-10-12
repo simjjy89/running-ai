@@ -254,6 +254,28 @@ class McpReadServerApiTest {
     }
 
     @Test
+    fun `with two activities on one date, get_activity_analysis selects the later one - the list and the lookup agree`() {
+        // Selection is by DATE (ids are never exposed, so a date is the only cross-tool handle);
+        // with two sessions on one day the later one wins, deterministically.
+        val date = today.minusDays(1)
+        val morning = activities.save(Activity(athleteId(), ExternalSource.GARMIN, "ext-am", ActivityType.RUN,
+            date.atTime(7, 0).atZone(zone).toInstant(), 1800, 5_000.0, 150, 170))
+        val evening = activities.save(Activity(athleteId(), ExternalSource.GARMIN, "ext-pm", ActivityType.TREADMILL_RUN,
+            date.atTime(19, 0).atZone(zone).toInstant(), 2400, 7_000.0, 155, 175))
+        analysis(morning.id)
+        analysis(evening.id)
+
+        val body = structured("get_activity_analysis", "{\"date\":\"$date\"}")
+
+        assertThat(body.path("activity").path("activityType").asText()).isEqualTo("TREADMILL_RUN")
+        assertThat(body.path("activity").path("durationSeconds").asInt()).isEqualTo(2400)
+        // and the list shows both rows for that date, newest first, so the ambiguity is visible
+        val list = structured("get_recent_activities", "{\"days\":7}").path("activities")
+        assertThat(list.size()).isEqualTo(2)
+        assertThat(list[0].path("activityType").asText()).isEqualTo("TREADMILL_RUN")
+    }
+
+    @Test
     fun `get_training_context returns the canonical V2 snapshot with its hash`() {
         run(today.minusDays(1), "ext-ctx")
 

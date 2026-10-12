@@ -1,0 +1,14 @@
+{
+  "name": "running-ai-mcp-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "OAuth 2.1 resource-server gateway in front of the RunningAI read-only MCP (Phase 7C-2b). Verifies Auth0-issued JWTs (issuer/audience/signature/exp/nbf/scope/sub, RS256 via remote JWKS) and proxies ONLY allowlisted read tools to a local MCP endpoint. Fail closed.",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/gateway-test.js"
+  },
+  "dependencies": {
+    "jose": "^6.1.0"
+  }
+}

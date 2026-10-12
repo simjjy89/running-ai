@@ -38,6 +38,7 @@ bin/
 
 # --- Logs / temp ---
 logs/
+node_modules/
 *.log
 *.tmp
 *.swp
