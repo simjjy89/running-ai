@@ -120,10 +120,15 @@ class TrainingContextV2Builder(
         val entity = if (hasThreshold) profileRepository.findByAthleteId(athleteService.getDefaultAthlete().id).orElse(null) else null
         val updatedAt = entity?.updatedAt
         val ageDays = updatedAt?.let { daysSince(date, it.atZone(zone).toLocalDate()) }
+        // Phase 7B-4: the athlete package owns the ledger-based origin judgement; this builder only
+        // adds the context-relative age and the plain-language warning.
+        val p = profileService.provenance()
         val warnings = mutableListOf<String>()
         if (hasThreshold) {
-            warnings += "Source (manual entry vs a Garmin auto-sync) is not tracked for this value; " +
-                "treat its provenance as unconfirmed."
+            if (!p.sourceTracked) {
+                warnings += "Source (manual entry vs a Garmin auto-sync) is not tracked for this value; " +
+                    "treat its provenance as unconfirmed."
+            }
             if (ageDays != null && ageDays > STALE_LTHR_WARNING_DAYS) {
                 warnings += "This value has not changed in $ageDays days; it may no longer reflect the athlete's current fitness."
             }
@@ -133,8 +138,12 @@ class TrainingContextV2Builder(
             lactateThresholdPaceSecondsPerKm = profile.lactateThresholdPaceSecondsPerKm(),
             profileLastUpdatedAt = updatedAt,
             profileAgeDays = ageDays,
-            sourceTracked = false,
+            sourceTracked = p.sourceTracked,
             warning = warnings.takeIf { it.isNotEmpty() }?.joinToString(" "),
+            source = p.source,
+            lastAppliedChangeAt = p.lastAppliedChangeAt,
+            lastGarminObservationCalendarDate = p.lastGarminObservationCalendarDateRaw,
+            lastGarminObservationFetchedAt = p.lastGarminObservationFetchedAt,
         )
     }
 

@@ -67,6 +67,7 @@ class TrainingContextV2BuilderTest {
     @Autowired private lateinit var recoveryRepository: RecoveryRepository
     @Autowired private lateinit var athleteService: AthleteService
     @Autowired private lateinit var profileService: AthleteIntensityProfileService
+    @Autowired private lateinit var profileRepository: com.runningai.athlete.AthleteIntensityProfileRepository
     @Autowired private lateinit var jdbc: JdbcTemplate
 
     private val zone: ZoneId = ZoneId.of("Asia/Seoul")
@@ -80,7 +81,7 @@ class TrainingContextV2BuilderTest {
             "activity_detail_collection", "activity_sample", "activity_zone", "activity_lap", "activity_detail",
             "activity_raw_payload", "activity_raw", "activity_intervals_metrics", "activity_source_link",
             "intervals_raw_payload", "intervals_fitness_daily", "garmin_recovery_daily", "activity",
-            "athlete_intensity_profile",
+            "athlete_intensity_profile_history", "athlete_intensity_profile",
         ).forEach { jdbc.update("delete from $it") }
     }
 
@@ -467,21 +468,32 @@ class TrainingContextV2BuilderTest {
     }
 
     @Test
-    fun `lactate threshold provenance warns that source is untracked whenever a threshold is on file`() {
+    fun `lactate threshold provenance distinguishes a ledger-tracked value from a legacy one (7B-4)`() {
         val ctxNoProfile = builder.build(d, SessionConstraints())
         assertThat(ctxNoProfile.lactateThresholdProvenance.lactateThresholdHeartRateBpm).isNull()
         assertThat(ctxNoProfile.lactateThresholdProvenance.sourceTracked).isFalse()
         assertThat(ctxNoProfile.lactateThresholdProvenance.warning).isNull() // nothing to warn about yet
 
-        profileService.replaceDefaultProfile(AthleteIntensityProfileRequest(176, 290))
-        val ctx = builder.build(d, SessionConstraints())
-        assertThat(ctx.lactateThresholdProvenance.lactateThresholdHeartRateBpm).isEqualTo(176)
-        assertThat(ctx.lactateThresholdProvenance.sourceTracked).isFalse()
-        assertThat(ctx.lactateThresholdProvenance.profileLastUpdatedAt).isNotNull()
+        // A LEGACY value: written straight to the table, as every pre-7B-4 value was - no ledger row.
+        athleteId = athleteService.defaultAthlete.id
+        profileRepository.save(com.runningai.athlete.AthleteIntensityProfile(athleteId, 176, 290))
+        val legacy = builder.build(d, SessionConstraints())
+        assertThat(legacy.lactateThresholdProvenance.lactateThresholdHeartRateBpm).isEqualTo(176)
+        assertThat(legacy.lactateThresholdProvenance.sourceTracked).isFalse()
+        assertThat(legacy.lactateThresholdProvenance.source).isNull()
+        assertThat(legacy.lactateThresholdProvenance.profileLastUpdatedAt).isNotNull()
         // The fixture's session date is in the past relative to the just-written updatedAt, so the
         // age is negative here; what matters is that it is reported, from the real stored timestamp.
-        assertThat(ctx.lactateThresholdProvenance.profileAgeDays).isNotNull()
-        assertThat(ctx.lactateThresholdProvenance.warning).contains("not tracked")
+        assertThat(legacy.lactateThresholdProvenance.profileAgeDays).isNotNull()
+        assertThat(legacy.lactateThresholdProvenance.warning).contains("not tracked")
+
+        // An audited manual change: the ledger covers the current value -> tracked, no origin warning.
+        profileService.replaceDefaultProfile(AthleteIntensityProfileRequest(174, 292))
+        val tracked = builder.build(d, SessionConstraints())
+        assertThat(tracked.lactateThresholdProvenance.sourceTracked).isTrue()
+        assertThat(tracked.lactateThresholdProvenance.source).isEqualTo("MANUAL")
+        assertThat(tracked.lactateThresholdProvenance.lastAppliedChangeAt).isNotNull()
+        assertThat(tracked.lactateThresholdProvenance.warning).isNull()
     }
 
     @Test

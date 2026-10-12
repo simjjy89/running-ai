@@ -37,14 +37,18 @@ data class TrainingContextV2(
 ) : CoachTrainingContext
 
 /**
- * How trustworthy [TrainingContextV2.athlete]'s LTHR/threshold-pace actually is (Phase 7B-3).
+ * How trustworthy [TrainingContextV2.athlete]'s LTHR/threshold-pace actually is (Phase 7B-3,
+ * extended by 7B-4's append-only `athlete_intensity_profile_history` ledger).
  *
- * **This build does not track whether a value came from a manual entry or a Garmin auto-sync**
- * (`athlete_intensity_profile` has no source column yet - see
- * `docs/work-orders/2026-10-12-phase-7b-3-garmin-running-dynamics-lactate-threshold-instruction.md`
- * STEP D for the proposed design, not implemented in this build). [sourceTracked] is therefore
- * always `false` here; [warning] names this and any staleness explicitly, in plain language, so the
- * coach never treats this number as more certain than RunningAI actually knows it to be.
+ * [sourceTracked] is `true` ONLY when the latest actually-applied ledger event matches the current
+ * profile values exactly; [source] is then `MANUAL` or `GARMIN`, else `null`. A value stored before
+ * the ledger existed keeps `sourceTracked=false` forever (no retroactive certification), and a
+ * same-value Garmin re-observation never flips it — it only updates [lastGarminObservationCalendarDate]
+ * (Garmin's own measurement timestamp VERBATIM: its zone is undocumented, so it is text, never a
+ * converted instant) and [lastGarminObservationFetchedAt] (RunningAI's UTC fetch time).
+ * [lastAppliedChangeAt] lets a consumer compare against an analysis's `computedAt` to recognise
+ * LTHR-exposure numbers computed under an older threshold (analyses are never auto-recomputed).
+ * [warning] still names untracked origin and staleness in plain language.
  */
 data class LactateThresholdProvenanceV2(
     val lactateThresholdHeartRateBpm: Int?,
@@ -53,6 +57,10 @@ data class LactateThresholdProvenanceV2(
     val profileAgeDays: Int?,
     val sourceTracked: Boolean,
     val warning: String?,
+    val source: String? = null,
+    val lastAppliedChangeAt: Instant? = null,
+    val lastGarminObservationCalendarDate: String? = null,
+    val lastGarminObservationFetchedAt: Instant? = null,
 )
 
 /**

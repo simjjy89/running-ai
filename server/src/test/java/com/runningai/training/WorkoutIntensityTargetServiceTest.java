@@ -72,7 +72,7 @@ class WorkoutIntensityTargetServiceTest {
         TargetedWorkoutPrescription before = service.targetedPrescribe(AS_OF);
         assertThat(before.targetAvailability()).isEqualTo(TargetAvailability.QUALITATIVE_ONLY);
 
-        profileService.mergeGarminSnapshot(180, 290);
+        profileService.mergeGarminSnapshot(180, 290, null, java.time.Instant.parse("2026-10-13T00:00:00Z"));
 
         TargetedWorkoutPrescription after = service.targetedPrescribe(AS_OF);
         assertThat(after.targetAvailability()).isEqualTo(TargetAvailability.FULL);

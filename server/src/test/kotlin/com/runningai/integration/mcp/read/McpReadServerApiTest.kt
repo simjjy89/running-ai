@@ -76,6 +76,7 @@ class McpReadServerApiTest {
     @Autowired private lateinit var recoveryRepository: RecoveryRepository
     @Autowired private lateinit var intervalsStore: IntervalsEnrichmentStore
     @Autowired private lateinit var profileService: AthleteIntensityProfileService
+    @Autowired private lateinit var profileRepository: com.runningai.athlete.AthleteIntensityProfileRepository
     @Autowired private lateinit var injuryReports: InjuryReportRepository
     @Autowired private lateinit var clock: Clock
     @Autowired private lateinit var jdbc: JdbcTemplate
@@ -94,7 +95,7 @@ class McpReadServerApiTest {
         listOf(
             "activity_analysis_interval", "activity_analysis_interval_group", "activity_analysis",
             "activity_intervals_metrics", "intervals_fitness_daily", "garmin_recovery_daily",
-            "injury_report", "athlete_intensity_profile", "activity",
+            "injury_report", "athlete_intensity_profile_history", "athlete_intensity_profile", "activity",
         ).forEach { jdbc.update("delete from $it") }
     }
 
@@ -363,18 +364,29 @@ class McpReadServerApiTest {
     }
 
     @Test
-    fun `get_athlete_profile reports values with the source-untracked provenance warning`() {
+    fun `get_athlete_profile distinguishes ledger-tracked values from legacy untracked ones (7B-4)`() {
         val empty = structured("get_athlete_profile", "{}")
         assertThat(empty.path("initialized").asBoolean()).isFalse()
         assertThat(empty.path("provenance").path("sourceTracked").asBoolean()).isFalse()
         val warning = empty.path("provenance").path("warning")
         assertThat(warning.isMissingNode || warning.isNull).isTrue()
 
-        profileService.replaceDefaultProfile(AthleteIntensityProfileRequest(176, 290))
-        val body = structured("get_athlete_profile", "{}")
-        assertThat(body.path("lactateThresholdHeartRateBpm").asInt()).isEqualTo(176)
-        assertThat(body.path("lactateThresholdPaceSecondsPerKm").asInt()).isEqualTo(290)
-        assertThat(body.path("provenance").path("warning").asText()).contains("not tracked")
+        // legacy value (direct table write, as every pre-7B-4 value was): origin stays unconfirmed
+        profileRepository.save(com.runningai.athlete.AthleteIntensityProfile(athleteId(), 176, 290))
+        val legacy = structured("get_athlete_profile", "{}")
+        assertThat(legacy.path("lactateThresholdHeartRateBpm").asInt()).isEqualTo(176)
+        assertThat(legacy.path("lactateThresholdPaceSecondsPerKm").asInt()).isEqualTo(290)
+        assertThat(legacy.path("provenance").path("sourceTracked").asBoolean()).isFalse()
+        assertThat(legacy.path("provenance").path("warning").asText()).contains("not tracked")
+
+        // audited manual change: tracked, source MANUAL, no origin warning
+        profileService.replaceDefaultProfile(AthleteIntensityProfileRequest(174, 292))
+        val tracked = structured("get_athlete_profile", "{}")
+        assertThat(tracked.path("provenance").path("sourceTracked").asBoolean()).isTrue()
+        assertThat(tracked.path("provenance").path("source").asText()).isEqualTo("MANUAL")
+        assertThat(tracked.path("provenance").path("lastAppliedChangeAt").asText()).isNotBlank()
+        val trackedWarning = tracked.path("provenance").path("warning")
+        assertThat(trackedWarning.isMissingNode || trackedWarning.isNull).isTrue()
     }
 
     // ---- nothing changes ------------------------------------------------------------------------

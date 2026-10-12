@@ -26,7 +26,17 @@ final class GarminLactateThresholdMapper {
         Integer bpm = toPositiveBpm(speedAndHeartRate.path("heartRate"));
         Double rawSpeed = toFiniteDouble(speedAndHeartRate.path("speed"));
         Integer paceSecondsPerKm = GarminSpeedConverter.rawSpeedToSecondsPerKilometer(rawSpeed);
-        return new GarminLactateThresholdSnapshot(bpm, paceSecondsPerKm);
+        // Phase 7B-4: the measurement timestamp is carried VERBATIM (live shape
+        // "2026-10-06T00:50:55.648", no offset, zone undocumented) - parsing it into an Instant
+        // would be a guess, so provenance stores the text and only RunningAI's own fetch time is
+        // a real UTC instant. Non-text/absent -> null, truncated defensively to the column width.
+        String calendarDateRaw = null;
+        JsonNode calendarDate = speedAndHeartRate.path("calendarDate");
+        if (calendarDate.isTextual() && !calendarDate.asText().isBlank()) {
+            String text = calendarDate.asText();
+            calendarDateRaw = text.length() <= 40 ? text : text.substring(0, 40);
+        }
+        return new GarminLactateThresholdSnapshot(bpm, paceSecondsPerKm, calendarDateRaw);
     }
 
     private static Integer toPositiveBpm(JsonNode node) {

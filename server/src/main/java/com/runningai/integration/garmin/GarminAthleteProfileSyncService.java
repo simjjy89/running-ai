@@ -7,6 +7,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import java.time.Clock;
+import java.time.Instant;
+
 /**
  * Pulls the latest Garmin running lactate-threshold snapshot and merges whatever valid metric(s)
  * it contains into the athlete's intensity profile (Phase 6D). Reuses the verified pipeline
@@ -28,11 +31,14 @@ public class GarminAthleteProfileSyncService {
 
     private final GarminLactateThresholdSource source;
     private final AthleteIntensityProfileService profileService;
+    private final Clock clock;
 
     public GarminAthleteProfileSyncService(GarminLactateThresholdSource source,
-                                            AthleteIntensityProfileService profileService) {
+                                            AthleteIntensityProfileService profileService,
+                                            Clock clock) {
         this.source = source;
         this.profileService = profileService;
+        this.clock = clock;
     }
 
     public GarminProfileSyncResponse sync() {
@@ -47,8 +53,11 @@ public class GarminAthleteProfileSyncService {
             log.warn("Garmin athlete profile sync: lactate threshold pace missing or malformed in the latest snapshot");
         }
 
+        // Phase 7B-4: the measurement timestamp (verbatim) and our own fetch time travel into the
+        // profile-history ledger with the merge, in the same transaction.
         GarminProfileMergeResult merged = profileService.mergeGarminSnapshot(
-                snapshot.lactateThresholdHeartRateBpm(), snapshot.lactateThresholdPaceSecondsPerKm());
+                snapshot.lactateThresholdHeartRateBpm(), snapshot.lactateThresholdPaceSecondsPerKm(),
+                snapshot.calendarDateRaw(), Instant.now(clock));
 
         if (merged.updated()) {
             log.info("Garmin athlete profile sync completed: UPDATED heartRateChanged={} paceChanged={}",

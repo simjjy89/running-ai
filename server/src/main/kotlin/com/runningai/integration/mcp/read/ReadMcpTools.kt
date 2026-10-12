@@ -443,11 +443,15 @@ class ReadMcpTools(
         .name("get_athlete_profile")
         .title("Athlete intensity profile")
         .description("The athlete's stored lactate-threshold heart rate (bpm) and threshold pace " +
-            "(seconds per km), with provenance: when the profile last changed and an explicit warning " +
-            "that the SOURCE (manual entry vs Garmin auto-sync) is not tracked in this build - treat " +
-            "the value's origin as unconfirmed. Values are read as stored; this tool never syncs from " +
-            "or writes to Garmin. Device heart-rate zone boundaries are not athlete state in RunningAI " +
-            "(they are stored per activity) and are not part of this profile.")
+            "(seconds per km), with ledger-based provenance (Phase 7B-4): sourceTracked=true means " +
+            "the current value is covered by the change history and source says MANUAL or GARMIN; " +
+            "false means its origin predates the ledger - treat it as unconfirmed (a warning says " +
+            "so). lastGarminObservation carries Garmin's own measurement timestamp VERBATIM (its " +
+            "zone is undocumented, so it is text) plus RunningAI's UTC fetch time; it proves " +
+            "freshness, never origin. lastAppliedChangeAt is when the value last actually changed - " +
+            "analyses computed before it used the previous threshold and are never auto-recomputed. " +
+            "Values are read as stored; this tool never syncs from or writes to Garmin. Device " +
+            "heart-rate zone boundaries are stored per activity, not here.")
         .inputSchema(schema(emptyMap()))
         .annotations(readOnlyAnnotations("Athlete intensity profile"))
         .build()
@@ -462,6 +466,10 @@ class ReadMcpTools(
                 provenance.lactateThresholdPaceSecondsPerKm != null),
             "provenance" to linkedMapOf(
                 "sourceTracked" to provenance.sourceTracked,
+                "source" to provenance.source,
+                "lastAppliedChangeAt" to provenance.lastAppliedChangeAt?.toString(),
+                "lastGarminObservationCalendarDate" to provenance.lastGarminObservationCalendarDate,
+                "lastGarminObservationFetchedAt" to provenance.lastGarminObservationFetchedAt?.toString(),
                 "profileLastUpdatedAt" to provenance.profileLastUpdatedAt?.toString(),
                 "profileAgeDays" to provenance.profileAgeDays,
                 "warning" to provenance.warning,

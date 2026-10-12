@@ -9,8 +9,10 @@ package com.runningai.integration.garmin;
  */
 public record GarminLactateThresholdSnapshot(
         Integer lactateThresholdHeartRateBpm,
-        Integer lactateThresholdPaceSecondsPerKm
+        Integer lactateThresholdPaceSecondsPerKm,
+        /** Garmin's own measurement timestamp VERBATIM (Phase 7B-4) - undocumented zone, never converted; null when absent/non-text. */
+        String calendarDateRaw
 ) {
 
-    static final GarminLactateThresholdSnapshot EMPTY = new GarminLactateThresholdSnapshot(null, null);
+    static final GarminLactateThresholdSnapshot EMPTY = new GarminLactateThresholdSnapshot(null, null, null);
 }

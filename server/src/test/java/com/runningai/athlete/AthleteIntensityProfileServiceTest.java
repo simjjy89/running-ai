@@ -104,7 +104,7 @@ class AthleteIntensityProfileServiceTest {
 
     @Test
     void mergeOnAnEmptyProfileInsertsBothMetrics() {
-        GarminProfileMergeResult result = service.mergeGarminSnapshot(180, 290);
+        GarminProfileMergeResult result = service.mergeGarminSnapshot(180, 290, "2026-10-01T00:00:00.0", java.time.Instant.parse("2026-10-13T00:00:00Z"));
 
         assertThat(result.updated()).isTrue();
         assertThat(result.heartRateChanged()).isTrue();
@@ -118,7 +118,7 @@ class AthleteIntensityProfileServiceTest {
     void mergeUpdatesBothMetricsWhenBothChange() {
         service.replaceDefaultProfile(new AthleteIntensityProfileRequest(170, 300));
 
-        GarminProfileMergeResult result = service.mergeGarminSnapshot(180, 290);
+        GarminProfileMergeResult result = service.mergeGarminSnapshot(180, 290, "2026-10-01T00:00:00.0", java.time.Instant.parse("2026-10-13T00:00:00Z"));
 
         assertThat(result.updated()).isTrue();
         assertThat(result.heartRateChanged()).isTrue();
@@ -132,7 +132,7 @@ class AthleteIntensityProfileServiceTest {
     void mergeWithIdenticalValuesIsNotAnUpdate() {
         service.replaceDefaultProfile(new AthleteIntensityProfileRequest(180, 290));
 
-        GarminProfileMergeResult result = service.mergeGarminSnapshot(180, 290);
+        GarminProfileMergeResult result = service.mergeGarminSnapshot(180, 290, "2026-10-01T00:00:00.0", java.time.Instant.parse("2026-10-13T00:00:00Z"));
 
         assertThat(result.updated()).isFalse();
         assertThat(result.heartRateChanged()).isFalse();
@@ -145,7 +145,7 @@ class AthleteIntensityProfileServiceTest {
     void heartRateOnlyFromGarminPreservesExistingPace() {
         service.replaceDefaultProfile(new AthleteIntensityProfileRequest(170, 300));
 
-        GarminProfileMergeResult result = service.mergeGarminSnapshot(180, null);
+        GarminProfileMergeResult result = service.mergeGarminSnapshot(180, null, null, java.time.Instant.parse("2026-10-13T00:00:00Z"));
 
         assertThat(result.updated()).isTrue();
         assertThat(result.heartRateChanged()).isTrue();
@@ -158,7 +158,7 @@ class AthleteIntensityProfileServiceTest {
     void paceOnlyFromGarminPreservesExistingHeartRate() {
         service.replaceDefaultProfile(new AthleteIntensityProfileRequest(170, 300));
 
-        GarminProfileMergeResult result = service.mergeGarminSnapshot(null, 290);
+        GarminProfileMergeResult result = service.mergeGarminSnapshot(null, 290, null, java.time.Instant.parse("2026-10-13T00:00:00Z"));
 
         assertThat(result.updated()).isTrue();
         assertThat(result.heartRateChanged()).isFalse();
@@ -172,7 +172,7 @@ class AthleteIntensityProfileServiceTest {
         service.replaceDefaultProfile(new AthleteIntensityProfileRequest(170, 300));
         Long rowId = repository.findByAthleteId(athleteId).orElseThrow().getId();
 
-        GarminProfileMergeResult result = service.mergeGarminSnapshot(null, null);
+        GarminProfileMergeResult result = service.mergeGarminSnapshot(null, null, null, java.time.Instant.parse("2026-10-13T00:00:00Z"));
 
         assertThat(result.updated()).isFalse();
         assertThat(result.profile().lactateThresholdHeartRateBpm()).isEqualTo(170);
@@ -182,7 +182,7 @@ class AthleteIntensityProfileServiceTest {
 
     @Test
     void bothMetricsMissingOnAnEmptyProfileStaysEmptyAndWritesNoRow() {
-        GarminProfileMergeResult result = service.mergeGarminSnapshot(null, null);
+        GarminProfileMergeResult result = service.mergeGarminSnapshot(null, null, null, java.time.Instant.parse("2026-10-13T00:00:00Z"));
 
         assertThat(result.updated()).isFalse();
         assertThat(result.profile()).isEqualTo(AthleteIntensityProfileResponse.empty());
@@ -194,7 +194,7 @@ class AthleteIntensityProfileServiceTest {
         service.replaceDefaultProfile(new AthleteIntensityProfileRequest(180, 290));
 
         // simulates a Garmin fetch where the connector returned nothing usable for either metric
-        GarminProfileMergeResult result = service.mergeGarminSnapshot(null, null);
+        GarminProfileMergeResult result = service.mergeGarminSnapshot(null, null, null, java.time.Instant.parse("2026-10-13T00:00:00Z"));
 
         assertThat(result.profile()).isEqualTo(service.getDefaultProfile());
         assertThat(service.getDefaultProfile().lactateThresholdHeartRateBpm()).isEqualTo(180);

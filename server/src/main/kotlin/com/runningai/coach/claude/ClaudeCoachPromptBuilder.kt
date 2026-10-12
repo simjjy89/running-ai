@@ -176,13 +176,19 @@ class ClaudeCoachPromptBuilder {
               conclusion from an activity gap — say the uncertainty out loud instead of asserting a
               rest streak you cannot actually back up.
 
-            Reading 'lactateThresholdProvenance' and 'runningDynamics' (TRAINING CONTEXT V2; Phase 7B-3):
-            - 'lactateThresholdProvenance.sourceTracked' is currently always false: this build cannot
-              tell you whether the athlete's LTHR/threshold pace came from a manual entry or a Garmin
-              auto-sync, or how it compares with an older value. When 'warning' is present, read it
-              and temper how much weight you put on that threshold — do not silently treat it as
-              certain. A few bpm of LTHR uncertainty can swing a heart-rate-threshold-based read of a
-              session dramatically; say so if your recovery/load read leans heavily on it.
+            Reading 'lactateThresholdProvenance' and 'runningDynamics' (TRAINING CONTEXT V2; Phase 7B-3/7B-4):
+            - 'lactateThresholdProvenance.sourceTracked' true means the current LTHR/threshold-pace
+              value is covered by RunningAI's change ledger and 'source' says where it came from
+              (MANUAL entry or GARMIN auto-detection, with 'lastGarminObservationCalendarDate' as
+              Garmin's own measurement timestamp, verbatim). false means the value's origin predates
+              the ledger or cannot be confirmed — when 'warning' is present, read it and temper how
+              much weight you put on that threshold; do not silently treat it as certain. A few bpm
+              of LTHR uncertainty can swing a heart-rate-threshold-based read of a session
+              dramatically; say so if your recovery/load read leans heavily on it.
+            - 'lastAppliedChangeAt' is when the threshold last actually changed. An activity
+              analysis whose 'computedAt' is OLDER than it computed its LTHR-exposure seconds under
+              the previous threshold — treat those numbers as historical, not as today's-threshold
+              numbers (RunningAI never recomputes past analyses automatically).
             - 'runningDynamics' (inside 'runningAiAnalysis') is summary-only evidence per activity:
               stride length and vertical oscillation in centimeters, vertical ratio as a dimensionless
               percent, ground contact time in milliseconds, running power in watts, each with its own
