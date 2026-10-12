@@ -23,10 +23,13 @@ spring:
   ai:
     mcp:
       server:
-        # MCP server (Spring AI 1.1.x, Phase 6C). Its own default is ON, so it is tied to running-ai.mcp.enabled
-        # (RUNNINGAI_MCP_ENABLED, default false). Streamable HTTP in stateless mode on POST /mcp; only the explicitly
-        # registered publish_workout tool is exposed (no resources / prompts / completions / annotation scanning).
-        # No authentication: never expose /mcp to the public Internet.
+        # MCP server (Spring AI 1.1.x, Phase 6C). Its own default is ON; RunningAI turns it on exactly when at
+        # least one tool group is enabled - running-ai.mcp.enabled (write adapter, publish_workout) OR
+        # running-ai.mcp.read-enabled (Phase 7C-2a read-only tools). YAML cannot express that OR, so the effective
+        # value is computed by McpServerSwitchEnvironmentPostProcessor (which overrides this line); the binding
+        # below is kept as documentation of the pre-7C-2a behaviour and as a fallback. Streamable HTTP in
+        # stateless mode on POST /mcp; only explicitly registered tools are exposed (no resources / prompts /
+        # completions / annotation scanning). No authentication: never expose /mcp to the public Internet.
         enabled: ${running-ai.mcp.enabled}
         protocol: STATELESS
         type: SYNC
@@ -44,9 +47,16 @@ spring:
 
 running-ai:
   mcp:
-    # Master switch of the MCP adapter (also switches the Spring AI MCP server above). OFF by default. Even when on, a
-    # publish still needs running-ai.workout-publishing.enabled=true: the tool goes through WorkoutPublishApplicationService.
+    # Switch of the WRITE MCP adapter (publish_workout; also one of the two switches that turn the Spring AI MCP
+    # server above on). OFF by default. Even when on, a publish still needs running-ai.workout-publishing.enabled=true:
+    # the tool goes through WorkoutPublishApplicationService.
     enabled: ${RUNNINGAI_MCP_ENABLED:false}
+    # Switch of the READ-ONLY MCP tools (Phase 7C-2a: get_recent_activities, get_activity_analysis,
+    # get_training_context, get_recovery_context, get_fitness_trend, get_workout_recommendation,
+    # get_athlete_profile). OFF by default, and INDEPENDENT of the write switch: with only this on,
+    # publish_workout is not registered at all. The tools read stored data only - no DB change, no
+    # Garmin/Intervals call, no draft, no publish, no sync or re-analysis trigger.
+    read-enabled: ${RUNNINGAI_MCP_READ_ENABLED:false}
   default-athlete:
     name: ${RUNNING_AI_ATHLETE_NAME:default}
     timezone: ${RUNNING_AI_ATHLETE_TIMEZONE:Asia/Seoul}

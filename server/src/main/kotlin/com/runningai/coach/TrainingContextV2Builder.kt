@@ -102,7 +102,15 @@ class TrainingContextV2Builder(
      * [LactateThresholdProvenanceV2]), so [LactateThresholdProvenanceV2.sourceTracked] is always
      * `false` and [LactateThresholdProvenanceV2.warning] says so explicitly whenever a threshold is
      * actually on file - the coach is never left to assume a confidence this build does not have.
+     *
+     * Public single-argument form (Phase 7C-2a): the read-only MCP tool `get_athlete_profile`
+     * reports the SAME provenance the coach context carries, rather than re-deriving its own.
      */
+    fun lactateThresholdProvenance(date: LocalDate): LactateThresholdProvenanceV2 {
+        val athlete = athleteService.getDefaultAthlete()
+        return lactateThresholdProvenance(date, ZoneId.of(athlete.timezone), profileService.getDefaultProfile())
+    }
+
     private fun lactateThresholdProvenance(
         date: LocalDate,
         zone: ZoneId,
