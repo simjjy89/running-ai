@@ -62,8 +62,11 @@ Garmin/Intervals는 죽은 포트 고정이라 쓰기는커녕 읽기 호출도 
 
 **B. 운영 데이터 준비 (별도 승인)**
 - [ ] 운영 PostgreSQL에 V21/V22 적용 + 운영 Spring을 main-3 빌드로 재기동(승인 필요)
-- [ ] 재기동 직후 1회: injury RESOLVED 보고 입력(7B-2 — 없으면 추천류 전부 REST-only) +
-      Activity 7(및 최근 런) 재분석으로 다이내믹스 채움
+- [ ] 재기동 직후 1회: **실제 현재 무릎 상태를 그대로** `POST /athlete/injury-reports`로 보고
+      (증상이 실제로 해소된 경우에만 RESOLVED — 통증이 남았거나 미확인이면 ACTIVE/UNKNOWN
+      그대로 입력하고 추천·훈련류가 REST-only로 차단되는 것이 **의도된 정상 동작**이다.
+      RESOLVED를 게이트 통과 수단으로 입력하는 것 금지) + Activity 7(및 최근 런) 재분석으로
+      다이내믹스 채움
 - [ ] 운영 Spring에 `RUNNINGAI_MCP_READ_ENABLED=true`(쓰기 스위치는 전부 off 유지)
 
 **C. 고정 주소 + 연결 (별도 승인)**
