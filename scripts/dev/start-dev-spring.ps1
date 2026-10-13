@@ -35,6 +35,8 @@ param(
     # Enables the Phase 7E-2 Strava archive importer and points it at the unpacked export. The path
     # must be outside the repository - the export holds the athlete's real GPS traces.
     [string]$StravaArchive,
+    # Enables the Phase 7E-1 Intervals-only activity importer. Needs -IntervalsLive to reach the API.
+    [switch]$IntervalsImport,
     [string]$CanonicalEnv = 'C:\running-ai-github\.env',
     [switch]$Stop
 )
@@ -99,6 +101,7 @@ $springArgs = @(
     "--running-ai.coach.refresh.scheduler.enabled=false"
 )
 if (-not $IntervalsLive) { $springArgs += "--running-ai.intervals.base-url=http://127.0.0.1:9" }
+if ($IntervalsImport) { $springArgs += "--running-ai.intervals.activity-import.enabled=true" }
 if ($StravaArchive) {
     if (-not (Test-Path -LiteralPath $StravaArchive)) { throw "Strava archive not found: $StravaArchive" }
     $resolved = (Resolve-Path -LiteralPath $StravaArchive).Path
