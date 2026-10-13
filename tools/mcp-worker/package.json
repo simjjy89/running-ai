@@ -1,0 +1,21 @@
+{
+  "name": "running-ai-mcp-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Cloudflare Worker front door for the RunningAI read-only MCP (Phase 7D-2). OAuth 2.1 authorization server (workers-oauth-provider, GitHub sign-in, one permitted user) + resource server that re-asserts the authenticated identity to the local tools/mcp-gateway as a short-lived RS256 JWT. No Auth0.",
+  "scripts": {
+    "test": "node test/chain-test.js",
+    "keygen": "node scripts/generate-signing-key.mjs",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test:oauth": "node test/oauth-e2e-test.js",
+    "test:all": "node test/chain-test.js && node test/oauth-e2e-test.js"
+  },
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "^1.2.3"
+  },
+  "devDependencies": {
+    "wrangler": "^4.149.0"
+  }
+}

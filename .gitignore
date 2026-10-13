@@ -73,3 +73,8 @@ __pycache__/
 watchdog-state.json
 watchdog-status.json
 *.corrupt
+
+# --- Cloudflare Worker (tools/mcp-worker) ---
+# .dev.vars holds the hop signing key and the GitHub OAuth client secret for `wrangler dev`.
+.dev.vars
+.wrangler/

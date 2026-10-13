@@ -1,0 +1,26 @@
+{
+  // LOCAL TEST ONLY — used by `npm run test:oauth` (test/oauth-e2e-test.js). Never deployed.
+  // The production configuration is ../../wrangler.jsonc.
+  //
+  // Two deliberate differences from production:
+  //  - `global_fetch_strictly_public` is OMITTED, because the Worker under test has to reach the
+  //    stub GitHub and the gateway on loopback. Production keeps the flag (CIMD needs it) and
+  //    its origin is a public tunnel URL, so nothing on loopback is ever fetched there.
+  //  - GITHUB_OAUTH_BASE / GITHUB_API_BASE point at the stub. Both are unset in production.
+  //
+  // Secrets come from a .dev.vars file the test writes and deletes; none are stored here.
+  "name": "running-ai-mcp-test",
+  "main": "../../src/index.js",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "local-oauth-e2e-test" }],
+  "vars": {
+    "PUBLIC_BASE_URL": "http://localhost:8788",
+    "ORIGIN_MCP_URL": "http://127.0.0.1:17930/mcp",
+    "ALLOWED_GITHUB_ID": "4242",
+    "ALLOWED_GITHUB_LOGIN": "runningai-owner",
+    "GITHUB_OAUTH_BASE": "http://127.0.0.1:17934",
+    "GITHUB_API_BASE": "http://127.0.0.1:17934/api",
+    "HOP_TOKEN_TTL_SECONDS": "90"
+  }
+}

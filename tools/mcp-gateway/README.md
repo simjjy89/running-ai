@@ -41,6 +41,13 @@ npm start
 npm test     # 27 checks: mock AS + minted JWTs + hit-counting fake backend
 ```
 
-With a temporary public address, Auth0's API identifier and `RUNNING_AI_OAUTH_AUDIENCE` /
+With a temporary public address, the AS's API identifier and `RUNNING_AI_OAUTH_AUDIENCE` /
 `RUNNING_AI_PUBLIC_BASE_URL` must match that address and the ChatGPT connector must be
 re-registered whenever it changes — one reason the fixed Funnel `/mcp` address (7C-2c) exists.
+
+**Phase 7D-2 — the authorization server is `tools/mcp-worker`, not Auth0.** Nothing here changed:
+the Worker publishes RFC 8414 metadata and a JWKS at its own `/internal/` issuer and mints the
+RS256 tokens this gateway already knew how to verify, so the switch is four environment values
+(issuer / audience / allowed sub / public base URL). Because the Worker's `*.workers.dev` address
+is fixed, a restarted tunnel no longer means re-registering the ChatGPT connector. See
+`tools/mcp-worker/README.md`.

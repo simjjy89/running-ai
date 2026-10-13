@@ -1,0 +1,43 @@
+{
+  // RunningAI MCP Worker (Phase 7D-2). Secrets are set with `wrangler secret put` — see README.md.
+  // NO SECRET GOES IN THIS FILE.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "running-ai-mcp",
+  "main": "src/index.js",
+  "compatibility_date": "2026-10-01",
+  // `global_fetch_strictly_public` is REQUIRED for CIMD (ChatGPT's preferred client
+  // registration); without it the library logs "CIMD is disabled" and only DCR works.
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "workers_dev": true,
+  "observability": { "enabled": true },
+
+  // Created 2026-10-13 with `wrangler kv namespace create OAUTH_KV`. Holds the OAuth library's
+  // grants and token hashes. Not a secret: a namespace id is useless without account credentials.
+  "kv_namespaces": [
+    { "binding": "OAUTH_KV", "id": "fb4f6f1c669d44a8a6d05ec5c18233b9" }
+  ],
+
+  "vars": {
+    // The Worker's own stable https address, no trailing slash. Must be character-for-character
+    // the address ChatGPT uses, or the issuer/audience binding stops lining up.
+    "PUBLIC_BASE_URL": "https://running-ai-mcp.simjjy89.workers.dev",
+
+    // Where the main PC's mcp-gateway is reachable from the public internet (the cloudflared
+    // Quick Tunnel address, ending in /mcp). This is the ONLY value that changes when the tunnel
+    // is restarted — ChatGPT never has to be re-registered.
+    // Until the tunnel is up this points at a reserved-by-RFC-2606 name that cannot resolve, so
+    // an unconfigured Worker answers 502 instead of reaching anything.
+    "ORIGIN_MCP_URL": "https://vault-courtesy-receivers-approximate.trycloudflare.com/mcp",
+
+    // The one GitHub account allowed to use this connector (numeric id is the authority).
+    "ALLOWED_GITHUB_ID": "86603575",
+    "ALLOWED_GITHUB_LOGIN": "simjjy89",
+
+    "HOP_TOKEN_TTL_SECONDS": "90"
+  }
+
+  // Secrets (wrangler secret put <NAME>), never vars:
+  //   HOP_SIGNING_JWK      - private JWK from `npm run keygen`
+  //   GITHUB_CLIENT_ID     - GitHub OAuth app client id
+  //   GITHUB_CLIENT_SECRET - GitHub OAuth app client secret
+}
