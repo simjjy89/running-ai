@@ -228,19 +228,60 @@ as what it is.
 
 ## Versioning and persistence
 
-`analysis_version` is stored on every row; the first is `RUNNING_ANALYSIS_V1`. A re-analysis **replaces**
-the derived rows — the analysis row is updated in place and the interval group/repetition rows are deleted
-and rewritten, so a session that loses its structure does not keep the old one.
+A re-analysis **replaces** the derived rows — the analysis row is updated in place and the interval
+group/repetition rows are deleted and rewritten, so a session that loses its structure does not keep the
+old one. Nothing is deleted in preparation: the replacement is one transaction, after every new value
+exists, so a failed re-analysis leaves the previously stored result exactly as it was.
 
 The analysis never writes to `activity`, `activity_detail`, `activity_lap`, `activity_zone`,
 `activity_sample` or any raw payload. Those are inputs.
+
+### Analysis identity and the reuse policy (Phase 7E-1, V24)
+
+A single version string was not enough, and Phase 7E-0 measured the cost: `analysis_version` stayed
+`RUNNING_ANALYSIS_V1` when V22 added the running-dynamics metrics, so every "is the stored analysis
+current?" check in the system — the historical backfill's reuse rule, its VERIFY phase, the coach
+freshness evaluator — answered *yes* for rows the pre-V22 engine had produced with empty dynamics. Running
+the backfill again could not repair them: there was nothing in the row to notice. On the real-data copy,
+7 of 8 stored analyses were in exactly that state, and a full 90-day backfill re-run changed 0 rows.
+
+A stored analysis therefore carries **two independent facts**, and reuse needs a **third**:
+
+| Column | Meaning | Changes when |
+|---|---|---|
+| `analysis_version` | the output **contract** consumers read | a field/column appears, disappears or changes meaning. Still `RUNNING_ANALYSIS_V1` |
+| `analysis_engine_revision` | the **logic** that produced the numbers | any calculator change, new metric, or change to which input is read. `0` = stored before revisions were tracked (set by V24, never produced by code); `1` = the 6H-4 engine; `2` = V22 running dynamics |
+| `analysis_input_digest` | SHA-256 of **what the engine was fed** | the activity's identity metrics, any recorded detail part's status / row count / sample completeness, or the athlete LTHR changes |
+
+The digest is computed from what the last collection *recorded* in `activity_detail_collection`, not from
+the sample rows, so asking "does this need recomputing?" costs one small query rather than a scan of tens
+of thousands of samples. Timestamps are deliberately excluded: a re-collection that produced identical
+data must not look like a data change.
+
+`AnalysisReusePolicy` is the single place that answers the question, and every caller that used to compare
+the version string to a constant goes through it. A row is reused only when contract, engine revision
+**and** input digest all still match; a row with no digest is never reused, because treating "I do not know
+whether the data changed" as "it did not" is precisely the failure above.
+
+**The rule for future engine changes is mechanical: if a code change can alter any value this package
+writes, bump `RUNNING_ANALYSIS_ENGINE_REVISION` in the same commit.** Every reuse decision picks it up on
+the next pass — no migration, no manual sweep list, no per-caller edit.
 
 ## API
 
 ```text
 POST /api/v1/activities/{activityId}/analysis    recompute from stored data, replace the result
 GET  /api/v1/activities/{activityId}/analysis    read the last result
+POST /api/v1/activities/analysis-refresh         sweep every stored activity, recompute only what
+                                                 AnalysisReusePolicy says is stale (?dryRun=true
+                                                 reports the same decisions without acting)
 ```
+
+The sweep exists because the defect above is invisible per activity: the only way to see that some stored
+analyses came from an older engine is to ask every one of them. It uses the same policy a single refresh
+uses, so a dry run can never disagree with the run it previews. An activity whose recomputation fails is
+reported as failed and keeps its previous analysis; the sweep continues, because one unanalysable activity
+must not block repairing the rest.
 
 Manual only: no scheduler, no startup trigger. Neither verb reaches Garmin or Intervals.icu, and neither
 can publish anything. Unknown activity → 404 `ACTIVITY_NOT_FOUND`; never analysed → 404

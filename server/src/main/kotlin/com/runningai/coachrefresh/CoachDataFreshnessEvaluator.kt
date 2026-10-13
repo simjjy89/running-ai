@@ -7,7 +7,7 @@ import com.runningai.activity.detail.DetailPartStatus
 import com.runningai.activity.detail.DetailPayloadType
 import com.runningai.activity.detail.SampleCompleteness
 import com.runningai.analysis.ActivityAnalysisStore
-import com.runningai.analysis.RUNNING_ANALYSIS_VERSION
+import com.runningai.analysis.AnalysisReusePolicy
 import com.runningai.enrichment.IntervalsEnrichmentStore
 import com.runningai.recovery.RecoveryRepository
 import org.springframework.stereotype.Service
@@ -65,8 +65,9 @@ class CoachDataFreshnessEvaluator(
         val detailIncomplete = !REQUIRED_DETAIL_PARTS.all { it in parts } ||
             parts.values.any { it.status == DetailPartStatus.FETCH_FAILED || it.status == DetailPartStatus.MAPPING_FAILED }
         val analysis = analysisStore.find(activity.id)
-        val analysisMissingOrOutdated = isRunning &&
-            (analysis == null || analysis.analysisVersion != RUNNING_ANALYSIS_VERSION)
+        // Phase 7E-1: "current" means the current contract AND the current engine revision. A version
+        // string alone could not see the V22 engine change, so pre-V22 analyses read as fresh.
+        val analysisMissingOrOutdated = isRunning && !AnalysisReusePolicy.isCurrent(analysis)
         val streamPart = parts[DetailPayloadType.ACTIVITY_DETAILS_STREAM]
         val sampleCompleteness = streamPart?.sampleFidelity?.completeness
         return ActivityReadiness(

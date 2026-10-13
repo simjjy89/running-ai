@@ -92,6 +92,7 @@ class CoachDataRefreshServiceTest {
         }
         override fun getActivity(intervalsActivityId: String): IntervalsReadResponse = error("not scripted")
         override fun getActivity(intervalsActivityId: String, includeIntervals: Boolean): IntervalsReadResponse = error("not scripted")
+        override fun getActivityStreams(intervalsActivityId: String): IntervalsReadResponse = error("not scripted")
         override fun getWellness(oldest: LocalDate, newest: LocalDate): IntervalsReadResponse {
             wellnessCalls++
             failWith?.let { throw it }

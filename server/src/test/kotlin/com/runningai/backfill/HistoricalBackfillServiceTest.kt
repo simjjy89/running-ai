@@ -111,6 +111,7 @@ class HistoricalBackfillServiceTest {
         var wellnessResponse: () -> JsonNode = { EMPTY_ARRAY }
         var wellnessCalls = 0
         var activityDetailCalls = 0
+        var activityStreamCalls = 0
 
         override fun listActivities(oldest: LocalDate, newest: LocalDate): IntervalsReadResponse {
             listCalls += oldest to newest
@@ -121,6 +122,11 @@ class HistoricalBackfillServiceTest {
 
         override fun getActivity(intervalsActivityId: String, includeIntervals: Boolean): IntervalsReadResponse {
             activityDetailCalls++
+            return IntervalsReadResponse(EMPTY_ARRAY, IntervalsRateLimit(null, null, null))
+        }
+
+        override fun getActivityStreams(intervalsActivityId: String): IntervalsReadResponse {
+            activityStreamCalls++
             return IntervalsReadResponse(EMPTY_ARRAY, IntervalsRateLimit(null, null, null))
         }
 

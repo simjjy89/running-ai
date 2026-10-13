@@ -28,6 +28,8 @@ class ActivityAnalysisEntity(
         private set
 
     @Column(name = "analysis_version", nullable = false, length = 32) var analysisVersion: String = RUNNING_ANALYSIS_VERSION
+    @Column(name = "analysis_engine_revision", nullable = false) var analysisEngineRevision: Int = RUNNING_ANALYSIS_ENGINE_REVISION
+    @Column(name = "analysis_input_digest", length = 64) var inputDigest: String? = null
 
     @Enumerated(EnumType.STRING)
     @Column(name = "analysis_status", nullable = false, length = 24)
@@ -110,6 +112,8 @@ class ActivityAnalysisEntity(
     /** Replaces every derived value, so nothing from an earlier analysis survives a re-analysis. */
     fun apply(a: ActivityAnalysis) {
         analysisVersion = a.analysisVersion
+        analysisEngineRevision = a.analysisEngineRevision
+        inputDigest = a.inputDigest
         analysisStatus = a.status
         inputSampleCompleteness = a.inputSampleCompleteness
         computedAt = a.computedAt
@@ -182,6 +186,8 @@ class ActivityAnalysisEntity(
     fun toData(groups: List<IntervalGroup>) = ActivityAnalysis(
         activityId = activityId,
         analysisVersion = analysisVersion,
+        analysisEngineRevision = analysisEngineRevision,
+        inputDigest = inputDigest,
         status = analysisStatus,
         inputSampleCompleteness = inputSampleCompleteness,
         computedAt = computedAt,

@@ -19,6 +19,7 @@ import java.time.LocalDate;
  * <ul>
  *   <li>{@code GET /api/v1/athlete/{athleteId}/activities?oldest&newest}</li>
  *   <li>{@code GET /api/v1/activity/{activityId}[?intervals=true]}</li>
+ *   <li>{@code GET /api/v1/activity/{activityId}/streams}</li>
  *   <li>{@code GET /api/v1/athlete/{athleteId}/wellness?oldest&newest}</li>
  * </ul>
  * One request per call, no retry, no automatic back-off - a 429 stops the caller.
@@ -32,6 +33,7 @@ public class HttpIntervalsReadClient implements IntervalsReadClient {
     private static final String ACTIVITIES = "/api/v1/athlete/{athleteId}/activities";
     private static final String WELLNESS = "/api/v1/athlete/{athleteId}/wellness";
     private static final String ACTIVITY = "/api/v1/activity/{activityId}";
+    private static final String ACTIVITY_STREAMS = "/api/v1/activity/{activityId}/streams";
 
     private final Logger log = LoggerFactory.getLogger(HttpIntervalsReadClient.class);
 
@@ -67,6 +69,12 @@ public class HttpIntervalsReadClient implements IntervalsReadClient {
             }
             return uri.build(intervalsActivityId);
         });
+    }
+
+    @Override
+    public IntervalsReadResponse getActivityStreams(String intervalsActivityId) {
+        requireActivityId(intervalsActivityId);
+        return get("activity-streams", uri -> uri.path(ACTIVITY_STREAMS).build(intervalsActivityId));
     }
 
     @Override

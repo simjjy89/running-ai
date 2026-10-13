@@ -42,4 +42,15 @@ public interface IntervalsReadClient {
      * fitness-model numbers; what each field means is settled by the live contract, not by its name.
      */
     IntervalsReadResponse getWellness(LocalDate oldest, LocalDate newest);
+
+    /**
+     * Every recorded stream of one activity (Phase 7E-1), as a JSON array of stream objects.
+     * <p>
+     * Used by the importer for activities that exist only in Intervals.icu, where this is the sole
+     * source of per-second data. The endpoint takes no size or sampling parameter, so there is nothing
+     * to ask for and nothing to tune: the response is whatever Intervals.icu stored.
+     *
+     * @return the response body as received, normally a JSON array
+     */
+    IntervalsReadResponse getActivityStreams(String intervalsActivityId);
 }

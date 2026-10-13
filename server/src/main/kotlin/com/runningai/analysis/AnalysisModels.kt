@@ -10,8 +10,6 @@ import java.time.Instant
  * rating, no threshold and no good/bad classification anywhere in this package - interpreting the numbers
  * is the AI coach's job. A metric the data cannot support is `null`, never zero and never an estimate.
  */
-const val RUNNING_ANALYSIS_VERSION: String = "RUNNING_ANALYSIS_V1"
-
 /**
  * Whether the stored data could be analysed - not how the session went.
  */
@@ -147,7 +145,12 @@ data class IntervalGroup(
 /** The whole derived result for one activity. */
 data class ActivityAnalysis(
     val activityId: Long,
+    /** Output contract of the row - see [RUNNING_ANALYSIS_VERSION]. */
     val analysisVersion: String,
+    /** Engine that produced the numbers - see [RUNNING_ANALYSIS_ENGINE_REVISION]. 0 = unrecorded (V24). */
+    val analysisEngineRevision: Int,
+    /** Digest of the inputs it was computed from; null for rows stored before input tracking. */
+    val inputDigest: String?,
     val status: AnalysisStatus,
     val inputSampleCompleteness: SampleCompleteness?,
     val computedAt: Instant,

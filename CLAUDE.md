@@ -115,6 +115,17 @@ RunningAI automation (which lives only on the main PC and is NOT in this repo).
   consecutive laps sharing `intensity_type`+`workout_step_index` (V15 first-class lap columns), a group needs ACTIVE, the same
   step >=2 times, and a RECOVERY block between occurrences -- never a speed/HR pattern. `recovery_hr_drop_bpm` is the
   **RunningAI interval recovery HR change** (fixed 10 s windows), not Garmin's Recovery HR.
+  **Analysis identity is three facts, not a string (Phase 7E-1, V24):** `analysis_version` = the output CONTRACT
+  (`RUNNING_ANALYSIS_V1`, unchanged), `analysis_engine_revision` = the LOGIC that produced the numbers (0 = pre-tracking,
+  set by V24 and never produced by code; 1 = 6H-4; 2 = V22 dynamics), `analysis_input_digest` = SHA-256 of what the engine was
+  fed (activity identity metrics + every recorded `activity_detail_collection` part's status/row count/completeness + LTHR;
+  **no timestamps**, so re-collecting identical data is not a data change). `AnalysisReusePolicy` is the **single** place that
+  answers "is this stored analysis current?" - backfill reuse/VERIFY and the coach freshness evaluator all route through it, and
+  a row with no digest is never reused. **Rule: any change that can alter a value this package writes bumps
+  `RUNNING_ANALYSIS_ENGINE_REVISION` in the same commit** - every reuse decision then picks it up with no migration and no
+  manual sweep list. `POST /api/v1/activities/analysis-refresh[?dryRun=true]` sweeps every stored activity with that same
+  policy (DB-only; a failed activity keeps its previous analysis and the sweep continues). A re-analysis replaces in ONE
+  transaction after every new value exists, so a failure never destroys the stored result.
 - **Intervals.icu analysis enrichment** (Phase 6H-5; `integration.intervals` + package `enrichment`, Kotlin;
   `docs/architecture/intervals-enrichment.md`; live contract LIVE_VERIFIED 2026-10-03 on the real account). Roles never merged:
   Garmin = sensor truth, RunningAI analysis = own derived metrics, Intervals = training-load/fitness-model enrichment. Terminology:
@@ -143,11 +154,51 @@ RunningAI automation (which lives only on the main PC and is NOT in this repo).
   ingestion, analysis, 6H-5 matcher/stores, recovery syncDay); **never touches `garmin_sync_state`**; discovery always restarts
   from offset 0 on resume; caps pause as `BACKFILL_DISCOVERY_LIMIT_EXCEEDED` rather than truncating. Gates: detail outcome
   COMPLETE; NORMALIZED streams must be FULL (DOWNSAMPLED/UNKNOWN pause — never auto-retried at another maxChartSize), EMPTY
-  stream = legitimate `NO_SAMPLE_STREAM`; refetched detail always recomputes analysis (reuse only for fresh V1 + unchanged
-  detail); analysis failure pauses. Intervals: ≤31-day list windows (~3 GETs) + ONE 90-day wellness GET (the manual endpoint's
+  stream = legitimate `NO_SAMPLE_STREAM`; refetched detail always recomputes analysis, and otherwise reuse is
+  `AnalysisReusePolicy`'s answer, not a local version-string comparison (Phase 7E-1); analysis failure pauses.
+  The final VERIFY fidelity sweep covers **GARMIN-sourced activities only** (Phase 7E-1): it states what Garmin collection
+  must achieve, and an activity another source produced was never collected by this pipeline. Intervals: ≤31-day list windows (~3 GETs) + ONE 90-day wellness GET (the manual endpoint's
   31-day guard is untouched), never per-activity GETs, UNMATCHED/AMBIGUOUS continue, link conflict pauses. Start/resume refuse
   unless all four publishing switches AND both Garmin schedulers are false (`HISTORICAL_BACKFILL_UNSAFE_RUNTIME`); no external
   write anywhere. Config `running-ai.historical-backfill.*` (page-size 100, max-pages 20, max-activities 500, activity-delay 2s).
+- **Intervals.icu-only activity import** (Phase 7E-1; `integration.intervals` + `enrichment`, Kotlin;
+  `docs/architecture/intervals-activity-import.md`; live contract measured 2026-10-13 over all 27 real activities).
+  Exists because Garmin Connect holds **nothing before 2026-09-18** while 27 real sessions (2026-08-02..09-13) live only in
+  Intervals.icu, and 6H-6 is Garmin-discovery-driven so it can never reach them (measured: a 90-day re-run added 0 rows).
+  Read-only towards Intervals (`IntervalsReadClient.getActivityStreams`, GET only). Raw-first: summary ->
+  `intervals_raw_payload(ACTIVITY)`, streams -> `activity_raw_payload(INTERVALS_ICU, ACTIVITY_DETAILS_STREAM)`, each its own
+  commit -> pure mappers -> `activity` (`external_source=INTERVALS_ICU`, `external_id` = the Intervals id verbatim; **no Garmin
+  id is ever synthesised**) + `activity_detail` + `activity_sample` + `activity_intervals_metrics` (via the existing 6H-5 mapper)
+  -> `RunningActivityAnalysisService.analyseIfNeeded`. **Never a second row for a workout RunningAI already has**: the candidate
+  is matched against the stored activities of its own day by the unchanged `IntervalsActivityMatcher` - one match -> link +
+  enrich, 2+ -> `SKIPPED_AMBIGUOUS` (never auto-merged), `source=GARMIN_CONNECT` -> the 6H-5 path, 0 -> only then create.
+  Live facts that constrain the mappers: all streams of one activity share a length; `time` carries **elapsed seconds, not
+  indices** (its last value = `elapsed_time`), so a sample instant is `start_date + time[i]`; `latlng` = latitude in `data`,
+  longitude in `data2`; `icu_lap_count` is **0 on all 27**; `start_date_local` = `start_date` in the athlete zone (27/27);
+  an `OAUTH_CLIENT` `external_id` is a UUID; a `STRAVA` item is a data-less stub. **Cadence is NOT converted**: Intervals
+  reports one-leg rpm, the `cadence` column is Garmin's spm (factor 2, verified arithmetically) - the stream stays in
+  `extra_metrics` under its source key, the column stays null, and `CADENCE_SOURCE_RPM_NOT_NORMALIZED` is recorded, so
+  **cadence metrics are unavailable for imported activities**. Same for stance_time/vertical_oscillation/step_length (no column,
+  and the engine reads dynamics from laps, which these have none of). **No lap is invented** (`SPLITS` part = `EMPTY`) and
+  **Intervals HR zones are not imported** (7-zone model vs Garmin's 5 in `activity_zone`). Sample completeness is always
+  `UNKNOWN`: Intervals states no native point count and `/streams` has no size parameter, so nothing could prove FULL - which
+  is why 6H-6's final VERIFY sweep is now scoped to `external_source = GARMIN`. V25 `intervals_activity_import` is one row per
+  (athlete, Intervals activity) and is simultaneously the idempotency key, resume point, progress log, quality record and
+  cross-system provenance (`strava_activity_id` for Phase 7E-2); **re-POSTing is both the resume and the retry**, no automatic
+  retry anywhere, account-level failures stop the run. Manual only: `POST|GET /api/v1/intervals/activity-import`,
+  `POST .../{intervalsActivityId}/reprocess` (0 API calls). Off by default
+  (`RUNNING_AI_INTERVALS_ACTIVITY_IMPORT_ENABLED`) and refuses to start while any publishing switch or Garmin scheduler is on.
+  Copy-DB verified: 25 imported, 46,880 samples, re-run Δ=0 on 12 tables, kill-and-resume lossless, 0 failures.
+- **Strava / Apple Health archive recovery** (Phase 7E-1 STEP 5, preparation only; `docs/architecture/strava-archive-recovery.md`).
+  34 sessions (2026-07-02..08-26) exist only on Strava and are **confirmed unreachable** via Intervals (`/streams` -> 422
+  "Cannot read Strava activities via the API", `/file` -> 422). The join is an exact id match, not a heuristic: Intervals uses
+  the **Strava activity id itself** as its activity id for those (bare numerics), matching `activities.csv` `Activity ID`;
+  those 34 are already recorded as `SKIPPED_NO_SOURCE_DATA`. The 34 and the 27 share no Strava id, but **one pair is almost
+  certainly the same session** (Strava `19929243277` / Intervals `i180579462`, identical start second, Apple Watch `Workout`
+  with no `strava_id`) and has no RunningAI row to match against - handle it explicitly. No FIT/TCX/GPX parser exists in
+  `server/` (6H-1B decision A stands). **Nothing is implemented, and the archive's file layout is not guessed**: when it
+  arrives, read `activities.csv` first, inspect one sample file per extension, then fix the importer's scope. No scraping,
+  ever.
 - **TrainingContext V2** (Phase 6H-7; package `coach`, Kotlin; `docs/architecture/training-context-v2.md`). V1
   (`TrainingContext`/`TrainingContextBuilder`, unchanged) and V2 (`TrainingContextV2`/`TrainingContextV2Builder`) both
   implement `CoachTrainingContext` (`date`/`athlete`/`constraints`), the only type `AiCoach` depends on;

@@ -1,5 +1,6 @@
 package com.runningai.analysis
 
+import com.runningai.activity.Activity
 import com.runningai.activity.ActivityRepository
 import com.runningai.activity.ActivityType
 import com.runningai.activity.detail.ActivityDetailStore
@@ -23,6 +24,17 @@ import java.time.Instant
  * or labels anything good or bad. That reading is the AI coach's, and keeping it out of here is what lets
  * the coach be given evidence rather than a verdict it would have to trust blindly.
  */
+/**
+ * One activity after a refresh pass: the analysis that now stands, whether it was reused unchanged and,
+ * when it was not, why it had to be recomputed.
+ */
+data class AnalysisRefreshOutcome(
+    val activityId: Long,
+    val analysis: ActivityAnalysis,
+    val reused: Boolean,
+    val reanalysisReason: ReanalysisReason?,
+)
+
 @Service
 class RunningActivityAnalysisService(
     private val activities: ActivityRepository,
@@ -41,11 +53,28 @@ class RunningActivityAnalysisService(
 
     private val log = LoggerFactory.getLogger(RunningActivityAnalysisService::class.java)
 
+    /**
+     * Recomputes the analysis of one activity only when the stored one may not be reused
+     * (Phase 7E-1). The decision - and why - comes from [AnalysisReusePolicy]; this method never
+     * second-guesses it, so a future engine change reaches every caller through the one policy.
+     *
+     * A failed recomputation leaves the previously stored analysis exactly as it was: nothing is
+     * deleted before the new values exist, and the replacement is a single transaction.
+     */
+    fun analyseIfNeeded(activityId: Long): AnalysisRefreshOutcome {
+        val activity = requireActivity(activityId)
+        val digest = inputDigestOf(activity)
+        val stored = store.find(activityId)
+        return when (val decision = AnalysisReusePolicy.decide(stored, digest)) {
+            is AnalysisReuseDecision.Reuse -> AnalysisRefreshOutcome(activityId, requireNotNull(stored), true, null)
+            is AnalysisReuseDecision.Reanalyse ->
+                AnalysisRefreshOutcome(activityId, analyse(activityId), false, decision.reason)
+        }
+    }
+
     /** Recomputes and replaces the analysis of one activity. */
     fun analyse(activityId: Long): ActivityAnalysis {
-        val activity = activities.findById(activityId).orElseThrow {
-            ResourceNotFoundException("ACTIVITY_NOT_FOUND", "No activity $activityId")
-        }
+        val activity = requireActivity(activityId)
 
         val samples = detail.samples(activityId)
         val laps = detail.laps(activityId)
@@ -67,6 +96,8 @@ class RunningActivityAnalysisService(
         val analysis = ActivityAnalysis(
             activityId = activityId,
             analysisVersion = RUNNING_ANALYSIS_VERSION,
+            analysisEngineRevision = RUNNING_ANALYSIS_ENGINE_REVISION,
+            inputDigest = inputDigestOf(activity),
             status = status(session, laps.size, zones.size),
             inputSampleCompleteness = completeness,
             computedAt = Instant.now(clock),
@@ -79,13 +110,34 @@ class RunningActivityAnalysisService(
         )
         store.replace(analysis)
         log.info(
-            "Activity analysis computed: activityId={} status={} version={} samples={} intervalGroups={}",
-            activityId, analysis.status, analysis.analysisVersion, session.validSampleCount, groups.size,
+            "Activity analysis computed: activityId={} status={} version={} revision={} samples={} intervalGroups={}",
+            activityId, analysis.status, analysis.analysisVersion, analysis.analysisEngineRevision,
+            session.validSampleCount, groups.size,
         )
         return analysis
     }
 
     fun find(activityId: Long): ActivityAnalysis? = store.find(activityId)
+
+    /**
+     * What a refresh would do for [activityId], without doing it. DB-only, and the same policy the
+     * refresh itself uses, so a dry run can never disagree with the run it previews.
+     */
+    fun reuseDecision(activityId: Long): AnalysisReuseDecision {
+        val activity = requireActivity(activityId)
+        return AnalysisReusePolicy.decide(store.find(activityId), inputDigestOf(activity))
+    }
+
+    /**
+     * Digest of what this service reads for [activity] - see [AnalysisInputFingerprint]. Derived from
+     * the recorded collection parts rather than the sample rows, so asking the question stays cheap.
+     */
+    private fun inputDigestOf(activity: Activity): String =
+        AnalysisInputFingerprint.of(activity, detail.collection(activity.id), lactateThresholdHrOf(activity.athleteId))
+
+    private fun requireActivity(activityId: Long): Activity = activities.findById(activityId).orElseThrow {
+        ResourceNotFoundException("ACTIVITY_NOT_FOUND", "No activity $activityId")
+    }
 
     private fun lactateThresholdHrOf(athleteId: Long): Int? =
         profiles.findByAthleteId(athleteId).orElse(null)?.lactateThresholdHeartRateBpm

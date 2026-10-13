@@ -19,6 +19,7 @@ import com.runningai.analysis.IntervalGroup
 import com.runningai.analysis.IntervalRepetition
 import com.runningai.analysis.LapMetrics
 import com.runningai.analysis.RecoveryHrChange
+import com.runningai.analysis.RUNNING_ANALYSIS_ENGINE_REVISION
 import com.runningai.analysis.SessionMetrics
 import com.runningai.analysis.ThresholdExposure
 import com.runningai.analysis.ZoneExposure
@@ -132,6 +133,8 @@ class TrainingContextV2BuilderTest {
         val a = ActivityAnalysis(
             activityId = activityId,
             analysisVersion = "RUNNING_ANALYSIS_V1",
+            analysisEngineRevision = RUNNING_ANALYSIS_ENGINE_REVISION,
+            inputDigest = null,
             status = status,
             inputSampleCompleteness = SampleCompleteness.FULL,
             computedAt = Instant.now(),

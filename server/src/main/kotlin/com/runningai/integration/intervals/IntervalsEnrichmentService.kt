@@ -156,12 +156,31 @@ class IntervalsEnrichmentService(
 
     /** Stored link + metrics of one activity, no network. */
     fun view(activityId: Long): ActivityIntervalsView {
-        requireActivity(activityId)
+        val activity = requireActivity(activityId)
         val link = store.findLink(activityId, ExternalSource.INTERVALS_ICU)
+            ?: selfIdentityOf(activity)
             ?: throw ResourceNotFoundException("INTERVALS_ENRICHMENT_NOT_FOUND",
                 "Activity $activityId has no Intervals.icu enrichment")
         return ActivityIntervalsView(activityId, link, store.findMetrics(activityId))
     }
+
+    /**
+     * The Intervals identity of an activity that was IMPORTED from Intervals.icu (Phase 7E-1).
+     *
+     * Such a row carries its Intervals id as its own external identity, so no `activity_source_link`
+     * exists - and writing a self-referential link would claim a match method ("the payload names an
+     * upstream id") that never happened. The identity is read off the activity instead, with zero match
+     * evidence because no matching took place: it IS the activity.
+     */
+    private fun selfIdentityOf(activity: Activity): ActivitySourceLinkData? =
+        if (activity.externalSource != ExternalSource.INTERVALS_ICU) {
+            null
+        } else {
+            ActivitySourceLinkData(
+                activity.id, ExternalSource.INTERVALS_ICU, activity.externalId, MatchMethod.SOURCE_ID,
+                MatchEvidence(null, null, null), activity.createdAt,
+            )
+        }
 
     /**
      * Fetches the wellness range (one GET) and upserts each day's fitness-model snapshot. The range is

@@ -115,6 +115,17 @@ running-ai:
     api-key: ${INTERVALS_API_KEY:}
     connect-timeout: 3s
     read-timeout: 15s
+    activity-import:
+      # Import of activities that exist ONLY in Intervals.icu (Phase 7E-1,
+      # POST /api/v1/intervals/activity-import). Read-only towards Intervals.icu; it cannot publish.
+      # OFF by default: this is the only path in the repo that creates activity rows from a source
+      # other than Garmin, and it also refuses to start while any publishing switch or Garmin
+      # scheduler is on. No scheduler, no startup run, no MCP tool - an explicit POST is the only
+      # trigger, and re-POSTing is both the resume and the retry.
+      enabled: ${RUNNING_AI_INTERVALS_ACTIVITY_IMPORT_ENABLED:false}
+      max-range-days: 120
+      max-activities: 200
+      activity-delay: 1s
 
   historical-backfill:
     # Manual 90-day historical backfill (Phase 6H-6, POST /api/v1/historical-backfill). No scheduler, no

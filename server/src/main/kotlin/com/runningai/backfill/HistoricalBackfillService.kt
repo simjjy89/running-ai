@@ -7,6 +7,8 @@ import com.runningai.activity.detail.DetailCollectionOutcome
 import com.runningai.activity.detail.DetailPartStatus
 import com.runningai.activity.detail.DetailPayloadType
 import com.runningai.activity.detail.SampleCompleteness
+import com.runningai.analysis.AnalysisReusePolicy
+import com.runningai.analysis.RUNNING_ANALYSIS_ENGINE_REVISION
 import com.runningai.analysis.RUNNING_ANALYSIS_VERSION
 import com.runningai.analysis.RunningActivityAnalysisService
 import com.runningai.athlete.AthleteService
@@ -243,17 +245,17 @@ class HistoricalBackfillService(
                     detailChanged = item.detailStatus == BackfillDetailStatus.COLLECTED && item.analysisStatus == null
                 }
 
-                val existingAnalysis = analysisService.find(activityId)
-                val analysis = if (!detailChanged && existingAnalysis?.analysisVersion == RUNNING_ANALYSIS_VERSION) {
-                    existingAnalysis
-                } else {
-                    try {
-                        analysisService.analyse(activityId)
-                    } catch (e: Exception) {
-                        store.updateItem(itemId) { it.lastErrorCode = "ANALYSIS_FAILED" }
-                        throw BackfillPauseException("ANALYSIS_FAILED",
-                            "Analysis failed for a backfill activity: ${e.javaClass.simpleName}")
-                    }
+                // Phase 7E-1: whether the stored analysis may be reused is AnalysisReusePolicy's answer,
+                // not a local rule. The local rule compared the version string alone, which could not see
+                // an engine change (Phase 7E-0 §3.7: 7 pre-V22 analyses were reused forever). `detailChanged`
+                // stays as an additional reason to recompute - this run knows it refetched - but it can no
+                // longer be the only one.
+                val analysis = try {
+                    if (detailChanged) analysisService.analyse(activityId) else analysisService.analyseIfNeeded(activityId).analysis
+                } catch (e: Exception) {
+                    store.updateItem(itemId) { it.lastErrorCode = "ANALYSIS_FAILED" }
+                    throw BackfillPauseException("ANALYSIS_FAILED",
+                        "Analysis failed for a backfill activity: ${e.javaClass.simpleName}")
                 }
                 store.updateItem(itemId) { it.analysisStatus = analysis.status.name }
                 store.updateRun(runId) { it.completedActivityCount = it.completedActivityCount + 1 }
@@ -345,8 +347,9 @@ class HistoricalBackfillService(
             }
             val analysis = analysisService.find(activityId)
                 ?: throw BackfillPauseException("VERIFY_ANALYSIS_MISSING", "No stored analysis")
-            if (analysis.analysisVersion != RUNNING_ANALYSIS_VERSION) {
-                throw BackfillPauseException("VERIFY_ANALYSIS_VERSION", "Analysis is not $RUNNING_ANALYSIS_VERSION")
+            if (!AnalysisReusePolicy.isCurrent(analysis)) {
+                throw BackfillPauseException("VERIFY_ANALYSIS_VERSION",
+                    "Analysis is not $RUNNING_ANALYSIS_VERSION revision $RUNNING_ANALYSIS_ENGINE_REVISION")
             }
             when (item.intervalsStatus) {
                 null -> throw BackfillPauseException("VERIFY_INTERVALS_STATUS_MISSING", "Intervals matching never ran")
@@ -364,7 +367,13 @@ class HistoricalBackfillService(
         val from = run.startDate.atStartOfDay(zone).toInstant()
         val toExclusive = run.endDate.plusDays(1).atStartOfDay(zone).toInstant()
         activities.findByAthleteIdAndStartedAtGreaterThanEqualAndStartedAtLessThan(run.athleteId, from, toExclusive)
+            .filter { it.externalSource == ExternalSource.GARMIN }
             .forEach { activity ->
+                // Garmin-sourced only (Phase 7E-1). This sweep states what GARMIN collection must achieve:
+                // every point Garmin says the activity has. An activity imported from another source was
+                // never collected by this pipeline and reports the fidelity ITS source supports, so judging
+                // it by Garmin's gate would pause a Garmin backfill over data the backfill did not fetch
+                // and cannot repair.
                 val record = detailStore.part(activity.id, DetailPayloadType.ACTIVITY_DETAILS_STREAM) ?: return@forEach
                 // A legitimately EMPTY stream has nothing to be complete about; only a stored stream
                 // must prove it is FULL.

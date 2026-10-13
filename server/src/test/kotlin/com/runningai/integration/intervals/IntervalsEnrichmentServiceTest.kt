@@ -76,6 +76,11 @@ class IntervalsEnrichmentServiceTest {
             error("not scripted in these tests")
         }
 
+        override fun getActivityStreams(intervalsActivityId: String): IntervalsReadResponse {
+            calls++
+            error("not scripted in these tests")
+        }
+
         override fun getWellness(oldest: LocalDate, newest: LocalDate): IntervalsReadResponse {
             calls++
             lastOldest = oldest

@@ -11,6 +11,7 @@ import com.runningai.analysis.ActivityAnalysisStore
 import com.runningai.analysis.AnalysisStatus
 import com.runningai.analysis.HalfSplitMetrics
 import com.runningai.analysis.LapMetrics
+import com.runningai.analysis.RUNNING_ANALYSIS_ENGINE_REVISION
 import com.runningai.analysis.RunningDynamicsMetrics
 import com.runningai.analysis.SessionMetrics
 import com.runningai.analysis.ThresholdExposure
@@ -140,6 +141,8 @@ class McpReadServerApiTest {
         analysisStore.replace(ActivityAnalysis(
             activityId = activityId,
             analysisVersion = "RUNNING_ANALYSIS_V1",
+            analysisEngineRevision = RUNNING_ANALYSIS_ENGINE_REVISION,
+            inputDigest = null,
             status = AnalysisStatus.COMPLETE,
             inputSampleCompleteness = SampleCompleteness.FULL,
             computedAt = Instant.now(clock),

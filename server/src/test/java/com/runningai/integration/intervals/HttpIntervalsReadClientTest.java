@@ -65,7 +65,8 @@ class HttpIntervalsReadClientTest {
                 .distinct()
                 .toList();
 
-        assertThat(methods).containsExactlyInAnyOrder("listActivities", "getActivity", "getWellness");
+        assertThat(methods).containsExactlyInAnyOrder(
+                "listActivities", "getActivity", "getActivityStreams", "getWellness");
         assertThat(methods).noneMatch(name -> name.matches("(?i).*(create|update|delete|publish|post|put|write|save).*"));
     }
 
@@ -79,12 +80,15 @@ class HttpIntervalsReadClientTest {
                 .andExpect(method(GET)).andRespond(withSuccess("{}", MediaType.APPLICATION_JSON));
         f.server().expect(once(), requestTo(BASE + "/api/v1/activity/i12345?intervals=true"))
                 .andExpect(method(GET)).andRespond(withSuccess("{}", MediaType.APPLICATION_JSON));
+        f.server().expect(once(), requestTo(BASE + "/api/v1/activity/i12345/streams"))
+                .andExpect(method(GET)).andRespond(withSuccess("[]", MediaType.APPLICATION_JSON));
         f.server().expect(once(), requestTo(BASE + "/api/v1/athlete/0/wellness?oldest=2026-09-28&newest=2026-09-28"))
                 .andExpect(method(GET)).andRespond(withSuccess("[]", MediaType.APPLICATION_JSON));
 
         f.client().listActivities(day, day);
         f.client().getActivity("i12345");
         f.client().getActivity("i12345", true);
+        f.client().getActivityStreams("i12345");
         f.client().getWellness(day, day);
 
         f.server().verify();

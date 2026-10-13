@@ -251,6 +251,7 @@ class ReadMcpTools(
 
     private fun analysisBody(a: ActivityAnalysis): Map<String, Any?> = linkedMapOf(
         "analysisVersion" to a.analysisVersion,
+        "analysisEngineRevision" to a.analysisEngineRevision,
         "status" to a.status.name,
         "inputSampleCompleteness" to a.inputSampleCompleteness?.name,
         "computedAt" to a.computedAt.toString(),
