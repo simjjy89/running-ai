@@ -42,6 +42,13 @@ dependencies {
     implementation 'org.flywaydb:flyway-core'
     implementation 'org.flywaydb:flyway-database-postgresql'
 
+    // The official Garmin FIT SDK (Phase 7E-2). Needed because the Strava archive ships every
+    // activity as a .fit.gz and FIT is a binary, profile-driven format: field meaning depends on a
+    // version-specific message profile, so it cannot be read correctly with ad-hoc parsing. This is
+    // the format owner's own decoder, published by Garmin on Maven Central, and it is used for
+    // DECODING ONLY - nothing in this repo writes a FIT file.
+    implementation 'com.garmin:fit:21.176.0'
+
     // Kotlin (Phase 6E). Versions come from the Spring Boot BOM, not pinned here.
     implementation 'org.jetbrains.kotlin:kotlin-reflect'
     implementation 'com.fasterxml.jackson.module:jackson-module-kotlin'

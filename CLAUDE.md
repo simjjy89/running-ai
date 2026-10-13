@@ -189,16 +189,40 @@ RunningAI automation (which lives only on the main PC and is NOT in this repo).
   `POST .../{intervalsActivityId}/reprocess` (0 API calls). Off by default
   (`RUNNING_AI_INTERVALS_ACTIVITY_IMPORT_ENABLED`) and refuses to start while any publishing switch or Garmin scheduler is on.
   Copy-DB verified: 25 imported, 46,880 samples, re-run Δ=0 on 12 tables, kill-and-resume lossless, 0 failures.
-- **Strava / Apple Health archive recovery** (Phase 7E-1 STEP 5, preparation only; `docs/architecture/strava-archive-recovery.md`).
-  34 sessions (2026-07-02..08-26) exist only on Strava and are **confirmed unreachable** via Intervals (`/streams` -> 422
-  "Cannot read Strava activities via the API", `/file` -> 422). The join is an exact id match, not a heuristic: Intervals uses
-  the **Strava activity id itself** as its activity id for those (bare numerics), matching `activities.csv` `Activity ID`;
-  those 34 are already recorded as `SKIPPED_NO_SOURCE_DATA`. The 34 and the 27 share no Strava id, but **one pair is almost
-  certainly the same session** (Strava `19929243277` / Intervals `i180579462`, identical start second, Apple Watch `Workout`
-  with no `strava_id`) and has no RunningAI row to match against - handle it explicitly. No FIT/TCX/GPX parser exists in
-  `server/` (6H-1B decision A stands). **Nothing is implemented, and the archive's file layout is not guessed**: when it
-  arrives, read `activities.csv` first, inspect one sample file per extension, then fix the importer's scope. No scraping,
-  ever.
+- **Strava archive import** (Phase 7E-2; package `integration.strava` + `enrichment`, Kotlin;
+  `docs/architecture/strava-archive-import.md`; measured over the athlete's real 94-activity export).
+  Supersedes the 7E-1 preparation note `strava-archive-recovery.md`. Exists because these activities are
+  reachable by **no API** (Intervals answers `422 Cannot read Strava activities via the API` for every one, Garmin has
+  nothing before 2026-09-18), so the source is a **local directory** holding the unpacked export - there is no Strava HTTP
+  client in this repo and none is to be added, and nothing scrapes anything. Dependency `com.garmin:fit` (official FIT SDK,
+  **decode only** - FIT is profile-driven binary, so ad-hoc parsing cannot read it correctly; nothing here writes a FIT file).
+  **The join is exact, never heuristic**: Strava re-encodes each Apple Health workout to FIT and stamps the developer field
+  `apple_health_uuid` into the session message, and that value equals Intervals.icu's `external_id` character-for-character
+  (measured 27/27, 0 contradictions; it also proved `i180579462` = Strava `19929243277`, a Stair-Stepper Intervals holds
+  **twice**). Identity = `apple_health_uuid` -> Strava activity id; no match -> new activity, but a +/-120 s start-time
+  collision against any non-Strava activity yields `SKIPPED_AMBIGUOUS` rather than a possible duplicate. **A stored value is
+  never overwritten**: the archive and Intervals are two INDEPENDENT exports of the same workout, each missing what the other
+  has (Intervals has HR on 100 % of samples where the August FITs have none; the FIT has far more running power and the laps
+  Intervals reports as `icu_lap_count`=0), so enrichment fills **NULL only** and stamps `"<metric>_source":"STRAVA_FIT"` into
+  `extra_metrics`; laps are written only where there are none, except that laps **this importer wrote itself** may be
+  rewritten (tracked via `laps_written`, so a mapper fix can reach them) - Garmin's own laps are never touched. A FIT record
+  matching no stored sample is **dropped, never appended**. **The FIT sport decides the type, not the Strava label** (the
+  export says "Ride" for files that record `cycling`/`indoor_cycling`); an unmapped sport is refused, so strength/walk/stairs
+  stay out rather than being approximated, and an *outdoor* ride has no `ActivityType`. **Cadence is NOT converted** (FIT =
+  one-leg rpm, the column is spm) - same decision as 7E-1. **Interval GROUPS stay underivable** for Strava-sourced laps: the
+  re-encode carries no `intensity` and no `wkt_step_index` (only `lap_trigger=manual`), so laps and lap metrics are restored
+  but groups are correctly empty and the reason is flagged - inferring ACTIVE/RECOVERY from pace is banned. Lap average speed
+  is **RunningAI-derived** distance/time, marked `average_speed_source=DERIVED_DISTANCE_OVER_TIME`. `sample_completeness` is
+  **FULL** here (a FIT activity file IS the device recording and states its own count), unlike the Intervals stream's UNKNOWN.
+  V26 `strava_activity_import` is one row per (athlete, Strava activity) carrying the file's SHA-256, and is at once the
+  idempotency key, resume point, progress log, quality record and provenance; **re-POSTing is both the resume and the retry**,
+  one unreadable file never stops the rest. Manual only: `POST|GET /api/v1/strava/archive-import`, off by default
+  (`RUNNING_AI_STRAVA_ARCHIVE_IMPORT_ENABLED`, path `RUNNING_AI_STRAVA_ARCHIVE_PATH` which **must live outside the repo** -
+  the export holds real GPS). Refuses to start while any publishing switch or Garmin scheduler is on. **The importer calls
+  `analyse()` directly when it wrote laps or filled samples**: `analysis_input_digest` summarises a part by status and ROW
+  COUNT, so a lap set replaced by the same number of richer laps looks identical to it - the component that changed the data
+  states it rather than letting the digest infer it. Copy-DB verified: 15 imported, 33 enriched (116 laps, 18,541 samples),
+  46 unsupported recorded, 0 ambiguous, 0 failures, re-run delta=0 on 17 tables, kill-and-resume lossless.
 - **TrainingContext V2** (Phase 6H-7; package `coach`, Kotlin; `docs/architecture/training-context-v2.md`). V1
   (`TrainingContext`/`TrainingContextBuilder`, unchanged) and V2 (`TrainingContextV2`/`TrainingContextV2Builder`) both
   implement `CoachTrainingContext` (`date`/`athlete`/`constraints`), the only type `AiCoach` depends on;

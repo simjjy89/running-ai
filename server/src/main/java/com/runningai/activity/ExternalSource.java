@@ -7,5 +7,7 @@ package com.runningai.activity;
 public enum ExternalSource {
     GARMIN,
     INTERVALS_ICU,
+    /** The athlete's own Strava data export (Phase 7E-2); the id is the Strava activity id. */
+    STRAVA,
     MANUAL
 }

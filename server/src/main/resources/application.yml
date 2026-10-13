@@ -127,6 +127,21 @@ running-ai:
       max-activities: 200
       activity-delay: 1s
 
+  strava:
+    archive-import:
+      # Import of the athlete's own Strava data export (Phase 7E-2,
+      # POST /api/v1/strava/archive-import). The source is a LOCAL DIRECTORY, not an API: these
+      # activities are unreachable over any API (Intervals.icu answers 422 "Cannot read Strava
+      # activities via the API" for every one of them), and no Strava HTTP client exists in this repo.
+      # OFF by default for the same reason as the Intervals importer - it creates activity rows - and
+      # it refuses to start while any publishing switch or Garmin scheduler is on. No scheduler, no
+      # startup run, no MCP tool; re-POSTing is both the resume and the retry.
+      enabled: ${RUNNING_AI_STRAVA_ARCHIVE_IMPORT_ENABLED:false}
+      # Directory holding the unpacked export (activities.csv + activities/). MUST live outside the
+      # repository: the export contains the athlete's real GPS traces. Read-only, never written to.
+      archive-path: ${RUNNING_AI_STRAVA_ARCHIVE_PATH:}
+      max-activities: 200
+
   historical-backfill:
     # Manual 90-day historical backfill (Phase 6H-6, POST /api/v1/historical-backfill). No scheduler, no
     # auto-resume. activity-delay sits between two activities whose detail is actually fetched from
