@@ -24,6 +24,9 @@
   scripts\dev\start-dev-spring.ps1 -Port 18081 -Database running_ai_7d_smoke
 .EXAMPLE
   scripts\dev\start-dev-spring.ps1 -Port 18082 -Database running_ai_realcopy -IntervalsLive
+.EXAMPLE
+  # Phase 7F-2 real-publish validation: the ONLY supported way to let a dev instance write a workout.
+  scripts\dev\start-dev-spring.ps1 -Port 18083 -Database running_ai_7f2 -IntervalsLive -DraftPublishLive
 #>
 [CmdletBinding()]
 param(
@@ -37,6 +40,11 @@ param(
     [string]$StravaArchive,
     # Enables the Phase 7E-1 Intervals-only activity importer. Needs -IntervalsLive to reach the API.
     [switch]$IntervalsImport,
+    # Phase 7F-2: allows this dev instance to WRITE one approved AI draft to the real Intervals.icu
+    # calendar (POST /api/v1/workout-drafts/{id}/publish). Needs -IntervalsLive for the credential.
+    # Legacy date-based publishing and both Garmin schedulers stay off regardless, so the only way a
+    # write can happen is an explicit publish request for a draft a human already approved.
+    [switch]$DraftPublishLive,
     [string]$CanonicalEnv = 'C:\running-ai-github\.env',
     [switch]$Stop
 )
@@ -50,6 +58,9 @@ $taskName = "RunningAI-Dev-Spring-$Port"
 
 if ($Database -eq 'running_ai') { throw "refusing to start a dev instance against the PRODUCTION database 'running_ai'." }
 if ($Port -eq 18080)            { throw "refusing to use the production port 18080." }
+if ($DraftPublishLive -and -not $IntervalsLive) {
+    throw "-DraftPublishLive needs -IntervalsLive: without a credential no publish could reach Intervals.icu anyway."
+}
 
 if ($Stop) {
     cmd.exe /c "schtasks.exe /End /TN $taskName >nul 2>&1"
@@ -100,7 +111,7 @@ $springArgs = @(
     "--running-ai.coach.context-version=V2"
     "--running-ai.workout-publishing.enabled=false"
     "--running-ai.workout-publishing.scheduler.enabled=false"
-    "--running-ai.draft-publishing.enabled=false"
+    "--running-ai.draft-publishing.enabled=$($DraftPublishLive.IsPresent.ToString().ToLowerInvariant())"
     "--running-ai.garmin.scheduler.enabled=false"
     "--running-ai.garmin.profile-sync.scheduler.enabled=false"
     "--running-ai.coach.refresh.scheduler.enabled=false"
@@ -145,6 +156,10 @@ if ($LASTEXITCODE -ne 0) { throw "schtasks /Create failed ($LASTEXITCODE)" }
 schtasks.exe /Run /TN $taskName | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "schtasks /Run failed ($LASTEXITCODE)" }
 
+if ($DraftPublishLive) {
+    Write-Output "[dev-spring] WARNING: draft publishing is ON - an explicit POST /api/v1/workout-drafts/{id}/publish"
+    Write-Output "[dev-spring]          on this instance WILL write to the real Intervals.icu calendar."
+}
 Write-Output "[dev-spring] task $taskName started: port=$Port db=$Database jar=$($jar.Name)"
 Write-Output "[dev-spring] log: $log"
 
