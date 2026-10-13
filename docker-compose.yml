@@ -16,7 +16,14 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-running_ai}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-running_ai}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      # Loopback ONLY (Phase 7E-4, RISK-H3). Without the host IP Docker publishes on every
+      # interface (0.0.0.0 and [::]), and Docker Desktop's publishing bypasses the Windows
+      # Firewall - which is how 5432 came to accept cleartext superuser connections from the LAN
+      # and the tailnet (measured in Phase 7D-2, re-measured in 7E-3). Every known client is on
+      # this host: production Spring, the dev instances, and `docker exec psql` (which never
+      # leaves the container). Pair this with DB_URL=jdbc:postgresql://127.0.0.1:5432/... because
+      # `localhost` resolves to ::1 first here and this binding publishes IPv4 only.
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - running_ai_postgres_data:/var/lib/postgresql/data
     healthcheck:
