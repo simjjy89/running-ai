@@ -59,6 +59,10 @@ const backend = http.createServer((req, res) => {
           { name: 'ping_running_ai', annotations: { readOnlyHint: true } },
           // deliberately misbehaving backend: lists a write tool, which the gateway must filter out
           { name: 'publish_workout', annotations: { readOnlyHint: false } },
+          // the 7F-1 lifecycle tools: visible only to a token that actually holds their scope
+          { name: 'create_workout_draft', annotations: { readOnlyHint: false } },
+          { name: 'approve_workout_draft', annotations: { readOnlyHint: false } },
+          { name: 'publish_approved_draft', annotations: { readOnlyHint: false } },
         ] }
       : { content: [{ type: 'text', text: '{"ok":true}' }], structuredContent: { ok: true, tool: msg.params && msg.params.name }, isError: false };
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -94,7 +98,8 @@ const gateway = spawn(process.execPath, [GATEWAY], {
     RUNNING_AI_OAUTH_AUDIENCE: AUDIENCE,
     RUNNING_AI_ALLOWED_SUB: SUB,
     RUNNING_AI_PUBLIC_BASE_URL: PUBLIC_BASE,
-    RUNNING_AI_ALLOWED_TOOLS: 'ping_running_ai',
+    RUNNING_AI_ALLOWED_TOOLS:
+      'ping_running_ai,create_workout_draft,approve_workout_draft,publish_approved_draft',
   },
   stdio: ['ignore', 'pipe', 'inherit'],
 });
@@ -178,6 +183,115 @@ try {
   assert('authorized allowlisted tools/call is proxied and answers',
     ping.status === 200 && ping.body.result && ping.body.result.structuredContent.ok === true);
   assert('exactly the two authorized requests reached the backend', backendHits === 2);
+
+  // ---- Phase 7F-1: per-tool scope separation --------------------------------------------------
+  // The property under test: a read-only connection cannot create, revise, approve or publish
+  // training - it cannot even see those tools - and holding the publish scope is not implied by
+  // holding the train scope. Every refusal must leave the backend untouched.
+  process.stdout.write('per-tool scope separation (7F-1):\n');
+  const READ = 'runningai:read';
+  const TRAIN = `${READ} runningai:train`;
+  const PUBLISH = `${TRAIN} runningai:publish`;
+  const call = (name) => ({ jsonrpc: '2.0', id: 50, method: 'tools/call', params: { name, arguments: {} } });
+  const namesFor = async (scope) =>
+    (await mcp(LIST, await token({ scope }))).body.result.tools.map((t) => t.name);
+
+  const readNames = await namesFor(READ);
+  assert('read-only token sees NO training tool in tools/list',
+    readNames.includes('ping_running_ai') &&
+    !readNames.includes('create_workout_draft') &&
+    !readNames.includes('approve_workout_draft') &&
+    !readNames.includes('publish_approved_draft'));
+
+  let before = backendHits;
+  for (const tool of ['create_workout_draft', 'approve_workout_draft', 'publish_approved_draft']) {
+    const refused = await mcp(call(tool), await token({ scope: READ }));
+    assert(`read-only token calling ${tool} -> 403 insufficient_scope, not proxied`,
+      refused.status === 403 && /insufficient_scope/.test(refused.www || '') && backendHits === before);
+  }
+
+  const trainNames = await namesFor(TRAIN);
+  assert('train token sees the draft tools but NOT the publish tool',
+    trainNames.includes('create_workout_draft') && trainNames.includes('approve_workout_draft') &&
+    !trainNames.includes('publish_approved_draft'));
+
+  before = backendHits;
+  const created = await mcp(call('create_workout_draft'), await token({ scope: TRAIN }));
+  assert('train token calling create_workout_draft is proxied',
+    created.status === 200 && created.body.result && backendHits === before + 1);
+  const publishDenied = await mcp(call('publish_approved_draft'), await token({ scope: TRAIN }));
+  assert('scopes are NOT hierarchical: train alone cannot publish -> 403, not proxied',
+    publishDenied.status === 403 && backendHits === before + 1);
+
+  const publishNames = await namesFor(PUBLISH);
+  assert('publish token sees all enabled tools', publishNames.includes('publish_approved_draft'));
+  before = backendHits;
+  const published = await mcp(call('publish_approved_draft'), await token({ scope: PUBLISH }));
+  assert('publish token calling publish_approved_draft is proxied',
+    published.status === 200 && published.body.result && backendHits === before + 1);
+
+  before = backendHits;
+  assert('the base scope is still required: a train-only token cannot even list -> 403',
+    (await mcp(LIST, await token({ scope: 'runningai:train' }))).status === 403 && backendHits === before);
+  const stillBanned = await mcp(call('publish_workout'), await token({ scope: PUBLISH }));
+  assert('publish_workout stays unreachable even with every scope -> -32602, not proxied',
+    stillBanned.status === 200 && stillBanned.body.error && stillBanned.body.error.code === -32602 &&
+    backendHits === before);
+  const unknownTool = await mcp(call('delete_everything'), await token({ scope: PUBLISH }));
+  assert('an unknown tool is refused even with every scope -> -32602, not proxied',
+    unknownTool.body.error && unknownTool.body.error.code === -32602 && backendHits === before);
+  const foreignWithScopes = await mcp(call('create_workout_draft'),
+    await token({ scope: PUBLISH, sub: 'auth0|someone-else' }));
+  assert('a foreign subject is refused however many scopes the token carries -> 403, not proxied',
+    foreignWithScopes.status === 403 && backendHits === before);
+
+  const meta7f = await (await fetch(`${BASE}/.well-known/oauth-protected-resource`)).json();
+  assert('metadata advertises exactly the scopes the enabled tools require',
+    meta7f.scopes_supported.includes('runningai:read') &&
+    meta7f.scopes_supported.includes('runningai:train') &&
+    meta7f.scopes_supported.includes('runningai:publish'));
+
+  // A gateway started with NO new configuration - production's current one - must be unchanged by
+  // 7F-1: the same seven read tools, the same single advertised scope, the same resource name, and
+  // no training tool reachable even by a token that carries every scope.
+  process.stdout.write('backwards compatibility of an unchanged (read-only) gateway:\n');
+  const legacyPort = GATEWAY_PORT + 7;
+  const legacy = spawn(process.execPath, [GATEWAY], {
+    env: { ...process.env,
+      RUNNING_AI_GATEWAY_PORT: String(legacyPort),
+      RUNNING_AI_GATEWAY_TARGET_URL: `http://127.0.0.1:${BACKEND_PORT}/mcp`,
+      RUNNING_AI_OAUTH_ISSUER: ISSUER, RUNNING_AI_OAUTH_AUDIENCE: AUDIENCE,
+      RUNNING_AI_ALLOWED_SUB: SUB, RUNNING_AI_PUBLIC_BASE_URL: PUBLIC_BASE },
+    stdio: ['ignore', 'pipe', 'inherit'],
+  });
+  await new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error('legacy gateway did not start')), 5000);
+    legacy.stdout.on('data', (d) => { if (String(d).includes('GATEWAY_STARTED')) { clearTimeout(t); resolve(); } });
+  });
+  try {
+    const legacyBase = `http://127.0.0.1:${legacyPort}`;
+    const legacyMeta = await (await fetch(`${legacyBase}/.well-known/oauth-protected-resource`)).json();
+    assert('an unconfigured gateway still advertises exactly runningai:read',
+      JSON.stringify(legacyMeta.scopes_supported) === JSON.stringify(['runningai:read']) &&
+      legacyMeta.resource_name === 'RunningAI MCP (read-only)');
+    const hitsBeforeLegacy = backendHits;
+    const legacyCall = await fetch(`${legacyBase}/mcp`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${await token({ scope: PUBLISH })}` },
+      body: JSON.stringify(call('create_workout_draft')),
+    });
+    const legacyBody = await legacyCall.json();
+    assert('a training tool is unreachable on an unconfigured gateway even with every scope',
+      legacyBody.error && legacyBody.error.code === -32602 && backendHits === hitsBeforeLegacy);
+    const legacyList = await fetch(`${legacyBase}/mcp`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${await token()}` },
+      body: JSON.stringify(LIST),
+    });
+    const legacyTools = (await legacyList.json()).result.tools.map((t) => t.name);
+    assert('and its tools/list still exposes no training tool',
+      legacyTools.every((n) => !n.startsWith('create_') && !n.startsWith('approve_') && !n.startsWith('publish_')));
+  } finally { legacy.kill(); }
 
   process.stdout.write('fail closed on JWKS outage:\n');
   await new Promise((r) => asServer.close(r));

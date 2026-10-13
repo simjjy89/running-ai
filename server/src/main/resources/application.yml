@@ -25,7 +25,8 @@ spring:
       server:
         # MCP server (Spring AI 1.1.x, Phase 6C). Its own default is ON; RunningAI turns it on exactly when at
         # least one tool group is enabled - running-ai.mcp.enabled (write adapter, publish_workout) OR
-        # running-ai.mcp.read-enabled (Phase 7C-2a read-only tools). YAML cannot express that OR, so the effective
+        # running-ai.mcp.read-enabled (Phase 7C-2a read-only tools) OR running-ai.mcp.train-enabled (Phase 7F-1
+        # draft/approve/publish lifecycle tools). YAML cannot express that OR, so the effective
         # value is computed by McpServerSwitchEnvironmentPostProcessor (which overrides this line); the binding
         # below is kept as documentation of the pre-7C-2a behaviour and as a fallback. Streamable HTTP in
         # stateless mode on POST /mcp; only explicitly registered tools are exposed (no resources / prompts /
@@ -57,6 +58,14 @@ running-ai:
     # publish_workout is not registered at all. The tools read stored data only - no DB change, no
     # Garmin/Intervals call, no draft, no publish, no sync or re-analysis trigger.
     read-enabled: ${RUNNINGAI_MCP_READ_ENABLED:false}
+    # Switch of the TRAINING-LIFECYCLE MCP tools (Phase 7F-1: create_workout_draft, get_workout_draft,
+    # revise_workout_draft, approve_workout_draft, preview_draft_publish, publish_approved_draft).
+    # OFF by default and independent of the two switches above. These tools WRITE: they store drafts,
+    # record the athlete's approval and - for publish_approved_draft only - send an approved workout
+    # to Intervals.icu. Turning this on is still not enough to publish: publish_approved_draft goes
+    # through ApprovedWorkoutDraftPublishService, which refuses while running-ai.draft-publishing.enabled
+    # is false (and that flag cannot be true at the same time as workout-publishing.enabled).
+    train-enabled: ${RUNNINGAI_MCP_TRAIN_ENABLED:false}
   default-athlete:
     name: ${RUNNING_AI_ATHLETE_NAME:default}
     timezone: ${RUNNING_AI_ATHLETE_TIMEZONE:Asia/Seoul}

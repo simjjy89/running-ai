@@ -52,6 +52,26 @@ RunningAI automation (which lives only on the main PC and is NOT in this repo).
   Spring AI 2.x / Boot 4 for this), Streamable HTTP stateless on `POST /mcp`, exactly one tool `publish_workout({"date":"YYYY-MM-DD"})` that only
   calls `WorkoutPublishApplicationService` (master switch still applies). `RUNNINGAI_MCP_ENABLED` (`running-ai.mcp.enabled`) = false also switches
   the Spring AI server off (its own default is on). `/mcp` has no auth: never expose it publicly; remote ChatGPT transport is not set up.
+- **Training-lifecycle MCP tools, off by default** (Phase 7F-1; package `integration.mcp.train`, Kotlin;
+  `docs/architecture/chatgpt-training-mcp.md`). A THIRD independent switch `RUNNINGAI_MCP_TRAIN_ENABLED`
+  (`running-ai.mcp.train-enabled`) = false, beside 6C's `enabled` and 7C-2a's `read-enabled`; the Spring AI server turns on
+  when any of the three is on. Six tools — `create_workout_draft`, `get_workout_draft`, `revise_workout_draft`,
+  `approve_workout_draft`, `preview_draft_publish`, `publish_approved_draft` — each a **thin adapter over the service the REST
+  API already calls** (`WorkoutDraftService`, `WorkoutDraftApprovalService`, `ApprovedWorkoutDraftPublishService`), returning
+  the REST DTOs themselves so the two surfaces cannot drift. No lifecycle rule is re-implemented: approval immutability, one
+  approval per athlete+date, the injury gate, the publishing master switch, per-draft single flight and "a re-publish returns
+  the stored result" stay in the services (`TrainMcpToolsArchitectureTest` fails the build if the adapter grows a route to a
+  renderer, publisher, repository or the coach). Failures carry **the same codes the REST API returns**, plus a
+  `correlationId` on every answer and log line. **The coach is never faked**: an unavailable/timed-out/off-contract CLI fails
+  as `AI_COACH_<reason>`, never a substituted workout. **An MCP call is not the athlete's approval**: `approve_workout_draft`
+  and `publish_approved_draft` additionally require `confirmedByAthlete: true` AND an echo of a value only a prior read
+  supplies (`acknowledgedVersion` / `acknowledgedApprovalId`), checked read-only before the committing service is entered.
+  Gateway (`tools/mcp-gateway`): **hard-coded, non-configurable per-tool scope policy** — `runningai:read` (base + the seven
+  read tools) / `runningai:train` (the five draft tools) / `runningai:publish` (`publish_approved_draft` only); scopes are
+  **not hierarchical**, `tools/list` is filtered to allowlist ∩ granted scopes, a scope failure is a 403 challenge raised
+  before any backend traffic, and `publish_workout` stays permanently un-allowlistable. Real external publish: **NOT_RUN** —
+  the Cloudflare worker still filters scopes to `['runningai:read','offline_access']`, so a train/publish token cannot yet
+  exist; that worker change belongs to Phase 7F-2, together with the first by-hand validation of the draft→Intervals path.
 - **Garmin recovery intelligence** (Phase 6F; package `recovery` + `integration/garmin` + `coach`): connector `GET /recovery?date=`
   (HRV, sleep, resting HR, Body Battery, stress; documented fields only) → `GarminRecoveryClient` → `GarminRecoveryMapper` →
   `garmin_recovery_daily` (V7, unique athlete+date, idempotent merge: a missing metric never clears a stored one) →

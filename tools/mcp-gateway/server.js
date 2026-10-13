@@ -2,9 +2,15 @@
 //
 // An OAuth 2.1 RESOURCE SERVER in front of the local RunningAI MCP endpoint: it verifies an
 // Auth0-issued (or any standards-compliant AS's) JWT access token on EVERY /mcp request and
-// forwards only allowlisted read-only tool traffic to a fixed local target. It is NOT an
-// authorization server: no login, no token issuance, no session - the AS does that, and this
-// process only validates what the AS signed.
+// forwards only allowlisted tool traffic to a fixed local target. It is NOT an authorization
+// server: no login, no token issuance, no session - the AS does that, and this process only
+// validates what the AS signed.
+//
+// Phase 7F-1 added per-tool authorization: each tool declares the OAuth scope it demands
+// (TOOL_SCOPES below, hard-coded - not configurable), so one connection can be allowed to read
+// training data, a second to also design and approve workouts, and a third to also send them to
+// Intervals.icu. The default allowlist is still the seven read-only tools, so a gateway started
+// with no new configuration behaves exactly as it did before.
 //
 // Hard guarantees, by construction:
 //  - Binds 127.0.0.1 ONLY (hard-coded): the public leg is a separate tunnel; this process never
@@ -16,9 +22,10 @@
 //  - The proxy target is FIXED at startup (one local URL). There is no path/host forwarding, so
 //    this can never be used as a generic REST proxy.
 //  - Only MCP methods initialize/ping/tools/list/tools/call (+ notifications/*) pass; tools/call
-//    passes only for names on the read-tool allowlist. publish_workout (or any write/unknown
-//    name) is rejected here with a JSON-RPC error even if the backend were misconfigured, and
-//    tools/list responses are additionally FILTERED to the allowlist (defense in depth).
+//    passes only for a name on the allowlist AND only when the token carries that tool's required
+//    scope. publish_workout (or any unknown name) is rejected here with a JSON-RPC error even if
+//    the backend were misconfigured, and tools/list responses are additionally FILTERED to the
+//    allowlist intersected with what the token's scopes permit (defense in depth).
 //  - No secret is ever logged or echoed: Authorization headers, tokens and request bodies never
 //    reach a log line; /health and the RFC 9728 metadata expose configuration identities only
 //    (issuer URL, resource URL), never a credential.
@@ -52,11 +59,39 @@ const ISSUER = requiredEnv('RUNNING_AI_OAUTH_ISSUER');           // e.g. https:/
 const AUDIENCE = requiredEnv('RUNNING_AI_OAUTH_AUDIENCE');       // the Auth0 API identifier (resource)
 const ALLOWED_SUB = requiredEnv('RUNNING_AI_ALLOWED_SUB');       // exactly one permitted subject
 const PUBLIC_BASE_URL = requiredEnv('RUNNING_AI_PUBLIC_BASE_URL').replace(/\/$/, '');
+// The BASE scope: the minimum a token must carry to reach this resource at all, and what
+// initialize / ping / tools/list require. Unchanged default, so an existing read-only connection
+// behaves exactly as before.
 const REQUIRED_SCOPE = (process.env.RUNNING_AI_REQUIRED_SCOPE || 'runningai:read').trim();
 const ALLOWED_TOOLS = new Set((process.env.RUNNING_AI_ALLOWED_TOOLS ||
   'get_recent_activities,get_activity_analysis,get_training_context,get_recovery_context,' +
   'get_fitness_trend,get_workout_recommendation,get_athlete_profile')
   .split(',').map((t) => t.trim()).filter(Boolean));
+
+// Per-tool scope policy (Phase 7F-1). HARD-CODED on purpose: which scope a tool demands is a
+// security property of that tool, not an operator knob - no environment variable can downgrade a
+// write tool to the read scope. Scopes are NOT hierarchical: holding runningai:publish does not
+// imply runningai:train, and no amount of runningai:read ever reaches either. A tool with no entry
+// here requires the base scope, which is what every read tool needs.
+//
+// The consequence that matters: a token granted only runningai:read cannot create, revise, approve
+// or publish anything - it cannot even SEE those tools in tools/list.
+const TOOL_SCOPES = {
+  create_workout_draft: 'runningai:train',
+  get_workout_draft: 'runningai:train',
+  revise_workout_draft: 'runningai:train',
+  approve_workout_draft: 'runningai:train',
+  preview_draft_publish: 'runningai:train',
+  // The one tool that writes to a system outside RunningAI gets its own scope, so "can design and
+  // approve training" and "can send it to my calendar" are separately grantable and revocable.
+  publish_approved_draft: 'runningai:publish',
+};
+const scopeFor = (tool) => TOOL_SCOPES[tool] || REQUIRED_SCOPE;
+
+// Every scope this gateway can actually require, given what is enabled here. With the default
+// read-only allowlist this is exactly [runningai:read], so the published metadata is unchanged.
+const SCOPES_SUPPORTED = [...new Set([REQUIRED_SCOPE, ...[...ALLOWED_TOOLS].map(scopeFor)])];
+const WRITE_TOOLS_ENABLED = [...ALLOWED_TOOLS].some((t) => TOOL_SCOPES[t]);
 
 if (!new URL(TARGET_URL).hostname.match(/^127\.0\.0\.1$|^localhost$/)) {
   process.stderr.write('FATAL RUNNING_AI_GATEWAY_TARGET_URL must point at a loopback address\n');
@@ -171,7 +206,7 @@ async function authenticate(req, res) {
   return payload;
 }
 
-async function proxy(res, rawBody, msg) {
+async function proxy(res, rawBody, msg, grantedScopes = []) {
   let upstream;
   try {
     upstream = await fetch(TARGET_URL, {
@@ -185,11 +220,14 @@ async function proxy(res, rawBody, msg) {
   }
   const text = await upstream.text();
   if (msg.method === 'tools/list' && upstream.ok) {
-    // Defense in depth: even if the backend ever listed more, only allowlisted tools leave here.
+    // Defense in depth, twice over: even if the backend ever listed more, only allowlisted tools
+    // leave here - and only those THIS token's scopes actually permit, so a read-only connection
+    // is not even shown a tool it could not call.
     try {
       const body = JSON.parse(text);
       if (body && body.result && Array.isArray(body.result.tools)) {
-        body.result.tools = body.result.tools.filter((t) => ALLOWED_TOOLS.has(t && t.name));
+        body.result.tools = body.result.tools.filter((t) =>
+          t && ALLOWED_TOOLS.has(t.name) && grantedScopes.includes(scopeFor(t.name)));
         return sendJson(res, upstream.status, body);
       }
     } catch (e) { /* fall through: pass the original text */ }
@@ -210,9 +248,9 @@ const server = http.createServer((req, res) => {
     return sendJson(res, 200, {
       resource: RESOURCE,
       authorization_servers: [ISSUER],
-      scopes_supported: [REQUIRED_SCOPE],
+      scopes_supported: SCOPES_SUPPORTED,
       bearer_methods_supported: ['header'],
-      resource_name: 'RunningAI MCP (read-only)',
+      resource_name: WRITE_TOOLS_ENABLED ? 'RunningAI MCP' : 'RunningAI MCP (read-only)',
     });
   }
 
@@ -245,9 +283,10 @@ const server = http.createServer((req, res) => {
       if (Array.isArray(msg) || !msg || typeof msg !== 'object' || msg.jsonrpc !== '2.0') {
         return rpcError(res, msg && msg.id, -32600, 'Invalid Request');
       }
+      const granted = scopesOf(payload);
       const method = typeof msg.method === 'string' ? msg.method : '';
       if (method.startsWith('notifications/')) {
-        return proxy(res, body, msg);
+        return proxy(res, body, msg, granted);
       }
       if (!ALLOWED_METHODS.has(method)) {
         log('WARN', `method refused: ${method || '(missing)'}`);
@@ -258,13 +297,22 @@ const server = http.createServer((req, res) => {
         if (!ALLOWED_TOOLS.has(name)) {
           log('WARN', `tool refused: ${name || '(missing name)'}`);
           return rpcError(res, msg.id, -32602,
-            `Tool '${name}' is not available through this read-only gateway`);
+            `Tool '${name}' is not available through this gateway`);
         }
-        log('INFO', `tools/call ${name} authorized`);
+        // Per-tool authorization, server side (Phase 7F-1). Checked here, BEFORE the backend is
+        // touched: a token without the tool's scope causes zero backend traffic. The reply is an
+        // HTTP 403 OAuth challenge naming the missing scope - not a JSON-RPC error - so the client
+        // learns it must re-authorize rather than treating it as a tool-level failure.
+        const needed = scopeFor(name);
+        if (!granted.includes(needed)) {
+          log('WARN', `tool refused: ${name} needs a scope this token does not carry`);
+          return challenge(res, 403, 'insufficient_scope', `Scope ${needed} is required for ${name}`);
+        }
+        log('INFO', `tools/call ${name} authorized (scope ${needed})`);
       } else {
         log('INFO', `${method} authorized`);
       }
-      return proxy(res, body, msg);
+      return proxy(res, body, msg, granted);
     } catch (e) {
       log('ERROR', `unhandled: ${e && e.message}`);
       if (!res.headersSent) sendJson(res, 500, { error: 'internal_error' });
@@ -273,6 +321,9 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
+  // The scope each enabled tool demands is printed at startup, so what this gateway will and will
+  // not let a given token do is readable from the log rather than inferred from the code.
+  const policy = [...ALLOWED_TOOLS].map((t) => `${t}=${scopeFor(t)}`).join('|');
   log('INFO', `GATEWAY_STARTED host=${HOST} port=${PORT} resource=${RESOURCE} ` +
-    `tools=${[...ALLOWED_TOOLS].join('|')} target=local`);
+    `baseScope=${REQUIRED_SCOPE} scopes=${SCOPES_SUPPORTED.join(',')} tools=${policy} target=local`);
 });

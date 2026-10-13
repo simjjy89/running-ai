@@ -18,6 +18,21 @@ Guarantees (see `server.js` header for the full list):
   tools by default; `publish_workout` can never be allowlisted — startup refuses). `tools/list`
   responses are re-filtered to the allowlist as defense in depth. No generic proxying: the target
   URL is fixed at startup and must be loopback.
+- **per-tool scope policy** (Phase 7F-1), hard-coded in `server.js` and not configurable — which
+  scope a tool demands is a security property of that tool, not an operator knob:
+
+  | scope | tools |
+  |---|---|
+  | `runningai:read` (base) | the seven read tools; also initialize / ping / tools/list |
+  | `runningai:train` | `create_workout_draft`, `get_workout_draft`, `revise_workout_draft`, `approve_workout_draft`, `preview_draft_publish` |
+  | `runningai:publish` | `publish_approved_draft` |
+
+  Scopes are **not hierarchical**: `runningai:publish` does not imply `runningai:train`, and no
+  amount of `runningai:read` reaches either. A missing scope is a 403 challenge naming it, raised
+  before the backend is touched, and `tools/list` is filtered to the allowlist **intersected with
+  the token's granted scopes**, so a read-only connection cannot even see a tool it could not call.
+  A tool with no entry requires the base scope. The default allowlist is unchanged, so a gateway
+  started with no new configuration behaves exactly as it did before 7F-1.
 - no token, Authorization header or body ever reaches a log line.
 
 Configuration (env):
@@ -30,15 +45,15 @@ Configuration (env):
 | `RUNNING_AI_OAUTH_AUDIENCE` | the API identifier / resource the token must be minted for — required |
 | `RUNNING_AI_ALLOWED_SUB` | the ONE permitted subject — required |
 | `RUNNING_AI_PUBLIC_BASE_URL` | public base URL (tunnel origin) for metadata/challenges — required |
-| `RUNNING_AI_REQUIRED_SCOPE` | default `runningai:read` |
-| `RUNNING_AI_ALLOWED_TOOLS` | comma list; default = the seven 7C-2a read tools |
+| `RUNNING_AI_REQUIRED_SCOPE` | the BASE scope every token must carry; default `runningai:read` |
+| `RUNNING_AI_ALLOWED_TOOLS` | comma list of tools this gateway will pass at all; default = the seven 7C-2a read tools. Adding a 7F-1 lifecycle tool here does not weaken its scope requirement. |
 
 Run / test:
 
 ```
 npm install
 npm start
-npm test     # 27 checks: mock AS + minted JWTs + hit-counting fake backend
+npm test     # 46 checks: mock AS + minted JWTs + hit-counting fake backend, incl. the 7F-1 scope matrix
 ```
 
 With a temporary public address, the AS's API identifier and `RUNNING_AI_OAUTH_AUDIENCE` /
