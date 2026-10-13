@@ -24,6 +24,14 @@ $script:ExitCode = @{ Ok = 0; Docker = 10; Postgres = 11; Connector = 12; Java =
 
 function Get-RepoRoot { $script:RepoRoot }
 
+# The jar production actually runs (Phase 7E-5). Deliberately NOT a Gradle output: the build
+# directory is rewritten by every build and is held open by whichever JVM was started from it, so
+# running the build output directly made a rebuild overwrite the live artifact and made
+# "gradlew clean" fail. Only release-spring-jar.ps1 ever writes this path, after verifying what it
+# is about to publish; start-running-ai.ps1 only reads it. Its provenance sidecar is this path
+# plus ".json".
+function Get-RunningAiReleasedJarPath { Join-Path $script:RuntimeDir 'running-ai-server.jar' }
+
 function Stop-WithError {
     param([Parameter(Mandatory)][int]$Code, [Parameter(Mandatory)][string]$Message)
     $ex = New-Object System.Exception $Message

@@ -959,6 +959,99 @@ Check 'status-running-ai.ps1 isolated PID-file tests never touch the REAL .runti
     ($before.Keys.Count -eq $after.Keys.Count) -and (@($before.Keys | Where-Object { $before[$_] -ne $after[$_] }).Count -eq 0)
 }
 
+# ---- Phase 7E-5: the released production jar --------------------------------------------------
+# Production used to run the Gradle output itself, which is why a rebuild from an out-of-date
+# worktree could replace a working jar and why a live JVM kept "gradlew clean" from running. These
+# checks pin the three properties that fix costs nothing to keep: the released path is not a build
+# output, the start script prefers it, and a release never writes it non-atomically.
+
+Check 'the released jar path is under .runtime, never a Gradle output' {
+    $released = Get-RunningAiReleasedJarPath
+    $released -eq (Join-Path $script:RuntimeDir 'running-ai-server.jar') -and
+        ($released.IndexOf('build\libs', [StringComparison]::OrdinalIgnoreCase) -lt 0)
+}
+
+Check 'start-running-ai.ps1 prefers the released jar over the Gradle output' {
+    $text = (Get-Content (Join-Path $scripts 'start-running-ai.ps1') -Raw)
+    # Inside Find-SpringJar the released path must be consulted BEFORE server\build\libs is.
+    $fn = [regex]::Match($text, '(?s)function Find-SpringJar \{.*?\n\}').Value
+    if (-not $fn) { throw 'Find-SpringJar not found' }
+    $iReleased = $fn.IndexOf('Get-RunningAiReleasedJarPath')
+    $iLibs = $fn.IndexOf('build\libs')
+    ($iReleased -ge 0) -and ($iLibs -ge 0) -and ($iReleased -lt $iLibs)
+}
+
+Check 'start-running-ai.ps1 never calls gradlew directly any more' {
+    $text = (Get-Content (Join-Path $scripts 'start-running-ai.ps1') -Raw) -replace '(?s)<#.*?#>', '' -replace '(?m)^\s*#.*$', ''
+    ($text -notmatch 'gradlew') -and ($text -match 'release-spring-jar\.ps1')
+}
+
+Check 'release-spring-jar.ps1 publishes by renaming a fully written temporary file' {
+    $text = (Get-Content (Join-Path $scripts 'release-spring-jar.ps1') -Raw) -replace '(?s)<#.*?#>', '' -replace '(?m)^\s*#.*$', ''
+    # A direct Copy-Item onto the released path would let a concurrent start read a torn jar.
+    ($text -match '\$temp\s*=\s*"\$releasedPath\.new"') -and
+    ($text -match 'Move-Item -LiteralPath \$temp -Destination \$releasedPath -Force') -and
+    ($text -notmatch 'Copy-Item[^\r\n]*-Destination \$releasedPath')
+}
+
+Check 'release-spring-jar.ps1 backs the previous release up before replacing it' {
+    $text = (Get-Content (Join-Path $scripts 'release-spring-jar.ps1') -Raw)
+    $iBackup = $text.IndexOf('Previous release kept at')
+    $iMove = $text.IndexOf('Move-Item -LiteralPath $temp')
+    ($iBackup -ge 0) -and ($iMove -ge 0) -and ($iBackup -lt $iMove)
+}
+
+Check 'release-spring-jar.ps1 serializes against start/stop unless the caller already holds the lock' {
+    $text = (Get-Content (Join-Path $scripts 'release-spring-jar.ps1') -Raw)
+    ($text -match 'Enter-RunningAiRuntimeLock') -and ($text -match 'Exit-RunningAiRuntimeLock') -and
+        ($text -match 'RuntimeLockHeldByCaller')
+}
+
+Check 'a boot jar is verified by its contents, and a plain jar is rejected' {
+    # Builds two throwaway zips: one shaped like a Spring Boot jar, one like a *-plain.jar.
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ('selftest-jar-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force $tmp | Out-Null
+    try {
+        function New-TestJar {
+            param([string]$Path, [hashtable]$Entries)
+            $zip = [System.IO.Compression.ZipFile]::Open($Path, 'Create')
+            try {
+                foreach ($name in $Entries.Keys) {
+                    $e = $zip.CreateEntry($name)
+                    $w = New-Object System.IO.StreamWriter($e.Open())
+                    try { $w.Write([string]$Entries[$name]) } finally { $w.Dispose() }
+                }
+            } finally { $zip.Dispose() }
+        }
+        $boot = Join-Path $tmp 'boot.jar'
+        New-TestJar -Path $boot -Entries @{
+            'META-INF/MANIFEST.MF'                            = "Manifest-Version: 1.0`r`nStart-Class: com.runningai.RunningAiApplication`r`n"
+            'org/springframework/boot/loader/launch/Launcher.class' = 'x'
+            'BOOT-INF/classes/application.yml'                = 'x'
+            'BOOT-INF/lib/some-dependency.jar'                = 'x'
+            'BOOT-INF/classes/db/migration/V1__init.sql'      = 'x'
+            'BOOT-INF/classes/db/migration/V26__strava.sql'   = 'x'
+        }
+        $plain = Join-Path $tmp 'plain.jar'
+        New-TestJar -Path $plain -Entries @{ 'META-INF/MANIFEST.MF' = "Manifest-Version: 1.0`r`n"; 'com/runningai/App.class' = 'x' }
+
+        # Test-BootJar lives inside release-spring-jar.ps1, which exits when dot-sourced, so the
+        # function body is extracted and defined here rather than running the whole script.
+        $src = (Get-Content (Join-Path $scripts 'release-spring-jar.ps1') -Raw)
+        $body = [regex]::Match($src, '(?s)function Test-BootJar \{.*?\n\}\r?\n\r?\nfunction ').Value
+        $body = $body.Substring(0, $body.LastIndexOf('function '))
+        . ([scriptblock]::Create($body))
+
+        $b = Test-BootJar -Path $boot
+        $p = Test-BootJar -Path $plain
+        $b.HasLoader -and $b.HasClasses -and ($b.LibCount -eq 1) -and
+            ($b.StartClass -eq 'com.runningai.RunningAiApplication') -and
+            ($b.MigrationCount -eq 2) -and ($b.MaxMigration -eq 26) -and
+            (-not $p.HasLoader) -and (-not $p.HasClasses) -and ($p.LibCount -eq 0) -and ($p.MaxMigration -eq 0)
+    } finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
 Check 'stop script never removes volumes' {
     # code only: drop the comment-based help block and # comments (which mention the forbidden command)
     $text = (Get-Content (Join-Path $scripts 'stop-running-ai.ps1') -Raw) -replace '(?s)<#.*?#>', '' -replace '(?m)^\s*#.*$', ''

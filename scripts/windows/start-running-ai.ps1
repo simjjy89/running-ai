@@ -58,12 +58,41 @@ function Start-DockerDesktop {
     Stop-WithError $ExitCode.Docker 'Docker daemon is not running and Docker Desktop could not be located. Start Docker Desktop manually and retry.'
 }
 
+# Phase 7E-5: the RELEASED jar (.runtime\running-ai-server.jar, written only by
+# release-spring-jar.ps1 after it verifies what it publishes) is what production runs. The Gradle
+# output under server\build\libs is only a fallback, kept so a worktree that has never released
+# still starts: running the build output itself is what previously let a rebuild from an
+# out-of-date source silently replace a working production jar, and what kept a live JVM holding
+# the build directory open so "gradlew clean" could not run.
 function Find-SpringJar {
+    $released = Get-RunningAiReleasedJarPath
+    if (Test-Path -LiteralPath $released) { return (Get-Item -LiteralPath $released) }
     $libs = Join-Path $root 'server\build\libs'
     if (-not (Test-Path $libs)) { return $null }
     Get-ChildItem $libs -Filter 'running-ai-server-*.jar' |
         Where-Object { $_.Name -notlike '*-plain.jar' } |
         Sort-Object LastWriteTime -Descending | Select-Object -First 1
+}
+
+# What the jar about to be started was built from, so an unexpected production version is visible
+# in the start log instead of having to be reverse-engineered from behaviour later.
+function Write-SpringJarProvenance {
+    param([Parameter(Mandatory)]$Jar)
+    $released = Get-RunningAiReleasedJarPath
+    if ($Jar.FullName -ne $released) {
+        Write-Step "Spring jar: $($Jar.FullName) (UNRELEASED Gradle output - run release-spring-jar.ps1 to pin a verified jar)"
+        return
+    }
+    $sidecar = "$released.json"
+    if (-not (Test-Path -LiteralPath $sidecar)) { Write-Step "Spring jar: released, provenance unknown (no $sidecar)"; return }
+    try {
+        $meta = Get-Content -LiteralPath $sidecar -Raw | ConvertFrom-Json
+        $commit = if ($meta.gitCommit) { $meta.gitCommit.Substring(0, 7) } else { 'unknown' }
+        $dirty = if ($meta.gitDirty) { ' DIRTY' } else { '' }
+        Write-Step "Spring jar: released $($meta.sha256.Substring(0,12))... from $($meta.gitBranch)@$commit$dirty, migrations up to V$($meta.maxMigration)"
+    } catch {
+        Write-Step "Spring jar: released, provenance sidecar unreadable ($($_.Exception.Message))"
+    }
 }
 
 function Stop-NewConnectorOnFailure {
@@ -232,19 +261,31 @@ try {
         }
         $jar = Find-SpringJar
         if ($Build -or -not $jar) {
-            Write-Step 'Building Spring Boot jar (gradlew bootJar).'
+            # Phase 7E-5: building goes through release-spring-jar.ps1 rather than calling
+            # "gradlew bootJar" straight into the directory production runs from. That script
+            # builds, then VERIFIES the artifact (real boot jar, Start-Class, Flyway migrations)
+            # and only then publishes it to the released path, keeping the previous release so a
+            # bad build is one copy away from being undone. It runs with the runtime lock this
+            # script already holds (inherited), so it cannot race a Watchdog restart.
+            Write-Step 'Building and releasing the Spring Boot jar (release-spring-jar.ps1).'
             $env:JAVA_HOME = $java.Home
-            Push-Location $script:ServerDir
-            try {
-                cmd /c ".\gradlew.bat bootJar --console=plain > `"$(Join-Path $script:LogDir 'gradle-bootjar.log')`" 2>&1"
-                $buildExit = $LASTEXITCODE
-            } finally { Pop-Location }
+            $releaseScript = Join-Path $PSScriptRoot 'release-spring-jar.ps1'
+            # -RuntimeLockHeldByCaller: this script is already inside the runtime lock (acquired
+            # before step 0), and a Mutex cannot be handed to a child process - without this the
+            # child would wait on a lock its own parent holds and report the runtime as busy.
+            # -AllowDirty: an operator starting the runtime from a worktree they are working in is
+            # a legitimate case; the provenance sidecar records the dirty state either way.
+            $releaseArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $releaseScript,
+                             '-AllowDirty', '-RuntimeLockHeldByCaller')
+            & (Get-Command powershell.exe).Source @releaseArgs | ForEach-Object { Write-Host $_ }
+            $buildExit = $LASTEXITCODE
             $jar = Find-SpringJar
             if ($buildExit -ne 0 -or -not $jar) {
                 Stop-NewConnectorOnFailure -ConnectorPort $ConnectorPort
-                Stop-WithError $ExitCode.Java 'Spring Boot jar build failed. See .runtime\logs\gradle-bootjar.log'
+                Stop-WithError $ExitCode.Java "Spring Boot jar build/release failed (exit $buildExit). See .runtime\logs\gradle-bootjar.log"
             }
         }
+        Write-SpringJarProvenance -Jar $jar
 
         # ---- 5. Spring Boot -------------------------------------------------------------
         if (-not $env:GARMIN_CONNECTOR_URL) { $env:GARMIN_CONNECTOR_URL = "http://127.0.0.1:$ConnectorPort" }
