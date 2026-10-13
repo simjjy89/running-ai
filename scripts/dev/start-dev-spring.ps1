@@ -73,10 +73,15 @@ if (-not (Test-Path $java)) { throw "JDK 21 not found; set JAVA_HOME." }
 # --- the DB password, read at launch, kept in memory only.
 if (-not (Test-Path $CanonicalEnv)) { throw "canonical .env not found at $CanonicalEnv" }
 $dbPassword = $null
+$intervalsKey = $null
 foreach ($line in Get-Content $CanonicalEnv) {
-    if ($line -match '^\s*DB_PASSWORD\s*=\s*(.+?)\s*$') { $dbPassword = $Matches[1].Trim('"').Trim("'") }
+    if ($line -match '^\s*DB_PASSWORD\s*=\s*(.+?)\s*$')       { $dbPassword   = $Matches[1].Trim('"').Trim("'") }
+    if ($line -match '^\s*INTERVALS_API_KEY\s*=\s*(.+?)\s*$') { $intervalsKey = $Matches[1].Trim('"').Trim("'") }
 }
 if (-not $dbPassword) { throw "DB_PASSWORD not present in $CanonicalEnv" }
+if ($IntervalsLive -and -not $intervalsKey) {
+    throw "-IntervalsLive needs INTERVALS_API_KEY in $CanonicalEnv"
+}
 
 $logDir = Join-Path $repoRoot '.runtime\logs'
 New-Item -ItemType Directory -Force $logDir | Out-Null
@@ -117,6 +122,8 @@ if ($StravaArchive) {
 # launcher instead. The launcher carries NO secret: it reads the password from the per-user
 # environment variable set just below, which is why the password never lands on disk here.
 [Environment]::SetEnvironmentVariable('RUNNINGAI_DEV_DB_PASSWORD', $dbPassword, 'User')
+[Environment]::SetEnvironmentVariable('RUNNINGAI_DEV_INTERVALS_KEY',
+    $(if ($IntervalsLive) { $intervalsKey } else { '' }), 'User')
 
 # The jar is COPIED out of server/build/libs before it is run. A detached JVM holds its jar open on
 # Windows, which would make the next `gradlew clean` fail - so the running instance must never be the
@@ -128,6 +135,7 @@ $launcher = Join-Path $repoRoot ".runtime\dev-spring-$Port.cmd"
 @(
     '@echo off'
     'set "DB_PASSWORD=%RUNNINGAI_DEV_DB_PASSWORD%"'
+    'set "INTERVALS_API_KEY=%RUNNINGAI_DEV_INTERVALS_KEY%"'
     ('"' + $java + '" -jar "' + $runJar + '" ' + ($springArgs -join ' ') + ' >> "' + $log + '" 2>&1')
 ) | Set-Content -LiteralPath $launcher -Encoding ascii
 
