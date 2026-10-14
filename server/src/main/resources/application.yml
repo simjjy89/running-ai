@@ -194,6 +194,14 @@ running-ai:
       max-recent-activities: ${RUNNING_AI_COACH_CONTEXT_V2_MAX_RECENT_ACTIVITIES:8}
       max-interval-groups-per-activity: ${RUNNING_AI_COACH_CONTEXT_V2_MAX_INTERVAL_GROUPS:3}
       max-snapshot-bytes: ${RUNNING_AI_COACH_CONTEXT_V2_MAX_SNAPSHOT_BYTES:65536}
+    injury-history:
+      # What the athlete's own injury/pain ledger contributes to a coach prompt (Phase 7F-3A).
+      # Caps only: the Phase 7B-2 safety gate is unaffected by every value here, and an omitted
+      # report is counted in the context (omittedReportCount), never silently dropped.
+      history-window-days: ${RUNNING_AI_COACH_INJURY_HISTORY_WINDOW_DAYS:180}
+      max-previous-reports: ${RUNNING_AI_COACH_INJURY_HISTORY_MAX_PREVIOUS_REPORTS:4}
+      # Longest free-text note excerpt carried (latest report only). 0 = no free text at all.
+      max-notes-excerpt-chars: ${RUNNING_AI_COACH_INJURY_HISTORY_MAX_NOTES_CHARS:200}
     claude:
       command: ${RUNNING_AI_COACH_CLAUDE_COMMAND:claude}
       model: ${RUNNING_AI_COACH_CLAUDE_MODEL:sonnet}

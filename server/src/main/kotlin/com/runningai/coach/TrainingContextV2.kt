@@ -34,6 +34,8 @@ data class TrainingContextV2(
     /** Additive (Phase 7B-3): LTHR/threshold-pace freshness and provenance uncertainty. */
     val lactateThresholdProvenance: LactateThresholdProvenanceV2,
     override val constraints: SessionConstraints,
+    /** Additive (Phase 7F-3A): the athlete's own injury/pain reports, capped and structured. */
+    override val injuryHistory: InjuryHistoryContext? = null,
 ) : CoachTrainingContext
 
 /**

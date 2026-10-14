@@ -20,6 +20,8 @@ data class TrainingContext(
     val recovery: RecoveryContext,
     val weeklyContext: WeeklyContext,
     override val constraints: SessionConstraints,
+    /** Additive (Phase 7F-3A): the athlete's own injury/pain reports, capped and structured. */
+    override val injuryHistory: InjuryHistoryContext? = null,
 ) : CoachTrainingContext
 
 /**

@@ -15,7 +15,8 @@ import java.time.LocalDate
  *  - [AthleteIntensityProfileService] for the athlete's current LTHR and threshold pace (which
  *    Phase 6D keeps in sync with Garmin); and
  *  - [RecoveryContextBuilder] for Garmin recovery metrics against the athlete's own baseline
- *    (Phase 6F).
+ *    (Phase 6F); and
+ *  - [InjuryHistoryContextBuilder] for the athlete's own injury/pain reports (Phase 7F-3A).
  *
  * Nothing is recomputed here and nothing is invented: a metric without data stays null (see
  * [RecoveryContext]), so the coach is told it is unknown rather than being handed a
@@ -27,6 +28,7 @@ class TrainingContextBuilder(
     private val decisionContextService: TrainingDecisionContextService,
     private val profileService: AthleteIntensityProfileService,
     private val recoveryContextBuilder: RecoveryContextBuilder,
+    private val injuryHistoryContextBuilder: InjuryHistoryContextBuilder,
 ) {
 
     fun today(): LocalDate = decisionContextService.today()
@@ -83,6 +85,7 @@ class TrainingContextBuilder(
                 loadTrend = decision.loadTrend().name,
             ),
             constraints = constraints,
+            injuryHistory = injuryHistoryContextBuilder.build(),
         )
     }
 }

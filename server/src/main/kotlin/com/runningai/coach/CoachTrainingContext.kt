@@ -12,6 +12,19 @@ interface CoachTrainingContext {
     val date: LocalDate
     val athlete: AthleteThresholds
     val constraints: SessionConstraints
+
+    /**
+     * What the athlete has reported about pain and injury (Phase 7F-3A). Present on both context
+     * versions, because the gap it closes - a RESOLVED report silencing the safety constraint and
+     * leaving the coach unaware that there was an injury at all - exists in both.
+     *
+     * Nullable, and null on a hand-built context only: both production builders always populate it
+     * (`CoachInjuryHistoryContextTest` fails the build otherwise). A null is never a safety hole -
+     * `WorkoutSafetyGateService` enforces the gate on its own, before and after every coach call,
+     * and does not consult this field - but the coach is told to read it as "unknown" and design
+     * conservatively rather than as "nothing was ever reported".
+     */
+    val injuryHistory: InjuryHistoryContext?
 }
 
 /**

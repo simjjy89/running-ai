@@ -70,6 +70,7 @@ count is turned into a verdict (no `historyQuality = POOR`); counts are reported
 | `recentActivities[].intervals` | INTERVALS (Phase 6H-5, read-only) | n/a | null when the activity has no Intervals match |
 | `recentActivities[].dataQuality` | Garmin sample fidelity + RunningAI analysis status | n/a | `sampleCompleteness` null when no stream was ever collected |
 | `constraints` | The athlete's own request for this call | n/a | every field independently optional |
+| `injuryHistory` | The athlete's own self-reported injury/pain ledger (Phase 7B-2 `injury_report`), summarised by Phase 7F-3A | `ageHours` per report; `daysSinceLatestActiveReport` over the whole ledger | `latest` null only when nothing was ever reported; a null symptom field is **unreported**, never "no symptom" |
 
 `speedHrDecouplingPercent` and every other `runningAiAnalysis` field are **RunningAI-derived
 descriptive metrics**, not Garmin's or Intervals.icu's own scores — the system prompt states this
@@ -77,6 +78,36 @@ explicitly so the coach never attributes them to the wrong source. CTL/ATL/deriv
 same terminology fixed in Phase 6H-5: CTL = Intervals' calculated fitness, ATL = Intervals' calculated
 fatigue, `derivedForm = ctl - atl`. The subjective wellness `fatigue` field has no representation
 anywhere in V2.
+
+## Injury history (Phase 7F-3A, both versions)
+
+`injuryHistory` is the one section carried by **V1 and V2 alike** — it is declared on
+`CoachTrainingContext` itself, because the gap it closes exists in both. That gap: the Phase 7B-2
+safety gate speaks to the coach only while it is *blocking* (`WorkoutSafetyGateService.constraintText`
+returns null as soon as training is permitted), so the moment the athlete reported `RESOLVED` the
+coach designed the session knowing nothing about the injury it was returning from.
+
+What it carries, and the rules it keeps:
+
+- `gate` — the 7B-2 verdict (`nonRestTrainingAllowed`, `reasonCode`, `message`, `stalenessHours`),
+  restated as a fact. The gate itself is **unchanged**: it still decides alone, independently of the
+  coach, both before and after the model call, and it never reads this field.
+- `latest` + `previousReports` — the report the gate evaluated and the older ones, newest first,
+  capped by `running-ai.coach.injury-history.max-previous-reports` inside
+  `history-window-days`. Nothing is rewritten: a later `RESOLVED` never deletes an earlier `ACTIVE`,
+  and whatever the caps left out is counted in `omittedReportCount` rather than silently dropped.
+- `daysSinceLatestActiveReport` — computed over the **whole** ledger, window and caps ignored, so a
+  flare-up that scrolled out of the listing still tells the coach this is a return to training.
+- Free text is bounded: `notesExcerpt` is carried for `latest` only, truncated at
+  `max-notes-excerpt-chars` (0 disables it entirely), with `notesTruncated`/`notesPresent` stating
+  what was cut or withheld. The structured symptom fields are what the coach is meant to reason from.
+- Ages are in **whole hours**, and no "evaluated at" instant is stored, so two drafts generated in
+  the same hour still produce a byte-identical snapshot and `context_sha256` keeps meaning
+  "the evidence changed", not "time passed".
+
+The system prompt states the interpretation rule the data cannot carry itself: **`RESOLVED` is the
+athlete's latest self-report and a data permission, never a medical clearance** — the coach may not
+declare an injury healed, name a cause, or read a permitted gate as advice to train hard.
 
 ## Persistence and audit (V20)
 

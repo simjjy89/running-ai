@@ -39,6 +39,7 @@ class TrainingContextV2Builder(
     private val profileService: AthleteIntensityProfileService,
     private val profileRepository: AthleteIntensityProfileRepository,
     private val recoveryContextBuilder: RecoveryContextBuilder,
+    private val injuryHistoryContextBuilder: InjuryHistoryContextBuilder,
     private val recoveryRepository: RecoveryRepository,
     private val activities: ActivityRepository,
     private val detailStore: ActivityDetailStore,
@@ -94,6 +95,7 @@ class TrainingContextV2Builder(
             sourceFreshness = sourceFreshness(coverage, trainingLoad, recoveryContext),
             lactateThresholdProvenance = lactateThresholdProvenance(date, zone, profile),
             constraints = constraints,
+            injuryHistory = injuryHistoryContextBuilder.build(),
         )
     }
 

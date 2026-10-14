@@ -52,6 +52,25 @@ RunningAI automation (which lives only on the main PC and is NOT in this repo).
   Spring AI 2.x / Boot 4 for this), Streamable HTTP stateless on `POST /mcp`, exactly one tool `publish_workout({"date":"YYYY-MM-DD"})` that only
   calls `WorkoutPublishApplicationService` (master switch still applies). `RUNNINGAI_MCP_ENABLED` (`running-ai.mcp.enabled`) = false also switches
   the Spring AI server off (its own default is on). `/mcp` has no auth: never expose it publicly; remote ChatGPT transport is not set up.
+- **Injury/pain safety gate, and what the coach is told about it** (Phase 7B-2 + 7F-3A; package `injury` + `coach`).
+  `injury_report` (V21) is an **append-only self-report ledger** — a status change is always a new row, never an edit, and
+  nothing is ever a diagnosis. `WorkoutSafetyPolicy` (the single, pure policy) turns the latest row into a binary
+  `InjurySafetyDecision`: REST-only unless the latest status is explicitly `RESOLVED` **and** fresher than
+  `running-ai.injury-safety.staleness-hours` (48 h). No report at all, `UNKNOWN`, `ACTIVE`, or any stale status → REST only;
+  nothing infers `RESOLVED` from time passing. Every workout-producing path calls the same `WorkoutSafetyGateService`
+  (draft generate/revise, draft approve, publish preview, approved-draft publish, the legacy deterministic publish and
+  through it its scheduler and MCP tool); a blocked non-REST result is a `WorkoutSafetyViolationException`, never silently
+  rewritten into a REST day. **Never weaken or bypass this gate.** Phase 7F-3A adds the other direction only: because the
+  gate speaks to the coach only while blocking (`constraintText` returns null once training is permitted), a `RESOLVED`
+  report used to leave the coach unaware there had been an injury at all. `CoachTrainingContext.injuryHistory`
+  (`InjuryHistoryContextBuilder`, carried by **both** V1 and V2) now hands the coach the gate verdict plus the capped,
+  structured ledger — `latest`, `previousReports`, `omittedReportCount`, and `daysSinceLatestActiveReport` computed over the
+  **whole** ledger so a past flare-up stays visible. A later `RESOLVED` never deletes an earlier `ACTIVE`; a null symptom
+  field is **unreported**, never "no symptom"; free-text `notes` reach the prompt only as a length-capped excerpt of the
+  latest report (`running-ai.coach.injury-history.max-notes-excerpt-chars`, 0 disables it). The prompt states the rule the
+  data cannot: **`RESOLVED` is the athlete's latest self-report and a data permission, not a medical clearance** — the coach
+  may never declare an injury healed or read a permitted gate as licence to train hard. This is information for the coach,
+  never permission: the gate is unchanged and still decides alone, before and after every coach call.
 - **Training-lifecycle MCP tools, off by default** (Phase 7F-1; package `integration.mcp.train`, Kotlin;
   `docs/architecture/chatgpt-training-mcp.md`). A THIRD independent switch `RUNNINGAI_MCP_TRAIN_ENABLED`
   (`running-ai.mcp.train-enabled`) = false, beside 6C's `enabled` and 7C-2a's `read-enabled`; the Spring AI server turns on
@@ -69,9 +88,11 @@ RunningAI automation (which lives only on the main PC and is NOT in this repo).
   Gateway (`tools/mcp-gateway`): **hard-coded, non-configurable per-tool scope policy** — `runningai:read` (base + the seven
   read tools) / `runningai:train` (the five draft tools) / `runningai:publish` (`publish_approved_draft` only); scopes are
   **not hierarchical**, `tools/list` is filtered to allowlist ∩ granted scopes, a scope failure is a 403 challenge raised
-  before any backend traffic, and `publish_workout` stays permanently un-allowlistable. Real external publish: **NOT_RUN** —
-  the Cloudflare worker still filters scopes to `['runningai:read','offline_access']`, so a train/publish token cannot yet
-  exist; that worker change belongs to Phase 7F-2, together with the first by-hand validation of the draft→Intervals path.
+  before any backend traffic, and `publish_workout` stays permanently un-allowlistable. Real external publish **through MCP**:
+  still **NOT_RUN** — the Cloudflare worker filters scopes to `['runningai:read','offline_access']`, so a train/publish token
+  cannot yet exist. The draft→Intervals path itself is no longer unproven: Phase 7F-2F published approved draft 21 for real
+  (`CREATED`, event 144442046, 2026-10-16, readback verified, idempotent re-call = 0 further writes) over the REST API on a
+  dev instance. Widening the worker's scopes and enabling the production write tools is Phase 7F-3B.
 - **Garmin recovery intelligence** (Phase 6F; package `recovery` + `integration/garmin` + `coach`): connector `GET /recovery?date=`
   (HRV, sleep, resting HR, Body Battery, stress; documented fields only) → `GarminRecoveryClient` → `GarminRecoveryMapper` →
   `garmin_recovery_daily` (V7, unique athlete+date, idempotent merge: a missing metric never clears a stored one) →

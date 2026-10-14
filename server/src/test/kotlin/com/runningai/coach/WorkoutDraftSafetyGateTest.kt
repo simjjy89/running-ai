@@ -70,13 +70,18 @@ class WorkoutDraftSafetyGateTest {
     private fun generate(body: String = """{"date":"2026-10-13"}""") =
         mockMvc.perform(post("/api/v1/workout-drafts").contentType(MediaType.APPLICATION_JSON).content(body))
 
-    private fun report(status: InjuryStatus, painOnWalking: Boolean? = null, athleteId: Long = athleteService.getDefaultAthlete().id) {
-        val now = Instant.now(clock)
+    private fun report(
+        status: InjuryStatus,
+        painOnWalking: Boolean? = null,
+        ageHours: Long = 0,
+        athleteId: Long = athleteService.getDefaultAthlete().id,
+    ) {
+        val at = Instant.now(clock).minusSeconds(ageHours * 3600)
         injuryReportRepository.save(
             InjuryReportEntity(
                 athleteId = athleteId, bodySite = "knee", side = null, painPresent = status == InjuryStatus.ACTIVE,
                 painIntensity = null, painOnWalking = painOnWalking, painOnStairs = null, swelling = null,
-                rangeOfMotionLimited = null, status = status, notes = null, reportedAt = now, recordedAt = now,
+                rangeOfMotionLimited = null, status = status, notes = null, reportedAt = at, recordedAt = at,
             ),
         )
     }
@@ -165,5 +170,56 @@ class WorkoutDraftSafetyGateTest {
         requireNotNull(feedback)
         assertThat(feedback.indexOf("SERVER-ENFORCED SAFETY CONSTRAINT"))
             .isLessThan(feedback.indexOf("I feel completely fine now"))
+    }
+
+    /**
+     * Phase 7F-3A. A RESOLVED report deliberately produces no safety constraint text, which is
+     * exactly why the coach used to learn nothing about the injury at all. The structured injury
+     * history now travels with the context regardless of what the gate decided.
+     */
+    @Test
+    fun `a RESOLVED report reaches the coach as injury history even though the constraint text is silent`() {
+        report(InjuryStatus.RESOLVED)
+        coach.respondWith { CoachTestFixtures.draft(date = it.date, workoutType = "EASY") }
+
+        generate().andExpect(status().isOk)
+
+        val context = coach.createdContexts.single() as TrainingContext
+        assertThat(context.constraints.painOrFatigueFeedback).isNull()
+        val history = requireNotNull(context.injuryHistory)
+        assertThat(requireNotNull(history.latest).status).isEqualTo(InjuryStatus.RESOLVED)
+        assertThat(history.gate.nonRestTrainingAllowed).isTrue()
+    }
+
+    @Test
+    fun `a RESOLVED report following a recent ACTIVE one tells the coach how long ago the injury was`() {
+        report(InjuryStatus.ACTIVE, painOnWalking = true, ageHours = 49)
+        report(InjuryStatus.RESOLVED)
+        coach.respondWith { CoachTestFixtures.draft(date = it.date, workoutType = "EASY") }
+
+        generate().andExpect(status().isOk)
+
+        val history = requireNotNull((coach.createdContexts.single() as TrainingContext).injuryHistory)
+        assertThat(history.daysSinceLatestActiveReport).isEqualTo(2)
+        assertThat(history.previousReports.single().status).isEqualTo(InjuryStatus.ACTIVE)
+    }
+
+    /**
+     * The injury history is information for the coach, never permission. A blocking gate still
+     * blocks with the history present, and the history is still handed over for the REST session
+     * the coach is allowed to design.
+     */
+    @Test
+    fun `the injury history never widens the gate`() {
+        report(InjuryStatus.ACTIVE, painOnWalking = true)
+        coach.respondWith { CoachTestFixtures.draft(date = it.date, workoutType = "EASY") }
+
+        generate()
+            .andExpect(status().isUnprocessableEntity)
+            .andExpect(jsonPath("$.code").value("WORKOUT_SAFETY_INJURY_ACTIVE"))
+
+        val history = requireNotNull((coach.createdContexts.single() as TrainingContext).injuryHistory)
+        assertThat(history.gate.nonRestTrainingAllowed).isFalse()
+        assertThat(repository.count()).isZero()
     }
 }

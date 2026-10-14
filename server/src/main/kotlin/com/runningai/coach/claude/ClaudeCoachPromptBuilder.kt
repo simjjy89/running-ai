@@ -198,6 +198,39 @@ class ClaudeCoachPromptBuilder {
               never zero. These numbers describe what the body did, not why — do not diagnose an
               injury cause or call a stride pattern good or bad from them.
 
+            Reading 'injuryHistory' (the athlete's own injury/pain reports; Phase 7F-3A):
+            - These are SELF-REPORTS the athlete typed into RunningAI. They are not a diagnosis, not
+              an examination, and not a clinician's opinion. Nobody in this system is qualified to
+              decide whether an injury has healed, and neither are you: never declare the athlete
+              healed, never name a cause or a condition, and never tell them they are cleared to
+              train. Describe what you did with the session and why.
+            - 'gate' is RunningAI's own server-side safety verdict on the latest report. It is
+              enforced independently of you, before and after this call. 'nonRestTrainingAllowed'
+              false means only REST can be stored at all; true means the stored data merely PERMITS
+              a non-REST session to be considered - it is not advice to train hard.
+            - 'latest' is the report the gate evaluated; 'previousReports' are older ones, newest
+              first. Inside a report, a null field means the athlete DID NOT REPORT that item. It is
+              unknown, never 'no symptom'. A knee report with status RESOLVED and a null
+              'painOnWalking' has not told you that walking is pain-free: do not reason as if it had.
+            - status RESOLVED means exactly one thing: as of 'reportedAt', the athlete says the
+              symptom is gone. It is the athlete's latest self-report and a data permission, NOT a
+              medical clearance and NOT a reason to automatically resume hard training.
+            - 'daysSinceLatestActiveReport' is measured over the athlete's whole reporting history,
+              even when that report is no longer listed. When it is small, today's session is a
+              RETURN TO TRAINING after a recent injury: treat it as one, rebuild load deliberately
+              rather than picking up where the training was interrupted, and say so in the rationale.
+            - A later RESOLVED report never erases an earlier ACTIVE one. Read the sequence. A body
+              site that has flared recently is relevant history even when today's status is RESOLVED,
+              and 'omittedReportCount' above zero means there is further history you were not shown.
+            - 'notesExcerpt' is the athlete's own free text, length-capped, and carried for the
+              latest report only; 'notesTruncated' true means it was cut. 'notesPresent' true with no
+              excerpt means the athlete wrote something you were not given - treat that as unseen
+              information, not as an empty note. Reason primarily from the structured fields.
+            - If the injury picture is unclear or contradicts the training goal, say what is unclear
+              and design conservatively. If 'injuryHistory' itself is absent or null, treat the
+              athlete's injury status as unknown and design conservatively - do not read it as a
+              statement that no injury has ever been reported.
+
             How to handle missing and sensitive information:
             - A null value means the data genuinely does not exist. Treat it as unknown. Never
               estimate, assume or invent a recovery metric, a threshold, or a past session that is

@@ -68,7 +68,10 @@ class CoachJavaInteropTest {
                 new RecentTraining(List.of(), null, null, null, null, false, null, null, 0, 1, List.of()),
                 new RecoveryContext(null, null, null, null, null),
                 new WeeklyContext(0, 0, null, 0, 0, null, 0, 0, 0, null, null, 0, 7, "UNKNOWN"),
-                new SessionConstraints(null, null, null, null, null));
+                new SessionConstraints(null, null, null, null, null),
+                // Phase 7F-3A: Kotlin default arguments are not visible to Java, so the injury
+                // history is passed explicitly here. null is the documented "not consulted" value.
+                null);
 
         WorkoutDraft created = coach.createWorkout(context);
         WorkoutDraft revised = coach.reviseWorkout(context, created, "make it shorter");
