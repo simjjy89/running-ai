@@ -277,7 +277,9 @@ class CoachDataRefreshService(
 
     private fun refreshRecovery(date: LocalDate): RecoveryRefreshSummary {
         return try {
-            val r = garminRecoverySyncService.backfill(date, properties.recoveryRefreshDays)
+            // onlyMissing = false: this stage deliberately re-fetches D-1..D every tick, because Garmin
+            // fills a night's metrics in late and a day that already looks complete can still gain one.
+            val r = garminRecoverySyncService.backfill(date, properties.recoveryRefreshDays, false)
             if (!r.completed()) {
                 log.warn("Coach data refresh: Garmin recovery refresh stopped early at={} reason={}", r.stoppedAt(), r.stoppedReason())
                 RecoveryRefreshSummary(r.requestedDays(), r.updatedDays(), false, true, "GARMIN_${r.stoppedReason()}")

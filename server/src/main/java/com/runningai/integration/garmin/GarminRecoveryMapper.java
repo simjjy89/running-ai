@@ -29,8 +29,6 @@ import java.util.regex.Pattern;
  */
 final class GarminRecoveryMapper {
 
-    static final List<String> METRICS = List.of("hrv", "sleep", "restingHeartRate", "bodyBattery", "stress");
-
     private static final Pattern HRV_STATUS = Pattern.compile("[A-Za-z0-9_]{1,32}");
 
     private GarminRecoveryMapper() {
@@ -71,18 +69,13 @@ final class GarminRecoveryMapper {
                 nonNegativeInt(stress.path("avgStressLevel")),
                 nonNegativeInt(stress.path("maxStressLevel")));
 
-        Map<String, Boolean> delivered = Map.of(
-                "hrv", values.hrvLastNightAvgMs() != null || values.hrvWeeklyAvgMs() != null || hrvStatus != null,
-                "sleep", values.sleepDurationSeconds() != null || values.sleepScore() != null,
-                "restingHeartRate", restingHeartRate != null,
-                "bodyBattery", values.bodyBatteryHighest() != null || values.bodyBatteryLowest() != null
-                        || values.bodyBatteryCharged() != null || values.bodyBatteryDrained() != null,
-                "stress", values.stressAverage() != null || values.stressMax() != null);
-
+        // Which groups delivered something is decided by GarminRecoveryMetricGroup, the same
+        // predicate the coverage report applies to already-stored values.
         List<String> available = new ArrayList<>();
         Map<String, String> unavailable = new LinkedHashMap<>();
-        for (String name : METRICS) {
-            if (delivered.get(name)) {
+        for (GarminRecoveryMetricGroup group : GarminRecoveryMetricGroup.ALL) {
+            String name = group.connectorName();
+            if (group.isPresentIn(values)) {
                 available.add(name);
             } else {
                 unavailable.put(name, unavailableReason(metrics.path(name)));

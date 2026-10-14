@@ -71,6 +71,9 @@ class GarminRecoverySyncApiTest {
     private RecoveryRepository repository;
 
     @Autowired
+    private GarminRecoveryCollectionRepository collectionRepository;
+
+    @Autowired
     private GarminRecoverySyncService service;
 
     @MockitoBean
@@ -79,6 +82,7 @@ class GarminRecoverySyncApiTest {
     @AfterEach
     void cleanUp() {
         repository.deleteAll();
+        collectionRepository.deleteAll();
     }
 
     private JsonNode body(LocalDate date) throws Exception {
@@ -289,7 +293,8 @@ class GarminRecoverySyncApiTest {
         try {
             sync("{}").andExpect(status().isConflict())
                     .andExpect(jsonPath("$.code").value("GARMIN_RECOVERY_SYNC_ALREADY_RUNNING"));
-            assertThatThrownBy(() -> service.backfill(null, 3)).isInstanceOf(GarminRecoverySyncAlreadyRunningException.class);
+            assertThatThrownBy(() -> service.backfill(null, 3, false))
+                    .isInstanceOf(GarminRecoverySyncAlreadyRunningException.class);
         } finally {
             release.countDown();
             first.join(5000);

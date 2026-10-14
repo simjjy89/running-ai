@@ -115,6 +115,10 @@ running-ai:
       # connector failure (e.g. 429).
       backfill-delay: ${GARMIN_RECOVERY_BACKFILL_DELAY:2s}
       max-backfill-days: 28
+      # Largest window GET /api/v1/garmin/recovery-sync/coverage may report over (Phase 8A). Much
+      # larger than max-backfill-days on purpose: the coverage report is database-only, so looking
+      # further back costs one query and no Garmin call.
+      max-coverage-days: 365
 
   intervals:
     # Intervals.icu workout publisher (IntervalsWorkoutPublisher). The API key comes from the environment only.

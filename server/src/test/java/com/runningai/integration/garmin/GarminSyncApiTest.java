@@ -56,6 +56,9 @@ class GarminSyncApiTest {
     private GarminSyncStateRepository syncStateRepository;
 
     @Autowired
+    private GarminSyncAttemptRepository syncAttemptRepository;
+
+    @Autowired
     private AthleteService athleteService;
 
     @MockitoBean
@@ -73,6 +76,7 @@ class GarminSyncApiTest {
         activityRawRepository.deleteAll();
         activityRepository.deleteAll();
         syncStateRepository.deleteAll();
+        syncAttemptRepository.deleteAll();
     }
 
     @Test

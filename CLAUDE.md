@@ -101,6 +101,32 @@ RunningAI automation (which lives only on the main PC and is NOT in this repo).
   `POST /api/v1/garmin/recovery-sync` and `/backfill` (≤28 days, sequential, no retry, stops at the first connector failure);
   read-only `GET /api/v1/recovery-context`. Spring never turns a recovery value into a training decision; the coach does.
   Live validation: external PC `BLOCKED_BY_CORPORATE_TLS`; main PC `PENDING`.
+- **Collection observability: failure is not absence** (Phase 8A; `integration.garmin` + package `datafreshness`,
+  V27 + V28). `garmin_sync_state` records only what SUCCEEDED and `garmin_recovery_daily` holds no row for a day with no
+  value — both correct, and together they made three different situations look identical in the database: "the source had
+  nothing new", "nothing has run" and "collection failed". Two **pure-observability** tables fix exactly that and nothing
+  else — no code reads them to decide what to fetch. `garmin_sync_attempt` (V27, one row per athlete) records every
+  incremental sync attempt that actually starts: `SUCCESS` / `PARTIAL` (completed with unmappable items, so the checkpoint
+  is held back) / `FAILED`, its counts, `consecutive_failure_count` (any completed attempt resets it) and
+  `last_failure_at`/`last_failure_code` which **survive a later success**. It is a separate table, not columns on
+  `garmin_sync_state`, because that table's timestamps are NOT NULL and so cannot hold the failure of an athlete who has
+  never succeeded; 6H-6's "never touches `garmin_sync_state`" invariant is unchanged. Written at the single choke point
+  `GarminSyncOperationService.runSync()` (manual API + scheduler); a request rejected by the single-flight guard is
+  **deliberately not recorded** — it never reached Garmin, so it is not an attempt. `garmin_recovery_collection` (V28, one
+  row per athlete+date, replaced per attempt) records `STORED` / `NO_DATA` / `FAILED` plus a per-metric outcome for each
+  of the five connector groups (`*_outcome`, never `*_status`: `garmin_recovery_daily.hrv_status` is GARMIN's own label).
+  `GET /api/v1/garmin/recovery-sync/coverage` joins values with outcomes into COMPLETE / PARTIAL / CONFIRMED_NO_DATA /
+  COLLECTION_FAILED / NOT_COLLECTED (stored values decide first; the record only speaks when nothing is stored), and
+  `POST .../backfill` accepts `onlyMissing` (**default false — the old behaviour is byte-identical**) which skips
+  COMPLETE and CONFIRMED_NO_DATA days with no connector call and no inter-day pause. `GarminRecoveryMetricGroup` is the
+  single definition of "this metric delivered something", used by both the mapper and the coverage report. Read-only
+  `GET /api/v1/data-freshness` (DB-only, zero network) reports every source uniformly — latest data date (searched over a
+  **wide 365-day lookback independent of the counting window**, so a stale source reports its real age instead of a null
+  that reads as "no data"), lag, counts, last attempt/success/failure — and the field that matters is
+  `collectionTracked`: false for the manual importers, which keep no attempt ledger, so their old data is never implied to
+  mean "nothing new exists". Analysis currency is `AnalysisReusePolicy`, never a local version comparison. Recording never
+  changes an outcome: it runs in its own `REQUIRES_NEW` transaction and a failure to record is logged and swallowed.
+  No scheduler was enabled and no new switch exists.
 - **Draft approval & safe publish gateway** (Phase 6G; `coach` approval + package `draftpublish`). Lifecycle:
   TrainingContext → ClaudeAiCoach → WorkoutDraft `DRAFT` → optional revision(s) → explicit `POST /api/v1/workout-drafts/{id}/approve`
   (`APPROVED`, V9 `workout_draft_approval`; DB-only, at most one approved draft per athlete+date, approved drafts are immutable:

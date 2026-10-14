@@ -12,10 +12,15 @@ import java.time.Duration;
  * @param backfillDelay pause between two days of a backfill. Each day costs five sequential Garmin
  *                      calls; the pause keeps a 28-day backfill gentle on Garmin's rate limit
  * @param maxBackfillDays largest backfill a single request may ask for
+ * @param maxCoverageDays largest window the database-only coverage report may cover. Larger than
+ *                        {@code maxBackfillDays} on purpose: reporting what is missing costs one
+ *                        query and no Garmin call, so it is free to look further back than a
+ *                        backfill may reach in one run
  */
 @ConfigurationProperties(prefix = "running-ai.garmin.recovery-sync")
 public record GarminRecoverySyncProperties(
         @DefaultValue("2s") Duration backfillDelay,
-        @DefaultValue("28") int maxBackfillDays
+        @DefaultValue("28") int maxBackfillDays,
+        @DefaultValue("365") int maxCoverageDays
 ) {
 }

@@ -25,4 +25,10 @@ public interface ActivityRepository extends JpaRepository<Activity, Long> {
     /** Same half-open range, newest first — for callers that need a deterministic processing order. */
     List<Activity> findByAthleteIdAndStartedAtGreaterThanEqualAndStartedAtLessThanOrderByStartedAtDesc(
             Long athleteId, Instant fromInclusive, Instant toExclusive);
+
+    /** The athlete's newest activity from one external source, for reporting how current that source is. */
+    Optional<Activity> findFirstByAthleteIdAndExternalSourceOrderByStartedAtDesc(
+            Long athleteId, ExternalSource externalSource);
+
+    long countByAthleteIdAndExternalSource(Long athleteId, ExternalSource externalSource);
 }
