@@ -72,6 +72,13 @@ Impact assessed, not assumed:
   ledger implying two separate reports is factually wrong.
 - Open decision for the athlete: delete row id 1, or leave both and annotate.
 
+Root cause, the audit of every other production write path, and the operator rule that follows from
+it are recorded separately in
+[`2026-10-14-phase-7f-3b-2b-followup-duplicate-injury-report.md`](2026-10-14-phase-7f-3b-2b-followup-duplicate-injury-report.md).
+Short version: `||` tests the exit status of the whole pipeline, so the failing pretty-printer — not
+`curl` — made the shell re-run the complete request. No committed script or runbook carries that
+pattern; the append-only endpoint with no idempotency key is correct and is not the defect.
+
 Verified live for the first time (previously unreachable with 0 reports):
 `notesPresent=true` with `notesExcerpt=null`, i.e. `RUNNING_AI_COACH_INJURY_HISTORY_MAX_NOTES_CHARS=0`
 really does keep athlete free text out of the coach prompt while the structured fields still flow.
@@ -165,6 +172,12 @@ after.
 
 No draft was created. `create_workout_draft` writes to the production DB and runs the real Claude
 CLI, so it waits on an explicit date and an explicit go-ahead.
+
+**Update (follow-up, same day):** the READ leg is now verified from ChatGPT against production —
+`get_training_context` answers, the injury gate reads `RESOLVED`, and `notesExcerpt` is not exposed.
+This confirms in production what STEP 5 could only argue from library source: widening the Worker's
+advertised scopes did not invalidate the stored read-only grant. The TRAIN leg is still UNVERIFIED
+and still waits on the connector being re-added with `runningai:train` approved.
 
 ## STEP 8 — System state
 
