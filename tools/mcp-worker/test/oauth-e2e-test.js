@@ -41,6 +41,7 @@ const OWNER_ID = '4242';
 const OWNER_LOGIN = 'runningai-owner';
 const OWNER_SUB = `github|${OWNER_ID}`;
 const SCOPE = 'runningai:read';
+const TRAIN_SCOPE = 'runningai:train';
 const CHATGPT_REDIRECT = 'https://chatgpt.com/connector_platform_oauth_redirect';
 const GITHUB_CLIENT_SECRET = 'stub-github-client-secret-do-not-reuse';
 const READ_TOOLS = ['get_recent_activities', 'get_activity_analysis', 'get_training_context',
@@ -212,12 +213,12 @@ async function pkce() {
 }
 
 /** Walks authorize -> stub GitHub -> callback and returns the final redirect the client receives. */
-async function signIn(clientId, challenge, state, { responseType = 'code' } = {}) {
+async function signIn(clientId, challenge, state, { responseType = 'code', scope = `${SCOPE} offline_access` } = {}) {
   const authorize = new URL(`${WORKER}/authorize`);
   authorize.searchParams.set('response_type', responseType);
   authorize.searchParams.set('client_id', clientId);
   authorize.searchParams.set('redirect_uri', CHATGPT_REDIRECT);
-  authorize.searchParams.set('scope', `${SCOPE} offline_access`);
+  authorize.searchParams.set('scope', scope);
   authorize.searchParams.set('state', state);
   authorize.searchParams.set('code_challenge', challenge);
   authorize.searchParams.set('code_challenge_method', 'S256');
@@ -295,9 +296,13 @@ try {
     asMeta.client_id_metadata_document_supported === false &&
     /"global_fetch_strictly_public"/.test(prodConfig));
   const prMeta = await (await fetch(`${WORKER}/.well-known/oauth-protected-resource/mcp`)).json();
-  assert('protected-resource metadata names this resource, this AS and the read scope',
+  assert('protected-resource metadata names this resource, this AS and the read+train scopes',
     prMeta.resource === `${WORKER}/mcp` && prMeta.authorization_servers[0] === WORKER &&
-    prMeta.scopes_supported.join() === SCOPE);
+    prMeta.scopes_supported.join(' ') === `${SCOPE} ${TRAIN_SCOPE}`);
+  assert('protected-resource metadata never advertises a publish scope',
+    !prMeta.scopes_supported.includes('runningai:publish'));
+  assert('AS metadata offers read, train and offline_access - and no publish scope',
+    (asMeta.scopes_supported || []).join(' ') === `${SCOPE} ${TRAIN_SCOPE} offline_access`);
 
   const reg = await registerClient();
   assert('DCR registers a public client for ChatGPT\'s stable callback',
@@ -395,6 +400,26 @@ try {
     (await fetch(`${WORKER}/api/v1/activities`, { method: 'POST', body: '{}' })).status === 404);
   assert('/actuator/* at the Worker -> 404', (await fetch(`${WORKER}/actuator/health`)).status === 404);
 
+
+  // Phase 7F-3B-2B: what a client ASKS for decides what it gets. The train scope is never added
+  // on the Worker's initiative, and a scope the Worker does not issue is dropped rather than
+  // honoured - so a client cannot widen its own grant by asking for more.
+  async function grantedScopeFor(requestedScope) {
+    const pk = await pkce();
+    const flow = await signIn(clientId, pk.challenge, `state-${Math.random()}`, { scope: requestedScope });
+    const issuedCode = new URL(flow.location).searchParams.get('code');
+    const t = await exchange({ grant_type: 'authorization_code', code: issuedCode, client_id: clientId,
+      redirect_uri: CHATGPT_REDIRECT, code_verifier: pk.verifier });
+    return String(t.body.scope || '').split(' ').filter(Boolean).sort().join(' ');
+  }
+  assert('asking for read only grants read only - never train',
+    (await grantedScopeFor(SCOPE)) === SCOPE);
+  assert('train is granted only when it is explicitly requested',
+    (await grantedScopeFor(`${SCOPE} ${TRAIN_SCOPE}`)) === [SCOPE, TRAIN_SCOPE].sort().join(' '));
+  assert('asking for runningai:publish does NOT grant it',
+    !(await grantedScopeFor(`${SCOPE} ${TRAIN_SCOPE} runningai:publish`)).includes('runningai:publish'));
+  assert('an unknown scope is dropped, and the base scope is still granted',
+    (await grantedScopeFor('admin:everything')) === SCOPE);
   process.stdout.write('\n   secrets must not appear in any log:\n');
   await new Promise((r) => setTimeout(r, 500));
   const workerLog = fs.readFileSync(DEV_LOG, 'utf8');

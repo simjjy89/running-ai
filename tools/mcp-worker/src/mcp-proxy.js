@@ -70,9 +70,14 @@ export async function handleMcpRequest(request, { auth, props, config, deps = {}
     return json(413, { error: 'payload_too_large' });
   }
 
+  // Exactly the RunningAI scopes this token was verified to hold, in the Worker's own fixed
+  // order - never what the request asked for, and never a scope the Worker cannot issue. The
+  // gateway then applies its own hard-coded per-tool policy on top of this.
+  const forwarded = (config.forwardableScopes || [config.requiredScope]).filter((s) => scopes.includes(s));
+
   let hopToken;
   try {
-    hopToken = await mintHopToken(config, subject, now());
+    hopToken = await mintHopToken(config, subject, now(), forwarded);
   } catch (e) {
     log('ERROR', 'hop token could not be minted');
     return json(500, { error: 'internal_error' });
@@ -102,7 +107,7 @@ export async function handleMcpRequest(request, { auth, props, config, deps = {}
 }
 
 // Imported lazily so this module stays dependency-free for tests that stub the mint.
-async function mintHopToken(config, subject, now) {
+async function mintHopToken(config, subject, now, forwardedScopes) {
   const { mintInternalToken } = await import('./internal-jwt.js');
   return mintInternalToken({
     privateJwk: config.privateJwk,
@@ -111,9 +116,12 @@ async function mintHopToken(config, subject, now) {
     // `subject` is the identity the OAuth layer authenticated (`github|<numeric id>`), already
     // checked against the allowlist above — never a constant and never client-supplied.
     subject,
-    // Least privilege: the hop token carries ONLY the read scope that was just verified, even if
-    // the user's token also carries others (offline_access).
-    scope: config.requiredScope,
+    // Least privilege, re-derived per request (Phase 7F-3B-2B): the hop token carries the RunningAI
+    // scopes this access token was just VERIFIED to hold and nothing else - not `offline_access`,
+    // and not a scope this Worker does not issue. Before 7F-3B-2B this was hard-wired to the base
+    // read scope, which is exactly why turning on the gateway's train tools also required a Worker
+    // change: a train-scoped user token would otherwise have arrived at the gateway as read-only.
+    scope: forwardedScopes.join(' '),
     ttlSeconds: config.tokenTtlSeconds || 90,
     now,
   });

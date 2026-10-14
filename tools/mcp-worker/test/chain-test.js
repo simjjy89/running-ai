@@ -241,6 +241,54 @@ try {
   });
   assert('an unauthorized caller is stopped at the Worker, before the gateway',
     refusedChain.status === 403 && backendHits === chainBefore + 1);
+
+  process.stdout.write(`
+E. hop-token scope forwarding (Phase 7F-3B-2B):
+`);
+  // Before 7F-3B-2B the hop token's scope was hard-wired to the base read scope, so a train-scoped
+  // user token arrived at the gateway as read-only. These assertions pin the replacement rule:
+  // exactly the forwardable scopes the access token was VERIFIED to hold, and nothing else.
+  const TRAIN = 'runningai:train';
+  const forwardConfig = { ...config, forwardableScopes: [SCOPE, TRAIN] };
+  async function hopScopeFor(grantedScopes) {
+    let seen = null;
+    await handleMcpRequest(mcpRequest(LIST), {
+      auth: { ...ownerAuth, scope: grantedScopes },
+      props: ownerProps,
+      config: forwardConfig,
+      deps: {
+        fetchImpl: async (url, init) => {
+          const jwt = String(init.headers.Authorization).replace(/^Bearer /, '');
+          seen = JSON.parse(Buffer.from(jwt.split('.')[1], 'base64url').toString()).scope;
+          return new Response('{}', { status: 200 });
+        },
+      },
+    });
+    return seen;
+  }
+  assert('a read-only token forwards exactly runningai:read',
+    (await hopScopeFor([SCOPE])) === SCOPE);
+  assert('a read+train token forwards both, in the fixed Worker order',
+    (await hopScopeFor([TRAIN, SCOPE])) === `${SCOPE} ${TRAIN}`);
+  assert('offline_access is never forwarded',
+    (await hopScopeFor([SCOPE, 'offline_access'])) === SCOPE);
+  assert('a token claiming runningai:publish has it STRIPPED from the hop token',
+    (await hopScopeFor([SCOPE, TRAIN, 'runningai:publish'])) === `${SCOPE} ${TRAIN}`);
+  assert('an unknown scope is never forwarded',
+    (await hopScopeFor([SCOPE, 'admin:everything'])) === SCOPE);
+  assert('with no forwardableScopes configured it falls back to the base scope alone',
+    await (async () => {
+      let seen = null;
+      await handleMcpRequest(mcpRequest(LIST), {
+        auth: { ...ownerAuth, scope: [SCOPE, TRAIN] }, props: ownerProps, config,
+        deps: { fetchImpl: async (url, init) => {
+          const jwt = String(init.headers.Authorization).replace(/^Bearer /, '');
+          seen = JSON.parse(Buffer.from(jwt.split('.')[1], 'base64url').toString()).scope;
+          return new Response('{}', { status: 200 });
+        } },
+      });
+      return seen === SCOPE;
+    })());
 } finally {
   gateway.kill();
   backend.close();

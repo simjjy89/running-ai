@@ -22,8 +22,18 @@ import { AuthorizationError, OAuthProvider } from '@cloudflare/workers-oauth-pro
 import { handleMcpRequest } from './mcp-proxy.js';
 import { authorizationServerMetadata, jwksDocument } from './internal-jwt.js';
 
+// The BASE scope: every token must carry it to reach the resource at all.
 const REQUIRED_SCOPE = 'runningai:read';
-const SCOPES_SUPPORTED = [REQUIRED_SCOPE, 'offline_access'];
+// The draft/approve lifecycle scope (Phase 7F-3B-2B). Separately requestable and separately
+// revocable: a connection that only ever reads never has to be granted it.
+const TRAIN_SCOPE = 'runningai:train';
+// `runningai:publish` is deliberately ABSENT. The gateway's hard-coded policy gives that scope to
+// publish_approved_draft alone, so as long as this Worker cannot issue it, no token reaching the
+// gateway can ever authorize an external Intervals.icu write - whatever a client asks for.
+const SCOPES_SUPPORTED = [REQUIRED_SCOPE, TRAIN_SCOPE, 'offline_access'];
+// What may be re-asserted to the gateway in the hop token. `offline_access` is a refresh-token
+// grant, not a resource permission, so it never travels onward.
+const FORWARDABLE_SCOPES = [REQUIRED_SCOPE, TRAIN_SCOPE];
 const GITHUB_OAUTH_BASE = 'https://github.com';
 const GITHUB_API_BASE = 'https://api.github.com';
 const USER_AGENT = 'RunningAI-MCP-Worker';
@@ -91,6 +101,7 @@ function configOf(env) {
     allowedUserId: `github|${allowedGithubId}`,
     allowedGithubLogin: required(env, 'ALLOWED_GITHUB_LOGIN'),
     requiredScope: REQUIRED_SCOPE,
+    forwardableScopes: FORWARDABLE_SCOPES,
     tokenTtlSeconds: Number(env.HOP_TOKEN_TTL_SECONDS || 90),
     githubClientId: required(env, 'GITHUB_CLIENT_ID'),
     githubClientSecret: required(env, 'GITHUB_CLIENT_SECRET'),
@@ -254,7 +265,14 @@ function buildProvider(env) {
     clientRegistrationEndpoint: '/register',   // DCR (RFC 7591)
     clientIdMetadataDocumentEnabled: true,     // CIMD — ChatGPT's preferred registration
     scopesSupported: SCOPES_SUPPORTED,
-    requiredScopes: [REQUIRED_SCOPE],
+    // What the protected-resource metadata advertises, i.e. what a client learns it may ask for
+    // (Phase 7F-3B-2B adds the train scope so ChatGPT can request it at re-authorization). The
+    // library treats this as advertisement and challenge content, NOT as a per-token requirement -
+    // it never compares a granted token against this list - so every already-issued read-only
+    // token keeps working unchanged, and `offline_access` stays out because it is a refresh grant,
+    // not a resource permission. Enforcement is elsewhere and unchanged: handleMcpRequest demands
+    // REQUIRED_SCOPE, and the gateway demands the right scope per tool.
+    requiredScopes: [REQUIRED_SCOPE, TRAIN_SCOPE],
     accessTokenTTL: 3600,
     resourceMetadata: {
       resource: `${publicBase}/mcp`,
@@ -262,7 +280,7 @@ function buildProvider(env) {
       // No `scopes_supported` here: the library requires the scope list to live in
       // `requiredScopes` above and refuses to start if both are set.
       bearer_methods_supported: ['header'],
-      resource_name: 'RunningAI MCP (read-only)',
+      resource_name: 'RunningAI MCP',
     },
   });
 }
