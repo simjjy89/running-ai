@@ -132,6 +132,20 @@ components.tunnel        UP | DEGRADED | DOWN
 tunnel { state, reason, processId, startedAtUtc, recoverable: false, note }
 ```
 
+**One honest limitation, found by dry-running the new code from this worktree.** Unlike the
+connector and Spring — whose markers include the repository root, so a watchdog in a dev worktree
+cannot touch production's — the gateway is a **machine-global singleton**: one port, one
+`RunningAI-McpGateway` task. A watchdog run from any checkout whose launcher names the same port
+therefore observes, and could recover, the same gateway. That is benign (recovery is
+`Start-ScheduledTask` on the one correct task) and in practice there is only one registered
+watchdog, but it is a real difference from the repo-scoped components and is stated rather than
+left to be discovered. The dry run also shows the components correctly:
+
+```
+mcp-gateway    UP
+tunnel         UP          (observed only; never recovered)
+```
+
 **Backward compatibility.** An observation that predates these components (every hand-built one in
 the test suites) classifies as `UNKNOWN`/`NOT_OBSERVED`, which plans nothing, blocks nothing and
 does not degrade the overall state — "the watchdog did not look" is never reported as a failure. A
