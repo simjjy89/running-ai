@@ -16,7 +16,9 @@ RunningAI automation (which lives only on the main PC and is NOT in this repo).
   `IntervalsWorkoutClient` publish it idempotently with readback verification (Phase 5C-3); no
   scheduler yet), `integration/mcp` (`publish_workout` MCP tool, off by default), `training` (derived training load, workout recommendation/prescription/intensity
   targets), `coach` (Kotlin AI coach, drafts, approval), `recovery`, `draftpublish` (Kotlin, Phase 6G approved-draft publish gateway),
-  `analysis` (Kotlin, Phase 6H-4 running analysis engine: derived evidence only, no coaching judgment). Layering: Controller → Service → Entity → Repository.
+  `analysis` (Kotlin, Phase 6H-4 running analysis engine: derived evidence only, no coaching judgment),
+  `delivery` (Kotlin, Phase 8B: did a published workout reach Garmin — the only place that reads the draft lifecycle
+  and Garmin together, which is why it is not in `draftpublish`). Layering: Controller → Service → Entity → Repository.
 - Implemented: Activity API, ActivityRaw JSONB storage, Garmin ingestion + incremental sync via the
   localhost Python connector (`tools/garmin-connector`; Spring never holds Garmin credentials),
   sync API and opt-in scheduler, Windows (`scripts/windows`) and Linux (`deploy/linux`) runtime
@@ -127,6 +129,49 @@ RunningAI automation (which lives only on the main PC and is NOT in this repo).
   mean "nothing new exists". Analysis currency is `AnalysisReusePolicy`, never a local version comparison. Recording never
   changes an outcome: it runs in its own `REQUIRES_NEW` transaction and a failure to record is logged and swallowed.
   No scheduler was enabled and no new switch exists.
+- **Phase 8B — the automatic sync breaker, the publish ledger, the watch link, and delivery readback**
+  (V29 + V30; `integration.garmin`, `draftpublish`, new package `delivery`, `analysis`, `activity`, `tools/external-relay`,
+  `tools/garmin-connector`). Six independent gaps, none of which changed an existing contract.
+  **(A) `GarminSyncCircuitBreaker`** turns 8A's unread failure ledger into a decision. It governs
+  `GarminSyncScheduler` and **nothing else** — a manual `POST /api/v1/garmin/sync` is never blocked, because that
+  request IS the intervention being waited for and a completed attempt is what clears an auth block, so there is no
+  flag to reset by hand and the breaker can never stop a sync that would have succeeded. Failure classes are not
+  interchangeable (`GarminFailureClass`): AUTH (401/403) stops automatic sync after 3 with **no expiry**, RATE_LIMIT
+  backs off on the first, TRANSIENT is tolerated 8 deep; `minimum-interval` (15m) is a hard floor on automatic request
+  frequency. V30 adds the two states the ledger could not express: `STARTED` written before the connector call, so a
+  killed JVM leaves evidence (`GarminSyncAttemptReconciler` turns a leftover into `INTERRUPTED`, which is **not** a
+  failure and never moves a streak), and `consecutive_partial_count`, separate because a PARTIAL is not a failure yet
+  holds the checkpoint back forever. `GarminActivityRegistry` is advisory only — a wrong answer costs one skipped tick.
+  Switch `RUNNING_AI_GARMIN_CIRCUIT_BREAKER_ENABLED` = true; false restores pre-8B behaviour exactly.
+  **(B)** `GlobalExceptionHandler` answers a wrong verb with **405 + `Allow`** and a missing `@RequestParam` with
+  **400**, both at WARN with no stack; they used to reach the catch-all as 500s whose stack traces diluted the log the
+  watchdog reads. 404 behaviour is unchanged and pinned.
+  **(C)** V29 `workout_draft_publish_attempt` — append-only, one row per attempt. `workout_draft_publication` stays
+  success-only (unchanged). Nothing in the publish path reads the ledger; `external_write_attempted` and
+  `remote_state_certain` are separate because they are different questions, and the second is false for a timeout.
+  It drives no retry: the publisher already refuses to repeat a POST of unknown outcome. Codes only, never a message.
+  `GET /api/v1/workout-drafts/{id}/publish-attempts`.
+  **(D)** `GET /api/v1/today-workout` (in `draftpublish`, not `coach` — `CoachArchitectureTest` forbids that import)
+  reports the **approval**, so the watch sees an approved plan before any publish and a REST day at all; the relay
+  (`tools/external-relay`) asks it first and keeps Intervals.icu + the legacy state file as fallbacks. The watch wire
+  contract `{date,status,label}` is unchanged. No coach free text crosses: structure only, the relay builds the label.
+  An answer for the wrong date or flagged `stale` is discarded; `NO_PLAN` is not a decision and falls through.
+  **(E)** Connector `GET /scheduled-workouts?year=&month=` (read-only; `month` is 1-based here, the library does the
+  0-indexing) + `GET /api/v1/workout-drafts/{id}/delivery-status` (package `delivery`, which exists because
+  `DraftPublishArchitectureTest` forbids a `draftpublish`→`integration.garmin` import). **`GARMIN_NOT_FOUND` is never a
+  failure** — Garmin's calendar returns only committed workouts and the Intervals→Garmin push is Intervals.icu's own
+  integration — and `deviceDelivery` is permanently `UNKNOWN`. **No Garmin write path exists or may be added**: a
+  connector test parses the AST and fails the build if `schedule_workout`/`upload_*_workout`/`push_workout_to_device`
+  appears, and asserts every route is a GET. Contract is STATIC_SOURCE_CONFIRMED only, **not live-verified**.
+  **(F)** `MetricAvailability` (package `activity`) states what an imported activity structurally cannot have and why
+  — cadence (rpm not converted), running dynamics, lap structure, interval groups, HR zones — surfaced in
+  `dataCoverage.metricUnavailability` and per-activity `dataQuality.unavailableMetrics`, with a prompt rule forbidding
+  the coach from reading an absent metric as a low one. `GET /api/v1/training-analysis-report` aggregates the stored
+  history (coverage, volume in equal ceiling-divided slices, fastest efforts near standard distances compared **by
+  pace**, durability, dynamics trend, limitations); it measures and never judges, and a test fails the build if a
+  rating/score/verdict word appears in the response. A "best effort" is the fastest WHOLE stored activity of about
+  that distance, never a verified PB.
+  **Nothing was enabled in production and no external write was performed.**
 - **Draft approval & safe publish gateway** (Phase 6G; `coach` approval + package `draftpublish`). Lifecycle:
   TrainingContext → ClaudeAiCoach → WorkoutDraft `DRAFT` → optional revision(s) → explicit `POST /api/v1/workout-drafts/{id}/approve`
   (`APPROVED`, V9 `workout_draft_approval`; DB-only, at most one approved draft per athlete+date, approved drafts are immutable:
@@ -311,8 +356,11 @@ RunningAI automation (which lives only on the main PC and is NOT in this repo).
 - **Legacy publishing XOR AI Draft publishing** (Phase 6G.1, `draftpublish.PublishingModeGuard`): `WORKOUT_PUBLISHING_ENABLED` and
   `RUNNING_AI_DRAFT_PUBLISHING_ENABLED` both true → application startup fails ("Legacy workout publishing and AI draft publishing
   cannot be enabled at the same time"). Both off or exactly one on starts normally. Never weaken or bypass this guard.
-- Planned, not started: interval/repeat workout structure, QUALITY workout structure,
-  cycling threshold profile, race pace, RPE model, reporting, remote ChatGPT ↔ MCP transport + authentication, missed-run catch-up / retry / notifications for publishing.
+- Planned, not started: interval/repeat workout structure and QUALITY workout structure **in the deterministic
+  prescription path** (`WorkoutPrescriptionPolicy` still refuses QUALITY; the AI draft path already expresses both),
+  cycling threshold profile, race pace, RPE model, remote ChatGPT ↔ MCP transport + authentication, missed-run
+  catch-up / retry / notifications for publishing. Reporting: a descriptive history report exists (Phase 8B,
+  `GET /api/v1/training-analysis-report`); nothing interpretive is planned, because interpretation is the coach's.
 - Skills with the detailed rules: `running-ai-dev` (workflow), `running-ai-database`
   (schema/persistence), `running-ai-integration` (Garmin / external systems).
 
