@@ -163,10 +163,16 @@ RunningAI automation (which lives only on the main PC and is NOT in this repo).
   integration — and `deviceDelivery` is permanently `UNKNOWN`. **No Garmin write path exists or may be added**: a
   connector test parses the AST and fails the build if `schedule_workout`/`upload_*_workout`/`push_workout_to_device`
   appears, and asserts every route is a GET. Contract is STATIC_SOURCE_CONFIRMED only, **not live-verified**.
-  **(F)** `MetricAvailability` (package `activity`) states what an imported activity structurally cannot have and why
-  — cadence (rpm not converted), running dynamics, lap structure, interval groups, HR zones — surfaced in
-  `dataCoverage.metricUnavailability` and per-activity `dataQuality.unavailableMetrics`, with a prompt rule forbidding
-  the coach from reading an absent metric as a low one. `GET /api/v1/training-analysis-report` aggregates the stored
+  **(F)** `MetricAvailability` (package `activity`) states what an activity structurally cannot have and why —
+  surfaced in `dataCoverage.metricUnavailability` and per-activity `dataQuality.unavailableMetrics`, with a prompt rule
+  forbidding the coach from reading an absent metric as a low one. Four of the five are properties of the IMPORT,
+  keyed on `external_source`: cadence (rpm never converted to spm), running dynamics, interval groups (Intervals and
+  Strava laps carry no `intensity`/`wkt_step_index`) and HR zones (**neither** importer writes `activity_zone`).
+  `LAP_STRUCTURE` is **not** a property of the source and is asked of the rows instead: the Strava archive import
+  writes laps INTO activities imported from Intervals.icu, so the same row gains a lap breakdown without its
+  `external_source` changing — keying it on the source claimed all 25 Intervals-sourced activities had no laps when
+  every one of them does. One batched `ActivityDetailStore.activityIdsWithLaps` per window answers it, which also
+  makes a Garmin activity whose detail was never collected say so. `GET /api/v1/training-analysis-report` aggregates the stored
   history (coverage, volume in equal ceiling-divided slices, fastest efforts near standard distances compared **by
   pace**, durability, dynamics trend, limitations); it measures and never judges, and a test fails the build if a
   rating/score/verdict word appears in the response. A "best effort" is the fastest WHOLE stored activity of about
