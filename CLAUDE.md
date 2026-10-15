@@ -56,7 +56,11 @@ RunningAI automation (which lives only on the main PC and is NOT in this repo).
   the Spring AI server off (its own default is on). `/mcp` has no auth: never expose it publicly; remote ChatGPT transport is not set up.
 - **Injury/pain safety gate, and what the coach is told about it** (Phase 7B-2 + 7F-3A; package `injury` + `coach`).
   `injury_report` (V21) is an **append-only self-report ledger** — a status change is always a new row, never an edit, and
-  nothing is ever a diagnosis. `WorkoutSafetyPolicy` (the single, pure policy) turns the latest row into a binary
+  nothing is ever a diagnosis. **"Latest" is `recorded_at DESC, id DESC`, not `recorded_at` alone** (Phase 9): `recordedAt`
+  is `Instant.now(clock)`, so two reports appended inside one tick are indistinguishable by time and the database would be
+  free to return either as latest — which, for this ledger, decides whether training is permitted. Production already holds
+  such a pair 0.5 s apart. Both repository methods carry the tie-break; the gate (`current()`) and the coach context
+  (`history()`) are the only consumers. `WorkoutSafetyPolicy` (the single, pure policy) turns the latest row into a binary
   `InjurySafetyDecision`: REST-only unless the latest status is explicitly `RESOLVED` **and** fresher than
   `running-ai.injury-safety.staleness-hours` (48 h). No report at all, `UNKNOWN`, `ACTIVE`, or any stale status → REST only;
   nothing infers `RESOLVED` from time passing. Every workout-producing path calls the same `WorkoutSafetyGateService`
@@ -178,6 +182,26 @@ RunningAI automation (which lives only on the main PC and is NOT in this repo).
   rating/score/verdict word appears in the response. A "best effort" is the fastest WHOLE stored activity of about
   that distance, never a verified PB.
   **Nothing was enabled in production and no external write was performed.**
+- **Phase 9 — runtime supervision** (`scripts/windows`, no Spring change, no migration). The watchdog
+  (`watch-running-ai.ps1` + `RunningAI.Watchdog.ps1`) now covers three categories, not one.
+  `$script:Components` (docker→postgres→connector→spring) and `$script:IndependentComponents`
+  (`external-relay`, **`mcp-gateway`**) are observed AND recovered, sharing one restart budget, lockout and
+  runtime lock. `$script:ObservedComponents` (**`tunnel`**) is new: reported in `watchdog-status.json` and
+  able to make the overall state `DEGRADED`, but **never restarted and carrying no restart history, budget or
+  lockout** — a Cloudflare Quick Tunnel's hostname is minted when the PROCESS starts, so restarting it mints a
+  different one and silently invalidates the Worker's deployed `ORIGIN_MCP_URL`; the useful output is therefore
+  `tunnel.startedAtUtc`, which is newer than the deployed Worker version exactly when that URL has gone stale.
+  The gateway has **no PID file**: it is identified by the listening socket on the port its launcher
+  (`.runtime\mcp-gateway.cmd`, the sole source of its OAuth/allowlist config) sets, then proved ours by
+  command-line markers — the only identification that separates production 17910 from test 17911. Recovery is
+  `Start-ScheduledTask` because that .cmd runs node in the FOREGROUND; a missing launcher or task is refused
+  (`MCP_GATEWAY_LAUNCHER_MISSING` / `MCP_GATEWAY_TASK_NOT_REGISTERED`), never improvised. An observation that
+  predates these components classifies `NOT_OBSERVED`, which plans nothing and degrades nothing. Both scheduled
+  tasks gain a **second, logon-independent backdated trigger** beside `AtLogOn`: a logon trigger's repetition,
+  once interrupted, cannot be restored by Enable/Start/re-register and leaves the task reporting Ready while it
+  never fires — `NextRunTime`, never `State`, is the honest signal. `scripts/windows/mcp/` also holds an
+  operator-only Quick Tunnel launcher that prints the new hostname and the Worker redeploy it requires, and
+  never performs it. **Nothing was deployed, enabled or re-registered.**
 - **Draft approval & safe publish gateway** (Phase 6G; `coach` approval + package `draftpublish`). Lifecycle:
   TrainingContext → ClaudeAiCoach → WorkoutDraft `DRAFT` → optional revision(s) → explicit `POST /api/v1/workout-drafts/{id}/approve`
   (`APPROVED`, V9 `workout_draft_approval`; DB-only, at most one approved draft per athlete+date, approved drafts are immutable:

@@ -81,8 +81,15 @@ try {
     $longTermState = $state.LongTermState
     Update-LongTermFailureWindow -LongTermState $longTermState -Now $now -WindowHours $LongTermWindowHours
 
+    # $GatewayPort is deliberately not a parameter of this script: it is read from the one launcher
+    # that actually sets it (.runtime\mcp-gateway.cmd), so the watchdog can never supervise a port
+    # production does not use. Phase 9 (A-2).
     $observe = { Get-RuntimeObservation -ConnectorPort $ConnectorPort -SpringPort $SpringPort -RecheckDelaySec $RecheckDelaySec -ReadOnly:$DryRun }
-    $states = Get-ComponentStates (& $observe) -ConnectorPort $ConnectorPort
+    # Phase 9 (A-2): the observation itself is kept, not just the states derived from it. The tunnel's
+    # PID and start time are raw facts that no component STATE can carry (they are not up/down), and
+    # they are the evidence an operator needs after the fact - see $tunnelObservation below.
+    $observation = & $observe
+    $states = Get-ComponentStates $observation -ConnectorPort $ConnectorPort
     $plan = Get-RecoveryPlan -States $states -History $history -Now $now -HistoryAvailable $state.Available -WindowMinutes $WindowMinutes -MaxRestarts $MaxRestarts -LongTermState $longTermState
     $hint = Get-GarminHintFromLog -Now $now
 
@@ -90,7 +97,10 @@ try {
         Write-Host 'DRY RUN - nothing is executed and no files are written.'
         foreach ($c in $script:AllTrackedComponents) {
             $lockNote = if (Test-RunningAiComponentLockedOut -LongTermState $longTermState -Component $c) { ' [LOCKED_OUT]' } else { '' }
-            Write-Host ("{0,-10} {1,-10} {2}{3}" -f $c, $states[$c].State, $states[$c].Reason, $lockNote)
+            Write-Host ("{0,-14} {1,-10} {2}{3}" -f $c, $states[$c].State, $states[$c].Reason, $lockNote)
+        }
+        foreach ($c in $script:ObservedComponents) {
+            Write-Host ("{0,-14} {1,-10} {2} (observed only; never recovered)" -f $c, $states[$c].State, $states[$c].Reason)
         }
         if ($hint) { Write-Host "Garmin hint : $hint (informational; never causes a restart)" }
         if (-not $state.Available) { Write-Host "State       : $($state.Note) -> no recovery this tick (fail safe)" }
@@ -116,7 +126,8 @@ try {
     }
 
     # Final picture (after any recovery) for the status file.
-    $finalStates = if ($steps.Count -gt 0) { Get-ComponentStates (& $observe) -ConnectorPort $ConnectorPort } else { $states }
+    $finalObservation = if ($steps.Count -gt 0) { & $observe } else { $observation }
+    $finalStates = if ($steps.Count -gt 0) { Get-ComponentStates $finalObservation -ConnectorPort $ConnectorPort } else { $states }
     $finalPlan = if ($steps.Count -gt 0) { Get-RecoveryPlan -States $finalStates -History $history -Now $now -HistoryAvailable $state.Available -WindowMinutes $WindowMinutes -MaxRestarts $MaxRestarts -LongTermState $longTermState } else { $plan }
     $blocked = @($finalPlan.Blocked)
     foreach ($b in $blocked) { Write-WatchdogLog -Component $b.Component -State $finalStates[$b.Component].State -Reason $b.Reason -Action 'NONE' -Result 'NOT_TOUCHED' }
@@ -126,6 +137,11 @@ try {
     foreach ($c in $script:AllTrackedComponents) { $budget[$c] = Get-RestartCount -History $history -Component $c -Now $now -WindowMinutes $WindowMinutes }
     $componentStatus = [ordered]@{}
     foreach ($c in $script:AllTrackedComponents) { $componentStatus[$c] = $finalStates[$c].State }
+    # Phase 9 (A-2): observed-only components sit in the SAME map as the recoverable ones, because an
+    # operator reading this file asks "what is up?" and must not have to know which category a
+    # component falls into to get an answer. What differs is only that they never appear in
+    # restartBudget/longTermLockout below - neither concept applies to something never restarted.
+    foreach ($c in $script:ObservedComponents) { $componentStatus[$c] = $finalStates[$c].State }
     $lastAction = if ($steps.Count -gt 0) { ($steps | ForEach-Object { "$($_.Action):$($_.Result)" }) -join ',' } else { 'NONE' }
 
     # Phase 6I-1.7B-2A: surfaces the connector's resolved ownership verdict for operator diagnosis -
@@ -151,10 +167,26 @@ try {
         }
     }
 
+    # Phase 9 (A-2). The single most useful tunnel fact is not "up" but WHEN THIS PROCESS STARTED: a
+    # Cloudflare Quick Tunnel mints a new hostname on every start, and the Worker reaches this machine
+    # through a hostname baked into its deployed ORIGIN_MCP_URL. A startedAtUtc newer than the live
+    # Worker version is exactly the condition under which ChatGPT gets a 502 that looks like - and has
+    # twice been mistaken for - a Worker or gateway fault. Recorded so it can be read afterwards
+    # instead of reconstructed. No hostname, token or credential is read or written here.
+    $tunnelObservation = [ordered]@{
+        state        = $finalStates['tunnel'].State
+        reason       = $finalStates['tunnel'].Reason
+        processId    = if ($finalObservation -and $finalObservation.PSObject.Properties['TunnelProcessId']) { $finalObservation.TunnelProcessId } else { $null }
+        startedAtUtc = if ($finalObservation -and $finalObservation.PSObject.Properties['TunnelStartedAtUtc']) { $finalObservation.TunnelStartedAtUtc } else { $null }
+        recoverable  = $false
+        note         = 'never restarted by the watchdog: a Quick Tunnel restart mints a new hostname and invalidates the deployed Worker ORIGIN_MCP_URL'
+    }
+
     Write-JsonAtomic -Path $script:StatusPath -Object ([ordered]@{
         checkedAt = $now.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
         overall = $overall
         components = $componentStatus
+        tunnel = $tunnelObservation
         blocked = @($blocked | ForEach-Object { "$($_.Component):$($_.Reason)" })
         garminHint = $hint
         lastAction = $lastAction

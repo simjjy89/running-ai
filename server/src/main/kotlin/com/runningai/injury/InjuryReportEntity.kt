@@ -87,9 +87,23 @@ class InjuryReportEntity(
 
 interface InjuryReportRepository : JpaRepository<InjuryReportEntity, Long> {
 
-    /** The athlete's current status: the most recently recorded report, or null when none exists. */
-    fun findFirstByAthleteIdOrderByRecordedAtDesc(athleteId: Long): InjuryReportEntity?
+    /**
+     * The athlete's current status: the most recently recorded report, or null when none exists.
+     *
+     * `recorded_at` alone does not order this ledger. It is written as `Instant.now(clock)`, and two
+     * reports appended inside one clock tick - a retried shell pipeline, a test using a fixed clock -
+     * share it exactly, leaving the database free to return either one as "latest". For an append-only
+     * safety ledger that is not acceptable: which row is latest decides whether the gate permits
+     * training. `id DESC` breaks the tie by insertion order, which is the only correct answer when the
+     * timestamps are equal, and changes nothing when they differ (same precedent as
+     * `AthleteIntensityProfileHistoryRepository`).
+     */
+    fun findFirstByAthleteIdOrderByRecordedAtDescIdDesc(athleteId: Long): InjuryReportEntity?
 
-    /** Full history, newest first. Rows are never updated or deleted, so this is the whole ledger. */
-    fun findByAthleteIdOrderByRecordedAtDesc(athleteId: Long): List<InjuryReportEntity>
+    /**
+     * Full history, newest first. Rows are never updated or deleted, so this is the whole ledger.
+     * Tie-broken on `id DESC` for the same reason as above - and additionally so the coach's
+     * `previousReports` list and `omittedReportCount` cap are stable across calls.
+     */
+    fun findByAthleteIdOrderByRecordedAtDescIdDesc(athleteId: Long): List<InjuryReportEntity>
 }

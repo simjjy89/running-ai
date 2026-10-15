@@ -25,10 +25,14 @@ function Check {
 function New-Obs {
     param($Docker = 'UP', $Postgres = 'healthy', [bool]$ConnectorHealth = $true, [bool]$ConnectorPort = $true, $ConnectorPid = $null,
           [bool]$SpringHealth = $true, [bool]$SpringPort = $true, $SpringPid = $null,
-          [bool]$RelayHealth = $true, [bool]$RelayPort = $true, $RelayPid = $null)
+          [bool]$RelayHealth = $true, [bool]$RelayPort = $true, $RelayPid = $null,
+          [bool]$GatewayHealth = $true, [bool]$GatewayPort = $true, $GatewayPid = $null,
+          $TunnelState = 'UP', $TunnelPid = $null, $TunnelStartedAtUtc = $null)
     [pscustomobject]@{ Docker = $Docker; Postgres = $Postgres; ConnectorHealth = $ConnectorHealth; ConnectorPortUsed = $ConnectorPort
         ConnectorPid = $ConnectorPid; SpringHealth = $SpringHealth; SpringPortUsed = $SpringPort; SpringPid = $SpringPid
-        ExternalRelayHealth = $RelayHealth; ExternalRelayPortUsed = $RelayPort; ExternalRelayPid = $RelayPid }
+        ExternalRelayHealth = $RelayHealth; ExternalRelayPortUsed = $RelayPort; ExternalRelayPid = $RelayPid
+        McpGatewayHealth = $GatewayHealth; McpGatewayPortUsed = $GatewayPort; McpGatewayPid = $GatewayPid
+        TunnelState = $TunnelState; TunnelProcessId = $TunnelPid; TunnelStartedAtUtc = $TunnelStartedAtUtc; TunnelProcessCount = 1 }
 }
 function New-TempDir { $d = Join-Path ([IO.Path]::GetTempPath()) ('ra-wd-' + [guid]::NewGuid().ToString('N')); New-Item -ItemType Directory $d | Out-Null; $d }
 $now = Get-Date
@@ -478,6 +482,252 @@ Check 'status JSON is backward compatible and additionally carries connectorOwne
         $env:RUNNING_AI_TEST_RUNTIME_DIR = $originalEnv
         Remove-Item -Recurse -Force $temp -ErrorAction SilentlyContinue
     }
+}
+
+# ---- Phase 9 (A-1): the watchdog task must not depend on a logon to keep ticking --------------
+
+Check 'A-1: the watchdog task carries TWO triggers - AtLogOn AND a logon-independent standing one' {
+    $parts = New-WatchdogTaskParts -Now ([datetime]'2026-10-15T15:00:00')
+    $kinds = @($parts.Triggers | ForEach-Object { $_.CimClass.CimClassName })
+    (@($parts.Triggers).Count -eq 2) -and
+    ($kinds -contains 'MSFT_TaskLogonTrigger') -and ($kinds -contains 'MSFT_TaskTimeTrigger') -and
+    # .Trigger keeps meaning "the logon trigger" for every existing caller and assertion.
+    ($parts.Trigger.CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger')
+}
+
+Check 'A-1: both watchdog triggers repeat every 5 minutes, and the standing one is backdated so the first repetition is already due' {
+    $fixedNow = [datetime]'2026-10-15T15:00:00'
+    $parts = New-WatchdogTaskParts -Now $fixedNow
+    $standing = @($parts.Triggers | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_TaskTimeTrigger' })[0]
+    ($parts.Trigger.Repetition.Interval -eq 'PT5M') -and ($standing.Repetition.Interval -eq 'PT5M') -and
+    ([datetime]$standing.StartBoundary -lt $fixedNow) -and
+    # StartWhenAvailable is what lets a missed standing occurrence run late instead of being dropped.
+    ($parts.Settings.StartWhenAvailable -eq $true)
+}
+
+Check 'A-1: the installer registers ALL triggers, not just the logon one (source check)' {
+    $src = Get-Content (Join-Path $scripts 'install-running-ai-watchdog-task.ps1') -Raw
+    ($src -match '-Trigger \$parts\.Triggers') -and ($src -notmatch '-Trigger \$parts\.Trigger\b') -and
+    # NextRunTime is the only honest proof the repetition is armed: State and LastTaskResult both
+    # read healthy throughout the 2026-10-15 outage in which the task never ran once.
+    ($src -match 'NextRunTime')
+}
+
+# ---- Phase 9 (A-2): MCP gateway + Cloudflare tunnel ------------------------------------------
+
+Check 'A-2: mcp-gateway is an INDEPENDENT component and tunnel is OBSERVED-ONLY (never in the restart machinery)' {
+    ($script:IndependentComponents -contains 'mcp-gateway') -and
+    ($script:AllTrackedComponents -contains 'mcp-gateway') -and
+    ($script:ObservedComponents -contains 'tunnel') -and
+    # The tunnel is never restarted, so a restart history / budget / lockout bucket for it would be
+    # a slot that can never be filled - and would imply a recovery that deliberately does not exist.
+    ($script:AllTrackedComponents -notcontains 'tunnel') -and
+    ((New-EmptyHistory).ContainsKey('tunnel') -eq $false) -and
+    ((New-EmptyLongTermState).ContainsKey('tunnel') -eq $false) -and
+    ((New-EmptyHistory).ContainsKey('mcp-gateway')) -and ((New-EmptyLongTermState).ContainsKey('mcp-gateway'))
+}
+
+Check 'A-2: a dead gateway plans START_MCP_GATEWAY; an unhealthy one restarts with a graceful stop first' {
+    # Only meaningful when this machine actually has a gateway to recover; otherwise the planner
+    # correctly refuses and says so (asserted by its own check below).
+    if (Get-RunningAiMcpGatewayRecoveryBlocker) { return $true }
+    $dead = Get-ComponentStates (New-Obs -GatewayHealth $false -GatewayPort $false)
+    $sick = Get-ComponentStates (New-Obs -GatewayHealth $false -GatewayPort $true -GatewayPid 4321)
+    $deadPlan = Get-RecoveryPlan -States $dead -History (New-EmptyHistory) -Now $now
+    $sickPlan = Get-RecoveryPlan -States $sick -History (New-EmptyHistory) -Now $now
+    $deadAction = @($deadPlan.Actions | Where-Object { $_.Component -eq 'mcp-gateway' })
+    $sickAction = @($sickPlan.Actions | Where-Object { $_.Component -eq 'mcp-gateway' })
+    ($deadAction.Count -eq 1) -and ($deadAction[0].Action -eq 'START_MCP_GATEWAY') -and (-not $deadAction[0].PreStop) -and
+    ($sickAction.Count -eq 1) -and ($sickAction[0].Action -eq 'RESTART_MCP_GATEWAY') -and ($sickAction[0].PreStop)
+}
+
+Check 'A-2: a port held by a process that is NOT ours is DEGRADED/FOREIGN_PROCESS - blocked, never killed' {
+    # GatewayPid $null with the port in use is exactly what Get-RunningAiMcpGatewayProcessId returns
+    # when the listener fails the command-line identity check.
+    $states = Get-ComponentStates (New-Obs -GatewayHealth $false -GatewayPort $true -GatewayPid $null)
+    $plan = Get-RecoveryPlan -States $states -History (New-EmptyHistory) -Now $now
+    ($states['mcp-gateway'].State -eq 'DEGRADED') -and ($states['mcp-gateway'].Reason -eq 'FOREIGN_PROCESS') -and
+    (@($plan.Actions | Where-Object { $_.Component -eq 'mcp-gateway' }).Count -eq 0) -and
+    (@($plan.Blocked | Where-Object { $_.Component -eq 'mcp-gateway' }).Count -eq 1)
+}
+
+Check 'A-2: a gateway failure never blocks the core chain, and a blocked core chain never blocks the gateway' {
+    $states = Get-ComponentStates (New-Obs -GatewayHealth $false -GatewayPort $false -SpringHealth $false -SpringPort $false)
+    $plan = Get-RecoveryPlan -States $states -History (New-EmptyHistory) -Now $now
+    $actions = @($plan.Actions | ForEach-Object { $_.Component })
+    # Spring is planned regardless of the gateway, exactly as the relay already behaves.
+    ($actions -contains 'spring') -and
+    ((Get-RunningAiMcpGatewayRecoveryBlocker) -or ($actions -contains 'mcp-gateway'))
+}
+
+Check 'A-2: the gateway respects the SAME restart budget as every other component' {
+    $history = New-EmptyHistory
+    $history['mcp-gateway'] = @((ConvertTo-UnixSeconds $now), (ConvertTo-UnixSeconds $now), (ConvertTo-UnixSeconds $now))
+    $plan = Get-RecoveryPlan -States (Get-ComponentStates (New-Obs -GatewayHealth $false -GatewayPort $false)) -History $history -Now $now -MaxRestarts 3
+    (@($plan.Actions | Where-Object { $_.Component -eq 'mcp-gateway' }).Count -eq 0) -and
+    (@($plan.Blocked | Where-Object { $_.Component -eq 'mcp-gateway' -and $_.Reason -in @('RESTART_BUDGET_EXCEEDED', 'MCP_GATEWAY_LAUNCHER_MISSING', 'MCP_GATEWAY_TASK_NOT_REGISTERED') }).Count -eq 1)
+}
+
+Check 'A-2: a stopped tunnel is reported and blocked, NEVER planned for recovery (a restart would mint a new hostname)' {
+    $states = Get-ComponentStates (New-Obs -TunnelState 'DOWN')
+    $plan = Get-RecoveryPlan -States $states -History (New-EmptyHistory) -Now $now
+    ($states['tunnel'].State -eq 'DOWN') -and ($states['tunnel'].Reason -eq 'TUNNEL_PROCESS_NOT_RUNNING') -and
+    (@($plan.Actions | Where-Object { $_.Component -eq 'tunnel' }).Count -eq 0) -and
+    (@($plan.Blocked | Where-Object { $_.Component -eq 'tunnel' -and $_.Reason -eq 'TUNNEL_PROCESS_NOT_RUNNING' }).Count -eq 1)
+}
+
+Check 'A-2: a DOWN tunnel degrades the overall state but never makes it DOWN (nothing here can fix it)' {
+    $states = Get-ComponentStates (New-Obs -TunnelState 'DOWN')
+    $plan = Get-RecoveryPlan -States $states -History (New-EmptyHistory) -Now $now
+    (Get-OverallState -States $states -Blocked $plan.Blocked) -eq 'DEGRADED'
+}
+
+Check 'A-2: two cloudflared processes on one origin are DEGRADED, never auto-resolved' {
+    $states = Get-ComponentStates (New-Obs -TunnelState 'DEGRADED')
+    $plan = Get-RecoveryPlan -States $states -History (New-EmptyHistory) -Now $now
+    ($states['tunnel'].Reason -eq 'MULTIPLE_TUNNEL_PROCESSES') -and
+    (@($plan.Actions).Count -eq 0) -and
+    (@($plan.Blocked | Where-Object { $_.Component -eq 'tunnel' }).Count -eq 1)
+}
+
+Check 'A-2: an observation predating these components reports NOT_OBSERVED, and NOT_OBSERVED is never a failure' {
+    # The exact shape every pre-Phase-9 caller (and every hand-built observation in these suites) has.
+    $legacy = [pscustomobject]@{ Docker='UP'; Postgres='healthy'; ConnectorHealth=$true; ConnectorPortUsed=$true; ConnectorPid=1
+        SpringHealth=$true; SpringPortUsed=$true; SpringPid=1; ExternalRelayHealth=$true; ExternalRelayPortUsed=$true; ExternalRelayPid=1 }
+    $states = Get-ComponentStates $legacy
+    $plan = Get-RecoveryPlan -States $states -History (New-EmptyHistory) -Now $now
+    ($states['mcp-gateway'].Reason -eq 'NOT_OBSERVED') -and ($states['tunnel'].Reason -eq 'NOT_OBSERVED') -and
+    (@($plan.Actions).Count -eq 0) -and (@($plan.Blocked).Count -eq 0) -and
+    # "the watchdog did not look" must never be reported as a degradation.
+    ((Get-OverallState -States $states -Blocked $plan.Blocked) -eq 'UP')
+}
+
+Check 'A-2: a real observation ALWAYS carries both new components, so NOT_OBSERVED cannot occur on a live tick' {
+    $o = Get-RuntimeObservation -ConnectorPort 59997 -SpringPort 59998 -RelayPort 59996 -GatewayPort 59995 -RecheckDelaySec 0 -ReadOnly
+    $names = $o.PSObject.Properties.Name
+    $derived = Get-ComponentStates $o
+    ($names -contains 'McpGatewayHealth') -and ($names -contains 'McpGatewayPortUsed') -and ($names -contains 'McpGatewayPid') -and
+    ($names -contains 'TunnelState') -and ($names -contains 'TunnelProcessId') -and ($names -contains 'TunnelStartedAtUtc') -and
+    # Nothing is listening on those ports and no cloudflared targets them, so the honest answer is
+    # "down", never "not observed".
+    ($derived['mcp-gateway'].Reason -ne 'NOT_OBSERVED') -and ($derived['tunnel'].State -eq 'DOWN')
+}
+
+Check 'A-2: the gateway port is read from the launcher that sets it, never guessed' {
+    $temp = New-TempDir
+    try {
+        $launcher = Join-Path $temp 'mcp-gateway.cmd'
+        Set-Content -LiteralPath $launcher -Value @('@echo off', 'set "RUNNING_AI_GATEWAY_PORT=19123"', 'node server.js') -Encoding ascii
+        $fromLauncher = Get-RunningAiMcpGatewayConfiguredPort -LauncherPath $launcher
+        # A launcher that does not exist must fall back to the documented production port rather
+        # than to some other guess, and must not throw.
+        $missing = Get-RunningAiMcpGatewayConfiguredPort -LauncherPath (Join-Path $temp 'does-not-exist.cmd')
+        ($fromLauncher -eq 19123) -and ($missing -eq 17910)
+    } finally { Remove-Item -Recurse -Force $temp -ErrorAction SilentlyContinue }
+}
+
+Check 'A-2: the tunnel observation matches ONLY a cloudflared pointed at this gateway port, and never truncates' {
+    $lister = {
+        @(
+            [pscustomobject]@{ ProcessId = 11; CommandLine = 'cloudflared.exe tunnel --url http://127.0.0.1:17910'; CreationDate = [datetime]'2026-10-14T20:09:16' },
+            [pscustomobject]@{ ProcessId = 12; CommandLine = 'cloudflared.exe tunnel --url http://127.0.0.1:179100'; CreationDate = [datetime]'2026-10-14T20:09:16' },
+            [pscustomobject]@{ ProcessId = 13; CommandLine = 'cloudflared.exe tunnel --url http://127.0.0.1:1791'; CreationDate = [datetime]'2026-10-14T20:09:16' },
+            [pscustomobject]@{ ProcessId = 14; CommandLine = 'cloudflared.exe tunnel --url http://127.0.0.1:8080'; CreationDate = [datetime]'2026-10-14T20:09:16' }
+        )
+    }
+    $o = Get-RunningAiTunnelObservation -GatewayPort 17910 -ProcessLister $lister
+    ($o.State -eq 'UP') -and ($o.ProcessId -eq 11) -and ($o.Count -eq 1) -and
+    # The start time is the whole point: it is the signal that the Quick Tunnel hostname changed
+    # and the Worker's deployed ORIGIN_MCP_URL is now stale.
+    ($null -ne $o.StartedAtUtc) -and
+    ((Get-RunningAiTunnelObservation -GatewayPort 9999 -ProcessLister $lister).State -eq 'DOWN')
+}
+
+Check 'A-2: two cloudflared on the same origin is reported DEGRADED by the observation itself' {
+    $lister = {
+        @(
+            [pscustomobject]@{ ProcessId = 21; CommandLine = 'cloudflared.exe tunnel --url http://127.0.0.1:17910'; CreationDate = [datetime]'2026-10-14T20:09:16' },
+            [pscustomobject]@{ ProcessId = 22; CommandLine = 'cloudflared.exe tunnel --url http://localhost:17910'; CreationDate = [datetime]'2026-10-15T08:00:00' }
+        )
+    }
+    $o = Get-RunningAiTunnelObservation -GatewayPort 17910 -ProcessLister $lister
+    ($o.State -eq 'DEGRADED') -and ($o.Count -eq 2) -and ($null -eq $o.ProcessId)
+}
+
+Check 'A-2: the gateway process is identified by the listening socket AND proven ours by command line' {
+    $ours = Get-RunningAiMcpGatewayProcessId -Port 17910 -ListenerLookup { param($p) 4242 } -IdentityCheck { param($processId, $markers) $true }
+    $foreign = Get-RunningAiMcpGatewayProcessId -Port 17910 -ListenerLookup { param($p) 4242 } -IdentityCheck { param($processId, $markers) $false }
+    $nothing = Get-RunningAiMcpGatewayProcessId -Port 17910 -ListenerLookup { param($p) $null } -IdentityCheck { param($processId, $markers) $true }
+    ($ours -eq 4242) -and ($null -eq $foreign) -and ($null -eq $nothing)
+}
+
+Check 'A-2: gateway recovery refuses - never guesses - when the launcher is absent' {
+    $temp = New-TempDir
+    try {
+        # A runtime directory with no launcher in it: there is nothing to start, and the gateway's
+        # OAuth issuer/audience/allowlist must never be invented here. Run in a CHILD process so the
+        # test-only RUNNING_AI_TEST_RUNTIME_DIR override is picked up at module load.
+        $module = Join-Path $scripts 'RunningAI.Watchdog.ps1'
+        $script = Join-Path $temp 'probe.ps1'
+        Set-Content -LiteralPath $script -Encoding ascii -Value @(
+            ('. ' + "'" + $module + "'"),
+            'Write-Output ("BLOCKER=" + (Get-RunningAiMcpGatewayRecoveryBlocker))',
+            '$a = [pscustomobject]@{ Component = "mcp-gateway"; Action = "START_MCP_GATEWAY"; Reason = "PROCESS_DEAD"; PreStop = $false }',
+            'Write-Output ("RESULT=" + (Invoke-RunningAiMcpGatewayRecoveryAction -Action $a).ResultCode)'
+        )
+        $out = & powershell -NoProfile -ExecutionPolicy Bypass -Command "`$env:RUNNING_AI_TEST_RUNTIME_DIR = '$temp'; & '$script'" 2>&1 | Out-String
+        ($out -match 'BLOCKER=MCP_GATEWAY_LAUNCHER_MISSING') -and ($out -match 'RESULT=BLOCKED')
+    } finally { Remove-Item -Recurse -Force $temp -ErrorAction SilentlyContinue }
+}
+
+Check 'A-2: the gateway task definition runs the production launcher, with no execution time limit' {
+    $parts = New-McpGatewayTaskParts -Now ([datetime]'2026-10-15T15:00:00')
+    $kinds = @($parts.Triggers | ForEach-Object { $_.CimClass.CimClassName })
+    ($parts.Execute -eq (Get-RunningAiMcpGatewayLauncherPath)) -and
+    # PT0S means "no limit". The hand-registered task carried PT72H, which makes Windows kill a
+    # perfectly healthy gateway every three days.
+    ("$($parts.Settings.ExecutionTimeLimit)" -eq 'PT0S') -and
+    ("$($parts.Settings.MultipleInstances)" -eq 'IgnoreNew') -and
+    (@($parts.Triggers).Count -eq 2) -and ($kinds -contains 'MSFT_TaskLogonTrigger') -and ($kinds -contains 'MSFT_TaskTimeTrigger') -and
+    ($parts.TaskName -eq 'RunningAI-McpGateway')
+}
+
+Check 'A-2: the gateway task installer never writes the launcher or any gateway configuration (source check)' {
+    $src = Get-Content (Join-Path $scripts 'mcp\install-running-ai-mcp-gateway-task.ps1') -Raw
+    ($src -match '-Trigger \$parts\.Triggers') -and
+    # It decides WHEN the launcher runs, never WHAT it contains.
+    ($src -notmatch 'RUNNING_AI_OAUTH_') -and ($src -notmatch 'RUNNING_AI_ALLOWED_TOOLS') -and
+    ($src -notmatch 'Set-Content') -and
+    ($src -match 'publish_approved_draft')   # documented as deliberately absent, never re-listed
+}
+
+Check 'A-2: the tunnel launcher refuses to start a second tunnel for a port that already has one' {
+    # Run against the live gateway port, which does have a tunnel - the refusal is the assertion.
+    # Nothing is started either way, so this is non-destructive whichever branch is taken.
+    $script = Join-Path $scripts 'mcp\start-cloudflare-quick-tunnel.ps1'
+    $port = Get-RunningAiMcpGatewayConfiguredPort
+    if ((Get-RunningAiTunnelObservation -GatewayPort $port).State -ne 'UP') { return $true }
+    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $script -Port $port 2>&1 | Out-String
+    ($out -match 'already running') -and ($out -match 'Not starting a second one')
+}
+
+Check 'A-2: the tunnel launcher prints the new hostname and the Worker redeploy, but never performs it (source check)' {
+    $src = Get-Content (Join-Path $scripts 'mcp\start-cloudflare-quick-tunnel.ps1') -Raw
+    # Starting a Quick Tunnel mints a hostname the deployed Worker does not know. The script must
+    # say so; deploying is an external write and an operator decision, never a side effect here.
+    ($src -match 'trycloudflare') -and ($src -match 'ORIGIN_MCP_URL') -and
+    ($src -notmatch '&\s*npx') -and ($src -notmatch 'Start-Process.*wrangler') -and
+    ($src -notmatch 'Invoke-RestMethod') -and ($src -notmatch 'Invoke-WebRequest')
+}
+
+Check 'A-2: watchdog recovery never reaches cloudflared at all (source check)' {
+    $watchdogSrc = Get-Content (Join-Path $scripts 'RunningAI.Watchdog.ps1') -Raw
+    $tunnelSrc = Get-Content (Join-Path $scripts 'mcp\RunningAI.CloudflareTunnel.Common.ps1') -Raw
+    # The tunnel module observes and nothing else: no start, no stop, no kill anywhere in it.
+    ($tunnelSrc -notmatch 'Start-Process') -and ($tunnelSrc -notmatch 'Stop-Process') -and
+    ($tunnelSrc -notmatch 'Stop-TrackedProcess') -and ($tunnelSrc -notmatch 'Start-ScheduledTask') -and
+    # And the watchdog itself never names a tunnel action.
+    ($watchdogSrc -notmatch 'START_TUNNEL') -and ($watchdogSrc -notmatch 'RESTART_TUNNEL')
 }
 
 if ($failures.Count) {

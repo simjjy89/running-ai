@@ -60,13 +60,13 @@ class InjuryStateService(
     @Transactional(readOnly = true)
     fun current(): InjuryReport? {
         val athleteId = athleteService.getDefaultAthlete().id
-        return repository.findFirstByAthleteIdOrderByRecordedAtDesc(athleteId)?.toDomain()
+        return repository.findFirstByAthleteIdOrderByRecordedAtDescIdDesc(athleteId)?.toDomain()
     }
 
     /** Full history for the default athlete, newest first. */
     @Transactional(readOnly = true)
     fun history(): List<InjuryReport> {
         val athleteId = athleteService.getDefaultAthlete().id
-        return repository.findByAthleteIdOrderByRecordedAtDesc(athleteId).map { it.toDomain() }
+        return repository.findByAthleteIdOrderByRecordedAtDescIdDesc(athleteId).map { it.toDomain() }
     }
 }

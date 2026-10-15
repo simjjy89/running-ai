@@ -13,6 +13,8 @@
 . "$PSScriptRoot\RunningAI.Common.ps1"
 . "$PSScriptRoot\RunningAI.ConnectorOwnership.ps1"
 . "$PSScriptRoot\external\RunningAI.ExternalRelay.Common.ps1"
+. "$PSScriptRoot\mcp\RunningAI.McpGateway.Common.ps1"
+. "$PSScriptRoot\mcp\RunningAI.CloudflareTunnel.Common.ps1"
 
 $script:Components = @('docker', 'postgres', 'connector', 'spring')   # dependency order
 # The external relay has no dependency relationship with the chain above (or with itself across
@@ -20,8 +22,20 @@ $script:Components = @('docker', 'postgres', 'connector', 'spring')   # dependen
 # Spring failure never blocks relay recovery and a relay failure never blocks docker/postgres/
 # connector/spring recovery. It still shares the same restart-budget/history machinery as the
 # chain, via $script:AllTrackedComponents.
-$script:IndependentComponents = @('external-relay')
+#
+# Phase 9 (A-2) adds the MCP gateway here. It belongs with the relay, not in the core chain: it
+# proxies to Spring but does not depend on Spring being up to run, and - more importantly - a core
+# chain that is blocked or failing must never stop the one hop ChatGPT reaches this machine through
+# from being recovered.
+$script:IndependentComponents = @('external-relay', 'mcp-gateway')
 $script:AllTrackedComponents = $script:Components + $script:IndependentComponents
+# Phase 9 (A-2): observed and reported, NEVER recovered. A third category exists because the
+# Cloudflare Quick Tunnel genuinely cannot be restarted safely from here - doing so mints a new
+# hostname and silently invalidates the deployed Worker (see mcp\RunningAI.CloudflareTunnel.Common.ps1).
+# Components in this list appear in watchdog-status.json and can make the overall state DEGRADED,
+# but they carry no restart history, no restart budget and no long-term lockout, because none of
+# those concepts means anything for something that is never restarted.
+$script:ObservedComponents = @('tunnel')
 $script:StatePath  = Join-Path $script:RuntimeDir 'watchdog-state.json'
 $script:StatusPath = Join-Path $script:RuntimeDir 'watchdog-status.json'
 $script:WatchdogLogPath = Join-Path $script:LogDir 'watchdog.log'
@@ -283,7 +297,7 @@ function Write-WatchdogLog {
 # ---- observation ---------------------------------------------------------------------------
 
 function Get-DefaultProbes {
-    param([int]$ConnectorPort, [int]$SpringPort, [int]$RelayPort, [switch]$ReadOnly)
+    param([int]$ConnectorPort, [int]$SpringPort, [int]$RelayPort, [int]$GatewayPort, [switch]$ReadOnly)
     $compose = Join-Path (Get-RepoRoot) 'docker-compose.yml'
     # .GetNewClosure() gives each probe its own copy of $ConnectorPort/$SpringPort/$RelayPort/
     # $compose so they keep working after Get-DefaultProbes returns - but a closure's new session
@@ -311,6 +325,11 @@ function Get-DefaultProbes {
     $getConnectorMarkersFn = ${function:Get-ConnectorMarkers}
     $getSpringMarkersFn    = ${function:Get-SpringMarkers}
     $getExternalRelayMarkersFn = ${function:Get-ExternalRelayMarkers}
+    # Phase 9 (A-2): same captured-function-reference rule as every probe above - these closures
+    # must not resolve a helper by NAME (see the long comment at the top of this function).
+    $testMcpGatewayHealthFn    = ${function:Test-RunningAiMcpGatewayHealth}
+    $getMcpGatewayProcessIdFn  = ${function:Get-RunningAiMcpGatewayProcessId}
+    $getTunnelObservationFn    = ${function:Get-RunningAiTunnelObservation}
     @{
         Docker = {
             if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { return 'NO_CLI' }
@@ -334,6 +353,15 @@ function Get-DefaultProbes {
         ExternalRelayHealth   = { & $testExternalRelayHealthFn $RelayPort }.GetNewClosure()
         ExternalRelayPortUsed = { & $testPortInUseFn $RelayPort }.GetNewClosure()
         ExternalRelayPid      = { & $getTrackedProcessIdFn 'external-relay' (& $getExternalRelayMarkersFn) -ReadOnly:$ReadOnly }.GetNewClosure()
+        # The gateway has no .pid file, so there is no stale-file side effect to suppress and
+        # -ReadOnly is irrelevant to it: identity comes from the listening socket plus command-line
+        # markers (see mcp\RunningAI.McpGateway.Common.ps1). McpGatewayPid therefore doubles as the
+        # port-in-use answer - a port held by a process that is NOT ours returns $null here and is
+        # reported by McpGatewayPortUsed, exactly the FOREIGN_PROCESS split the other components use.
+        McpGatewayHealth   = { & $testMcpGatewayHealthFn $GatewayPort }.GetNewClosure()
+        McpGatewayPortUsed = { & $testPortInUseFn $GatewayPort }.GetNewClosure()
+        McpGatewayPid      = { & $getMcpGatewayProcessIdFn -Port $GatewayPort }.GetNewClosure()
+        Tunnel             = { & $getTunnelObservationFn -GatewayPort $GatewayPort }.GetNewClosure()
     }
 }
 
@@ -346,11 +374,12 @@ function Get-RuntimeObservation {
         [int]$ConnectorPort = 8765,
         [int]$SpringPort = 8080,
         [int]$RelayPort = (Get-ExternalRelayConfiguredPort),
+        [int]$GatewayPort = (Get-RunningAiMcpGatewayConfiguredPort),
         [int]$RecheckDelaySec = 10,
         [hashtable]$Probes,
         [switch]$ReadOnly
     )
-    $p = Get-DefaultProbes -ConnectorPort $ConnectorPort -SpringPort $SpringPort -RelayPort $RelayPort -ReadOnly:$ReadOnly
+    $p = Get-DefaultProbes -ConnectorPort $ConnectorPort -SpringPort $SpringPort -RelayPort $RelayPort -GatewayPort $GatewayPort -ReadOnly:$ReadOnly
     if ($Probes) { foreach ($k in $Probes.Keys) { $p[$k] = $Probes[$k] } }
 
     $docker = & $p.Docker
@@ -371,11 +400,22 @@ function Get-RuntimeObservation {
     if (-not $rHealth -and $rPid -and $RecheckDelaySec -gt 0) { Start-Sleep -Seconds $RecheckDelaySec; $rHealth = [bool](& $p.ExternalRelayHealth) }
     $rPort = if ($rHealth) { $true } else { [bool](& $p.ExternalRelayPortUsed) }
 
+    $gPid = & $p.McpGatewayPid
+    $gHealth = [bool](& $p.McpGatewayHealth)
+    if (-not $gHealth -and $gPid -and $RecheckDelaySec -gt 0) { Start-Sleep -Seconds $RecheckDelaySec; $gHealth = [bool](& $p.McpGatewayHealth) }
+    $gPort = if ($gHealth) { $true } else { [bool](& $p.McpGatewayPortUsed) }
+
+    # Observed only - never re-probed, never recovered (see $script:ObservedComponents).
+    $tunnel = & $p.Tunnel
+
     [pscustomobject]@{
         Docker = $docker; Postgres = $postgres
         ExternalRelayHealth = $rHealth; ExternalRelayPortUsed = $rPort; ExternalRelayPid = $rPid
         ConnectorHealth = $cHealth; ConnectorPortUsed = $cPort; ConnectorPid = $cPid
         SpringHealth = $sHealth; SpringPortUsed = $sPort; SpringPid = $sPid
+        McpGatewayHealth = $gHealth; McpGatewayPortUsed = $gPort; McpGatewayPid = $gPid
+        TunnelState = $tunnel.State; TunnelProcessId = $tunnel.ProcessId
+        TunnelStartedAtUtc = $tunnel.StartedAtUtc; TunnelProcessCount = $tunnel.Count
     }
 }
 
@@ -454,6 +494,29 @@ function Get-ComponentStates {
     $states['connector'] = Get-ConnectorComponentState $o.ConnectorHealth $o.ConnectorPortUsed $o.ConnectorPid $ConnectorPort
     $states['spring']    = Get-ProcessComponentState $o.SpringHealth $o.SpringPortUsed $o.SpringPid
     $states['external-relay'] = Get-ProcessComponentState $o.ExternalRelayHealth $o.ExternalRelayPortUsed $o.ExternalRelayPid
+
+    # Phase 9 (A-2). Both keys are ALWAYS set, even when the observation does not carry the fields,
+    # because a hashtable lookup that misses returns $null and every caller then reads .State off it -
+    # which throws under Set-StrictMode. NOT_OBSERVED is the honest value for an observation built
+    # before these components existed (every hand-built one in the test suites), and it is treated
+    # throughout as "the watchdog did not look", never as "it is broken": it plans no action, adds no
+    # blocked entry, and does not degrade the overall state. The real Get-RuntimeObservation always
+    # populates the fields, so NOT_OBSERVED can never appear on a live tick.
+    $states['mcp-gateway'] = if ($o.PSObject.Properties['McpGatewayHealth']) {
+        Get-ProcessComponentState $o.McpGatewayHealth $o.McpGatewayPortUsed $o.McpGatewayPid
+    } else { New-State 'UNKNOWN' 'NOT_OBSERVED' }
+
+    $states['tunnel'] = if ($o.PSObject.Properties['TunnelState']) {
+        switch ($o.TunnelState) {
+            'UP'       { New-State 'UP' }
+            # Two cloudflared processes on the same origin: at most one matches the hostname the
+            # Worker has deployed, and nothing on this machine can tell which. Reported, never resolved.
+            'DEGRADED' { New-State 'DEGRADED' 'MULTIPLE_TUNNEL_PROCESSES' }
+            'DOWN'     { New-State 'DOWN' 'TUNNEL_PROCESS_NOT_RUNNING' }
+            default    { New-State 'UNKNOWN' 'TUNNEL_STATE_UNREADABLE' }
+        }
+    } else { New-State 'UNKNOWN' 'NOT_OBSERVED' }
+
     return $states
 }
 
@@ -555,7 +618,14 @@ function Get-RecoveryPlan {
     # core chain either. Same restart-budget/history machinery, evaluated independently.
     foreach ($c in $script:IndependentComponents) {
         $s = $States[$c]
+        # Phase 9 (A-2). Two ways a caller can say nothing about a component, both meaning "not
+        # looked at" rather than "broken", and neither may produce an action or a blocked entry:
+        # a $States map that predates the component entirely (every hand-built one in the test
+        # suites), and an observation that carries no fields for it (Get-ComponentStates marks
+        # that NOT_OBSERVED). A real tick always supplies both, so neither can occur in production.
+        if (-not $s) { continue }
         if ($s.State -eq 'UP') { continue }
+        if ($s.State -eq 'UNKNOWN' -and $s.Reason -eq 'NOT_OBSERVED') { continue }
 
         if ($LongTermState -and (Test-RunningAiComponentLockedOut -LongTermState $LongTermState -Component $c)) {
             [void]$blocked.Add([pscustomobject]@{ Component = $c; Reason = 'LOCKED_OUT' }); continue
@@ -571,6 +641,24 @@ function Get-RecoveryPlan {
                     default     { $unrecoverable = "EXTERNAL_RELAY_$($s.Reason)" }
                 }
             }
+            'mcp-gateway' {
+                # Phase 9 (A-2). Same shape as the relay, plus one extra refusal the relay has no
+                # equivalent of: recovery here is Start-ScheduledTask against the one launcher that
+                # holds the gateway's entire configuration, so when either that launcher or its task
+                # is absent there is nothing to start - and inventing a replacement command would
+                # mean inventing OAuth issuer/audience/allowed-tool settings. Reported, never guessed.
+                $blocker = Get-RunningAiMcpGatewayRecoveryBlocker
+                if ($blocker) {
+                    $unrecoverable = $blocker
+                } else {
+                    switch ($s.State) {
+                        'DOWN'      { $action = 'START_MCP_GATEWAY' }
+                        'UNHEALTHY' { $action = 'RESTART_MCP_GATEWAY'; $preStop = $true }
+                        'DEGRADED'  { $unrecoverable = $s.Reason }   # FOREIGN_PROCESS - never kill, never replace
+                        default     { $unrecoverable = "MCP_GATEWAY_$($s.Reason)" }
+                    }
+                }
+            }
         }
 
         if ($unrecoverable) { [void]$blocked.Add([pscustomobject]@{ Component = $c; Reason = $unrecoverable }); continue }
@@ -581,14 +669,36 @@ function Get-RecoveryPlan {
         [void]$actions.Add([pscustomobject]@{ Component = $c; Action = $action; Reason = $s.Reason; PreStop = $preStop })
     }
 
+    # ---- observed-only components (Phase 9 A-2: the Cloudflare tunnel) ------------------------
+    # A third pass that can only ever produce a Blocked entry, never an Action. That is not a
+    # degenerate case of the loops above: for these components "not UP" is a fact to surface, and
+    # there is deliberately no recovery to budget, defer or charge. $ready is neither read nor
+    # written here, so this can neither be blocked by nor block anything else.
+    foreach ($c in $script:ObservedComponents) {
+        $s = $States[$c]
+        if (-not $s -or $s.State -eq 'UP') { continue }
+        if ($s.State -eq 'UNKNOWN' -and $s.Reason -eq 'NOT_OBSERVED') { continue }
+        [void]$blocked.Add([pscustomobject]@{ Component = $c; Reason = $s.Reason })
+    }
+
     [pscustomobject]@{ Actions = @($actions); Blocked = @($blocked) }
 }
 
 # UP | DEGRADED | DOWN from the final states, blocked reasons and the optional Garmin hint.
 function Get-OverallState {
     param([Parameter(Mandatory)]$States, $Blocked = @(), [string]$GarminHint)
-    $values = @($script:AllTrackedComponents | ForEach-Object { $States[$_].State })
+    $notObserved = { param($st) $st.State -eq 'UNKNOWN' -and $st.Reason -eq 'NOT_OBSERVED' }
+    $values = @($script:AllTrackedComponents | ForEach-Object { $States[$_] } |
+        Where-Object { -not (& $notObserved $_) } | ForEach-Object { $_.State })
+    # Phase 9 (A-2): observed-only components count towards DEGRADED but never towards DOWN. DOWN in
+    # this file means "something the watchdog can and will fix is dead"; a stopped tunnel is a real
+    # outage of the ChatGPT path but not one any action here can end, and the Blocked entry the
+    # planner adds for it already makes the overall state DEGRADED and says why. NOT_OBSERVED
+    # contributes nothing at all - the watchdog did not look, so it has nothing to report.
+    $observed = @($script:ObservedComponents | ForEach-Object { if ($States[$_]) { $States[$_] } } |
+        Where-Object { -not (& $notObserved $_) } | ForEach-Object { $_.State })
     if (@($values | Where-Object { $_ -eq 'DOWN' }).Count -gt 0) { return 'DOWN' }
+    $values = $values + $observed
     if (@($values | Where-Object { $_ -ne 'UP' }).Count -gt 0 -or @($Blocked).Count -gt 0 -or $GarminHint) { return 'DEGRADED' }
     return 'UP'
 }
@@ -657,6 +767,70 @@ function Test-RunningAiRecoverySucceeded {
     return ($states[$Component].State -eq 'UP')
 }
 
+<#
+  MCP gateway recovery for ONE action (Phase 9, A-2). Mirrors the relay helper - same runtime lock,
+  same outcome vocabulary, same budget/lockout machinery - with two differences that come from what
+  the gateway actually is, not from preference:
+
+  1. The start is Start-ScheduledTask, not a spawned child. .runtime\mcp-gateway.cmd runs node in
+     the FOREGROUND and holds the gateway's entire configuration (OAuth issuer/audience, allowed
+     subject, the 12-tool allowlist). Spawning it as a watchdog child would block for the whole
+     child timeout and then KILL the gateway that had just started; re-expressing its configuration
+     here would be a second source of truth for the security policy. The Scheduled Task is detached
+     and its MultipleInstances=IgnoreNew makes a redundant start a no-op.
+  2. Because the start is asynchronous, exit codes say nothing. Success is defined ONLY as the
+     health endpoint answering within $ReadyTimeoutSec - the same rule the rest of this file already
+     applies on top of exit codes (an exit 0 is never itself proof).
+
+  The runtime lock is taken even though the gateway is independent of the core chain: it is what
+  makes a watchdog restart provably unable to interleave with release-spring-jar.ps1 /
+  start-running-ai.ps1 / stop-running-ai.ps1.
+#>
+function Invoke-RunningAiMcpGatewayRecoveryAction {
+    param(
+        [Parameter(Mandatory)]$Action,
+        [int]$LockTimeoutSec = 10,
+        [int]$ReadyTimeoutSec = 30,
+        [scriptblock]$StartTask = { param($name) Start-ScheduledTask -TaskName $name -ErrorAction Stop }
+    )
+
+    $blocker = Get-RunningAiMcpGatewayRecoveryBlocker
+    if ($blocker) {
+        Write-Step "MCP gateway recovery blocked: $blocker."
+        return (New-RunningAiRecoveryOutcome -AttemptedComponent 'mcp-gateway' -ResultCode 'BLOCKED' -ActionPerformed $Action.Action)
+    }
+
+    $lock = Enter-RunningAiRuntimeLock -TimeoutSec $LockTimeoutSec
+    if (-not $lock) {
+        Write-Step 'Recovery of mcp-gateway deferred: another start/stop against this runtime is already in progress (BUSY). Nothing touched.'
+        return (New-RunningAiRecoveryOutcome -AttemptedComponent 'mcp-gateway' -ResultCode 'BUSY' -ActionPerformed $Action.Action)
+    }
+    try {
+        $port = Get-RunningAiMcpGatewayConfiguredPort
+        if ($Action.PreStop) {
+            # Only ever a process this repository owns: Get-RunningAiMcpGatewayProcessId returns the
+            # listener's PID exclusively when its command line proves it. A foreign owner has already
+            # been classified DEGRADED/FOREIGN_PROCESS and never reaches here.
+            $tracked = Get-RunningAiMcpGatewayProcessId -Port $port
+            if ($tracked) { Stop-TrackedProcess -ProcessId $tracked -Markers (Get-RunningAiMcpGatewayMarkers) -TimeoutSec 10 | Out-Null }
+        }
+
+        try { & $StartTask (Get-RunningAiMcpGatewayTaskName) } catch {
+            Write-WatchdogLog -Component 'mcp-gateway' -State 'RECOVERING' -Reason $Action.Reason -Action $Action.Action -Result 'START_TASK_FAILED'
+            return (New-RunningAiRecoveryOutcome -AttemptedComponent 'mcp-gateway' -ResultCode 'FAILED' -ActionPerformed $Action.Action -ActualFailedComponent 'mcp-gateway')
+        }
+
+        $ready = Wait-Until -TimeoutSec $ReadyTimeoutSec -PollSec 1 -Test { Test-RunningAiMcpGatewayHealth $port }.GetNewClosure()
+        if (-not $ready) {
+            Write-WatchdogLog -Component 'mcp-gateway' -State 'RECOVERING' -Reason $Action.Reason -Action $Action.Action -Result 'FAILED_VERIFICATION_STILL_NOT_UP'
+            return (New-RunningAiRecoveryOutcome -AttemptedComponent 'mcp-gateway' -ResultCode 'FAILED' -ActionPerformed $Action.Action -ActualFailedComponent 'mcp-gateway')
+        }
+        return (New-RunningAiRecoveryOutcome -AttemptedComponent 'mcp-gateway' -ResultCode 'SUCCESS' -ActionPerformed $Action.Action)
+    } finally {
+        Exit-RunningAiRuntimeLock $lock
+    }
+}
+
 # Maps a start-running-ai.ps1 exit code back to the component it actually describes - $ExitCode.Java
 # (JDK discovery) maps to 'spring' (Java is only ever needed to start Spring in this codebase, never
 # the Python connector), $ExitCode.Ok and any unrecognized code map to $null (no specific component -
@@ -683,6 +857,9 @@ function Invoke-RecoveryAction {
     param([Parameter(Mandatory)]$Action, [int]$ConnectorPort = 8765, [int]$SpringPort = 8080, [int]$LockTimeoutSec = 10)
     if ($Action.Component -eq 'external-relay') {
         return (Invoke-RunningAiRelayRecoveryAction -Action $Action -LockTimeoutSec $LockTimeoutSec)
+    }
+    if ($Action.Component -eq 'mcp-gateway') {
+        return (Invoke-RunningAiMcpGatewayRecoveryAction -Action $Action -LockTimeoutSec $LockTimeoutSec)
     }
     return (Invoke-RunningAiCoreRecoveryAction -Action $Action -ConnectorPort $ConnectorPort -SpringPort $SpringPort -LockTimeoutSec $LockTimeoutSec)
 }
@@ -1005,18 +1182,103 @@ function Save-RunningAiWatchdogStateReconciled {
 
 # ---- scheduled task definition (built in memory; registering is the installer's job) ------------
 
+<#
+  The watchdog Scheduled Task, built in memory (registering it is the installer's job).
+
+  TWO triggers, not one - and this is the Phase 9 (A-1) fix, not decoration. The task used to carry
+  only the AtLogOn trigger below. An AtLogOn trigger's repetition is a RUNNING INSTANCE that exists
+  only between a logon and the next: anything that tears that instance down - Disable-ScheduledTask
+  being the one measured here - leaves the task looking perfectly healthy (State = Ready,
+  LastTaskResult = 0) while never firing again until the next logon. Measured 2026-10-15: production
+  ran unsupervised for ~20 minutes and neither Enable-ScheduledTask, Start-ScheduledTask nor a full
+  Register-ScheduledTask -Force brought the repetition back; the only honest signal was an empty
+  NextRunTime.
+
+  The second trigger is a plain Once trigger with the same repetition and a start boundary in the
+  past, plus StartWhenAvailable. It is not tied to a logon, so it re-arms on its own after any
+  interruption and after a task-engine restart. Running two triggers over one task is free here:
+  MultipleInstances = IgnoreNew (and watch-running-ai.ps1's own named mutex) mean two triggers that
+  coincide produce at most one run.
+
+  $BackdateMinutes puts that start boundary in the past so the first repetition is due immediately
+  rather than one full interval after registration.
+#>
 function New-WatchdogTaskParts {
-    param([string]$User = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name, [int]$IntervalMinutes = 5, [int]$InitialDelayMinutes = 5)
+    param(
+        [string]$User = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name,
+        [int]$IntervalMinutes = 5,
+        [int]$InitialDelayMinutes = 5,
+        [int]$BackdateMinutes = 5,
+        [datetime]$Now = (Get-Date)
+    )
     $script = Join-Path $PSScriptRoot 'watch-running-ai.ps1'
     $ps = (Get-Command powershell.exe).Source
     $arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $(Quote-Argument $script)"
     $action = New-ScheduledTaskAction -Execute $ps -Argument $arguments -WorkingDirectory (Get-RepoRoot)
-    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $User
-    $repeat = (New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes)).Repetition
-    $trigger.Repetition = $repeat
-    $trigger.Delay = 'PT{0}M' -f $InitialDelayMinutes          # give RunningAI-Startup time to finish
+
+    $repetition = (New-ScheduledTaskTrigger -Once -At $Now -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes)).Repetition
+
+    $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $User
+    $logonTrigger.Repetition = $repetition
+    $logonTrigger.Delay = 'PT{0}M' -f $InitialDelayMinutes     # give RunningAI-Startup time to finish
+
+    $standingTrigger = New-ScheduledTaskTrigger -Once -At $Now.AddMinutes(-$BackdateMinutes) -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes)
+
     $principal = New-ScheduledTaskPrincipal -UserId $User -LogonType Interactive -RunLevel Limited
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
         -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -StartWhenAvailable
-    [pscustomobject]@{ Action = $action; Trigger = $trigger; Principal = $principal; Settings = $settings; Script = $script; Arguments = $arguments; Execute = $ps; User = $User }
+    [pscustomobject]@{
+        Action = $action
+        # .Trigger remains the logon trigger so existing callers and assertions keep their meaning;
+        # .Triggers is what must actually be registered.
+        Trigger = $logonTrigger
+        Triggers = @($logonTrigger, $standingTrigger)
+        Principal = $principal; Settings = $settings; Script = $script; Arguments = $arguments; Execute = $ps; User = $User
+    }
+}
+
+<#
+  The MCP gateway Scheduled Task (Phase 9, A-2). The ACTION is the launcher production already uses,
+  verbatim - .runtime\mcp-gateway.cmd holds the gateway's whole configuration (OAuth issuer and
+  audience, allowed subject, the 12-tool allowlist with publish_approved_draft deliberately absent)
+  and nothing here re-expresses any of it.
+
+  Two settings differ deliberately from the task that was registered by hand:
+
+  * ExecutionTimeLimit = 0 (none). The hand-registered task carried PT72H, which makes Windows KILL
+    a perfectly healthy gateway every three days. A long-lived server process must have no time limit.
+  * An AtLogOn trigger plus a backdated Once+repetition trigger, for the same reason as the watchdog
+    above. The hand-registered task had a single fixed-time trigger that had already elapsed, so it
+    would never have started again by itself - after a reboot the gateway simply stayed down.
+
+  The repetition on a long-running server task is not a restart loop: IgnoreNew means each repetition
+  is a no-op while the gateway is alive, and a recovery the moment it is not.
+#>
+function New-McpGatewayTaskParts {
+    param(
+        [string]$User = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name,
+        [int]$IntervalMinutes = 5,
+        [int]$InitialDelayMinutes = 2,
+        [int]$BackdateMinutes = 5,
+        [datetime]$Now = (Get-Date)
+    )
+    $launcher = Get-RunningAiMcpGatewayLauncherPath
+    $action = New-ScheduledTaskAction -Execute $launcher -WorkingDirectory (Get-RepoRoot)
+
+    $repetition = (New-ScheduledTaskTrigger -Once -At $Now -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes)).Repetition
+    $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $User
+    $logonTrigger.Repetition = $repetition
+    $logonTrigger.Delay = 'PT{0}M' -f $InitialDelayMinutes
+    $standingTrigger = New-ScheduledTaskTrigger -Once -At $Now.AddMinutes(-$BackdateMinutes) -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes)
+
+    $principal = New-ScheduledTaskPrincipal -UserId $User -LogonType Interactive -RunLevel Limited
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+        -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -StartWhenAvailable
+    [pscustomobject]@{
+        Action = $action
+        Trigger = $logonTrigger
+        Triggers = @($logonTrigger, $standingTrigger)
+        Principal = $principal; Settings = $settings; Execute = $launcher; User = $User
+        TaskName = (Get-RunningAiMcpGatewayTaskName)
+    }
 }

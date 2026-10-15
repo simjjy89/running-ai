@@ -729,8 +729,12 @@ Check 'watch-running-ai.ps1 never acquires the runtime lock directly; only Runni
     $watchSrc = Get-Content (Join-Path $scripts 'watch-running-ai.ps1') -Raw
     $enterCount = ([regex]::Matches($watchdogSrc, '\$lock = Enter-RunningAiRuntimeLock')).Count
     $finallyExitCount = ([regex]::Matches($watchdogSrc, '(?s)finally \{\s*Exit-RunningAiRuntimeLock \$lock\s*\}')).Count
+    # The rule is "every acquisition in this module is released in a finally, and watch-running-ai.ps1
+    # acquires none at all" - not a fixed number of recovery helpers. Phase 9 added a third (the MCP
+    # gateway), and a magic count would have had to be bumped by hand for each one, turning a real
+    # invariant into a changelog. >= 2 keeps the original floor; the equality is the invariant.
     ($watchSrc -notmatch 'Enter-RunningAiRuntimeLock') -and
-    ($enterCount -eq 2) -and ($finallyExitCount -eq 2) -and
+    ($enterCount -ge 2) -and ($finallyExitCount -eq $enterCount) -and
     ($watchdogSrc -notmatch '(?s)Start-Process -FilePath \$ps -ArgumentList \$argLine -WindowStyle Hidden -PassThru\b(?!.{0,400}Start-RunningAiWatchdogTrustedChild)')
 }
 
@@ -744,6 +748,25 @@ Check 'Invoke-RunningAiCoreRecoveryAction and Invoke-RunningAiRelayRecoveryActio
     $relayFn = [regex]::Match($src, '(?s)function Invoke-RunningAiRelayRecoveryAction \{.*?\n\}\r?\n').Value
     ($coreFn -match 'Start-RunningAiWatchdogTrustedChild') -and ($relayFn -match 'Start-RunningAiWatchdogTrustedChild') -and
     ($coreFn -notmatch 'Start-Process -FilePath \$ps') -and ($relayFn -notmatch 'Start-Process -FilePath \$ps')
+}
+
+# Phase 9 (A-2). The gateway helper is the one recovery path that must spawn NOTHING: its start is
+# Start-ScheduledTask against the launcher production already uses, because .runtime\mcp-gateway.cmd
+# runs node in the foreground (a spawned child would be killed at the child timeout) and holds the
+# gateway's OAuth/tool-allowlist configuration, which must have exactly one source.
+Check 'Invoke-RunningAiMcpGatewayRecoveryAction starts the gateway ONLY via its Scheduled Task, never a spawned child or a re-expressed launcher (source check)' {
+    $src = Get-Content (Join-Path $scripts 'RunningAI.Watchdog.ps1') -Raw
+    $fn = [regex]::Match($src, '(?s)function Invoke-RunningAiMcpGatewayRecoveryAction \{.*?
+\}?
+').Value
+    ($fn.Length -gt 0) -and
+    ($fn -match 'Start-ScheduledTask') -and
+    ($fn -match '\$lock = Enter-RunningAiRuntimeLock') -and
+    ($fn -notmatch 'Start-RunningAiWatchdogTrustedChild') -and
+    ($fn -notmatch 'Start-Process') -and
+    ($fn -notmatch 'node\.exe') -and
+    ($fn -notmatch 'RUNNING_AI_GATEWAY_') -and
+    ($fn -notmatch 'RUNNING_AI_ALLOWED_TOOLS')
 }
 
 Check 'start-running-ai.ps1 and stop-running-ai.ps1 both acquire and release the runtime lock (source check)' {
