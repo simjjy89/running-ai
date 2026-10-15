@@ -191,13 +191,39 @@ one is outside this release's scope. Rollback for the relay alone remains one ke
 | Gateway `/health`; unauthenticated `POST /mcp` | 200; **401**, backend untouched |
 | Gateway allowlist | **12** tools; `publish_approved_draft` **not** listed; `publish_workout` permanently un-allowlistable |
 | Spring `/mcp tools/list` after restart | **13** tools |
-| Read tool `get_athlete_profile` | PASS real profile (LTHR 176 bpm, threshold pace 290 s/km) |
-| Train tool `get_workout_draft` (read) | PASS draft 17 returned with `correlationId` |
+| Read tool `get_athlete_profile` (loopback) | PASS real profile (LTHR 176 bpm, threshold pace 290 s/km) |
+| Train tool `get_workout_draft` (loopback, read) | PASS draft 17 returned with `correlationId` |
 | Error contract | PASS `get_fitness_trend` without args → `INVALID_ARGUMENT`, `isError: true` |
 
-**PENDING — the authenticated OAuth leg.** The gateway validates bearer tokens against the Worker's
-JWKS and the signing key exists only as a Worker secret, so no local process can mint an acceptable
-token. This is by design, not a gap. It needs one real ChatGPT sign-in (see §8).
+### The authenticated OAuth read leg — PASS (closed 2026-10-15 13:15 KST)
+
+Initially PENDING: the gateway validates bearer tokens against the Worker's JWKS and the signing
+key exists only as a Worker secret, so no local process can mint an acceptable token. Closed by a
+real ChatGPT sign-in and one `get_athlete_profile` call, cross-checked in two independent logs:
+
+| Evidence | Line |
+|---|---|
+| Gateway | `2026-10-15T04:15:56.606Z INFO tools/call get_athlete_profile authorized (scope runningai:read)` |
+| Spring | `2026-10-15T13:15:56.627+09:00 INFO … MCP read tool get_athlete_profile: ok` (PID 29204) |
+
+Same request, **21 ms apart** (04:15:56Z = 13:15:56 KST), on the **post-deploy jar** — the deploy
+was 12:31 KST, so this exercised `0fce192`, not the old one. The returned values
+(LTHR 176 bpm, threshold pace 290 s/km, `initialized: true`) are identical to the loopback call,
+so the whole chain returned the same real data. No DB write, no external publish.
+
+**The Worker-side log could not be cross-checked from this machine**, and this is a tooling limit,
+not a doubt: `observability` is enabled in `wrangler.jsonc`, but `wrangler tail` is a *live*
+session only and wrangler 4.x has no historical-log query, so a request that already completed is
+unreachable without the dashboard or the Observability API. It is also not needed — the gateway
+accepted an **RS256 token validated against the Worker's JWKS**, and the matching private key
+exists only as a Worker secret, so the token provably originated at the Worker.
+
+> **Scope note — this call verified READ only.** It carried `runningai:read` and nothing else.
+> **It is not evidence for the train scope.** The last authenticated train call through the gateway
+> was `2026-10-15T03:06:55Z` (12:06:55 KST), which **predates this deploy**; post-deploy the train
+> tool was exercised only over loopback, which bypasses OAuth entirely. The authenticated train leg
+> therefore remains unverified on `0fce192`, and the known 7F-3B-3 state (ChatGPT's grant is
+> read-only) is unchanged by this release.
 
 ---
 
@@ -276,7 +302,8 @@ see a missing file. Read it with a retry.
 | 2 | `RUNNING_AI_GARMIN_SCHEDULER_ENABLED=true` + restart | Only after item 1 has produced a clean `SUCCESS` and 24 h of quiet |
 | 3 | Recovery backfill with `onlyMissing=true` | 9 days in the 28-day window are `NOT_COLLECTED` |
 | 4 | Watch-face device confirmation | `HAS_PLAN`/`REST` rendering proven by tests, not on the device |
-| 5 | Authenticated ChatGPT MCP read/train call | Impossible locally by design; needs one real sign-in |
+| 5 | ~~Authenticated ChatGPT MCP **read** call~~ | **DONE 2026-10-15 13:15 KST — PASS**, see §5 |
+| 5b | Authenticated ChatGPT MCP **train** call | Still open. The read call above proves nothing about it, and ChatGPT's grant is still read-only (7F-3B-3). Widening it is Phase 7F-3B's remaining work, not this release's |
 | 6 | Any real Intervals.icu publish; any OAuth scope change | Both publishing switches stay `false`; Worker scopes unchanged |
 | 7 | The `id DESC` tie-break of §3 | Behaviour-preserving, but it is a code change after the release was verified |
 
