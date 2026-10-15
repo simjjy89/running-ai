@@ -77,11 +77,19 @@ this runbook causes, and the backup must predate it.
 
 ### 1.3 Release
 
+The Phase 9 code is on the local branch **`phase-9-operations`**, not on `main` and not pushed.
+Getting it onto the production checkout is itself an approval item, and it comes first:
+
 ```powershell
-cd C:\running-ai-github
-git fetch origin; git merge --ff-only origin/main      # must fast-forward
+cd C:\running-ai-github            # the production checkout, on main
+git merge --ff-only phase-9-operations   # must fast-forward; it was branched from origin/main
+git log --oneline -3                     # confirm the Phase 9 commits are now on main
 .\scripts\windows\release-spring-jar.ps1 -Build
 ```
+
+Pushing `main` to `origin` is a **separate** decision and is not required to deploy. If it is
+approved, push after the release has been verified, so the remote never advertises a commit that
+production rejected.
 
 Leave the watchdog running throughout (rule 0.1).
 
