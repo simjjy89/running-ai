@@ -9,6 +9,7 @@ import java.time.Instant;
 
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -17,7 +18,43 @@ import static org.mockito.Mockito.when;
 class GarminSyncSchedulerTest {
 
     private final GarminSyncOperationService operationService = mock(GarminSyncOperationService.class);
-    private final GarminSyncScheduler scheduler = new GarminSyncScheduler(operationService);
+    private final GarminSyncCircuitBreaker circuitBreaker = mock(GarminSyncCircuitBreaker.class);
+    private final GarminSyncScheduler scheduler = new GarminSyncScheduler(operationService, circuitBreaker);
+
+    @org.junit.jupiter.api.BeforeEach
+    void allowByDefault() {
+        when(circuitBreaker.evaluate()).thenReturn(GarminSyncGateDecision.allow());
+    }
+
+    /**
+     * The point of the breaker: a blocked tick must not reach Garmin at all. Verifying that no
+     * call is made is the assertion that matters - logging a skip while still syncing would be
+     * worse than no breaker.
+     */
+    @Test
+    void aBlockedTickNeverCallsTheSyncService() {
+        when(circuitBreaker.evaluate()).thenReturn(GarminSyncGateDecision.blocked(
+                GarminSyncGateReason.AUTH_FAILURES, "3 consecutive authentication failures", null));
+
+        assertThatCode(scheduler::runScheduledSync).doesNotThrowAnyException();
+
+        verify(operationService, never()).runSync();
+    }
+
+    @Test
+    void aTickRunsAgainAsSoonAsTheBreakerAllowsIt() {
+        when(circuitBreaker.evaluate())
+                .thenReturn(GarminSyncGateDecision.blocked(GarminSyncGateReason.RATE_LIMITED, "cooling down",
+                        Instant.now()))
+                .thenReturn(GarminSyncGateDecision.allow());
+        when(operationService.runSync())
+                .thenReturn(new GarminSyncResponse(0, 0, 0, 0, 0, 1, false, null, null));
+
+        scheduler.runScheduledSync();
+        scheduler.runScheduledSync();
+
+        verify(operationService, times(1)).runSync();
+    }
 
     @Test
     void tickCallsTheSharedOperationServiceExactlyOnce() {

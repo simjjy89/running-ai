@@ -12,13 +12,16 @@ public class GarminSyncStatusService {
 
     private final GarminSyncStateService syncStateService;
     private final GarminSyncAttemptService attemptService;
+    private final GarminSyncCircuitBreaker circuitBreaker;
     private final AthleteService athleteService;
 
     public GarminSyncStatusService(GarminSyncStateService syncStateService,
                                    GarminSyncAttemptService attemptService,
+                                   GarminSyncCircuitBreaker circuitBreaker,
                                    AthleteService athleteService) {
         this.syncStateService = syncStateService;
         this.attemptService = attemptService;
+        this.circuitBreaker = circuitBreaker;
         this.athleteService = athleteService;
     }
 
@@ -27,10 +30,11 @@ public class GarminSyncStatusService {
         GarminSyncAttemptStatus lastAttempt = attemptService.find(athleteId)
                 .map(GarminSyncAttemptStatus::of)
                 .orElse(null);
+        GarminSyncGateDecision automaticSync = circuitBreaker.evaluate();
         Optional<GarminSyncState> state = syncStateService.find(athleteId);
         return state
                 .map(s -> new GarminSyncStatusResponse(true, s.getHighWaterStartedAt(), s.getLastSuccessfulSyncAt(),
-                        lastAttempt))
-                .orElseGet(() -> new GarminSyncStatusResponse(false, null, null, lastAttempt));
+                        lastAttempt, automaticSync))
+                .orElseGet(() -> new GarminSyncStatusResponse(false, null, null, lastAttempt, automaticSync));
     }
 }

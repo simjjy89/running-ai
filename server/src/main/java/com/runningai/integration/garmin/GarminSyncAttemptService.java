@@ -5,6 +5,7 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -29,6 +30,18 @@ public class GarminSyncAttemptService {
         return repository.findByAthleteId(athleteId);
     }
 
+    /**
+     * Marks an attempt as in flight, before the connector is called (Phase 8B). Its own
+     * transaction, like every other write here, so the row is visible - and survives - whatever
+     * the sync itself goes on to do.
+     */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void recordStarted(Long athleteId, Instant attemptedAt) {
+        GarminSyncAttempt attempt = attemptFor(athleteId);
+        attempt.recordStarted(attemptedAt);
+        repository.save(attempt);
+    }
+
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void recordCompleted(Long athleteId, Instant attemptedAt, GarminIncrementalSyncResult result) {
         GarminSyncAttempt attempt = attemptFor(athleteId);
@@ -41,6 +54,19 @@ public class GarminSyncAttemptService {
         GarminSyncAttempt attempt = attemptFor(athleteId);
         attempt.recordFailure(attemptedAt, failureCode);
         repository.save(attempt);
+    }
+
+    /**
+     * Converts every row still claiming to be in flight into {@code INTERRUPTED} (Phase 8B) and
+     * reports how many there were. Called once at startup: inside a running JVM a {@code STARTED}
+     * row means a sync really is running, and only a restart proves otherwise.
+     */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public int markInterrupted(String failureCode) {
+        List<GarminSyncAttempt> stale = repository.findByOutcome(GarminSyncAttemptOutcome.STARTED);
+        stale.forEach(attempt -> attempt.recordInterrupted(failureCode));
+        repository.saveAll(stale);
+        return stale.size();
     }
 
     /**

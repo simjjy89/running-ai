@@ -34,6 +34,12 @@ import java.util.concurrent.locks.ReentrantLock;
  * {@link GarminRecoveryCollectionService}, so a missing recovery row stops being ambiguous. And a
  * backfill may be asked to skip days that already hold everything Garmin can give
  * ({@code onlyMissing}), which removes pointless connector calls rather than changing any outcome.
+ * <p>
+ * Phase 8B only announces the work to {@link GarminActivityRegistry}. The recovery lock and the
+ * activity-sync lock are separate - correctly, since neither operation can corrupt the other - but
+ * that let an hourly activity tick land in the middle of a 28-day backfill and add requests to an
+ * account already being worked hard. The scheduler now sees that and waits a tick. Nothing about
+ * what this service fetches, stores or rejects changes.
  */
 @Service
 public class GarminRecoverySyncService {
@@ -45,18 +51,21 @@ public class GarminRecoverySyncService {
     private final GarminRecoveryCollectionService collectionService;
     private final AthleteService athleteService;
     private final GarminRecoverySyncProperties properties;
+    private final GarminActivityRegistry registry;
     private final Clock clock;
     private final ReentrantLock lock = new ReentrantLock();
 
     public GarminRecoverySyncService(GarminRecoveryClient client, RecoverySnapshotService snapshotService,
                                      GarminRecoveryCollectionService collectionService,
                                      AthleteService athleteService, GarminRecoverySyncProperties properties,
+                                     GarminActivityRegistry registry,
                                      Clock clock) {
         this.client = client;
         this.snapshotService = snapshotService;
         this.collectionService = collectionService;
         this.athleteService = athleteService;
         this.properties = properties;
+        this.registry = registry;
         this.clock = clock;
     }
 
@@ -64,7 +73,7 @@ public class GarminRecoverySyncService {
     public GarminRecoverySyncResponse syncDay(LocalDate requested) {
         LocalDate date = resolve(requested);
         lockOrReject();
-        try {
+        try (GarminActivityRegistry.Handle ignored = registry.enter(GarminActivityRegistry.Operation.RECOVERY_SYNC)) {
             return fetchAndStore(date);
         } finally {
             lock.unlock();
@@ -91,7 +100,7 @@ public class GarminRecoverySyncService {
         }
         LocalDate startDate = endDate.minusDays(days - 1L);
         lockOrReject();
-        try {
+        try (GarminActivityRegistry.Handle ignored = registry.enter(GarminActivityRegistry.Operation.RECOVERY_SYNC)) {
             Set<LocalDate> targets = targetDates(startDate, endDate, onlyMissing);
             log.info("Garmin recovery backfill started: {} .. {} ({} days, onlyMissing={}, {} to fetch)",
                     startDate, endDate, days, onlyMissing, targets.size());

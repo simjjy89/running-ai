@@ -63,7 +63,11 @@ class CoachInjuryHistoryContextTest {
         painOnWalking: Boolean? = null,
         notes: String? = null,
     ) {
-        val at = Instant.now().minus(Duration.ofHours(ageHours))
+        // One extra second of slack, not cosmetic: ageHours is whole hours TRUNCATED, so a
+        // timestamp exactly N hours old lands on the boundary and any sub-microsecond rounding on
+        // the way into the column makes it read back as N-1. The assertions are about N, not about
+        // the boundary, so the test must not sit on it.
+        val at = Instant.now().minus(Duration.ofHours(ageHours)).minusSeconds(1)
         reports.save(
             InjuryReportEntity(
                 athleteId = athleteService.getDefaultAthlete().id,

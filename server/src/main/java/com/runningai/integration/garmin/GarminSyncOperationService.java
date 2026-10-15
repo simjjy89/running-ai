@@ -22,6 +22,14 @@ import java.util.concurrent.locks.ReentrantLock;
  * recorded: it never reached Garmin, so it is not a collection attempt. Recording never changes
  * the outcome - a failure to record is logged and swallowed, and the original exception always
  * propagates unchanged.
+ * <p>
+ * Phase 8B adds the start of the attempt to that record. The outcome used to be written only once
+ * the run ended, which meant a JVM killed mid-sync (watchdog restart, sleep, power loss) left no
+ * trace at all and the ledger still described whatever ran before it. Now a {@code STARTED} row is
+ * written first and overwritten by the real outcome, so a {@code STARTED} row surviving a restart
+ * is itself the evidence of an interruption ({@link GarminSyncAttemptReconciler} converts it). The
+ * same window of work is also announced to {@link GarminActivityRegistry}, so the scheduler can see
+ * that Garmin is already busy. Neither addition can change what is fetched or what is stored.
  */
 @Service
 public class GarminSyncOperationService {
@@ -31,6 +39,7 @@ public class GarminSyncOperationService {
     private final GarminIncrementalSyncService incrementalSyncService;
     private final GarminSyncStatusService statusService;
     private final GarminSyncAttemptService attemptService;
+    private final GarminActivityRegistry registry;
     private final AthleteService athleteService;
     private final Clock clock;
     private final ReentrantLock lock = new ReentrantLock();
@@ -38,11 +47,13 @@ public class GarminSyncOperationService {
     public GarminSyncOperationService(GarminIncrementalSyncService incrementalSyncService,
                                       GarminSyncStatusService statusService,
                                       GarminSyncAttemptService attemptService,
+                                      GarminActivityRegistry registry,
                                       AthleteService athleteService,
                                       Clock clock) {
         this.incrementalSyncService = incrementalSyncService;
         this.statusService = statusService;
         this.attemptService = attemptService;
+        this.registry = registry;
         this.athleteService = athleteService;
         this.clock = clock;
     }
@@ -54,14 +65,18 @@ public class GarminSyncOperationService {
         }
         Long athleteId = athleteService.getDefaultAthlete().getId();
         Instant attemptedAt = clock.instant();
-        try {
-            GarminIncrementalSyncResult result = incrementalSyncService.syncIncremental();
-            record(() -> attemptService.recordCompleted(athleteId, attemptedAt, result));
-            return GarminSyncResponse.of(result, statusService.getStatus().lastSuccessfulSyncAt());
-        } catch (RuntimeException e) {
-            String failureCode = GarminCollectionFailureCode.of(e);
-            record(() -> attemptService.recordFailure(athleteId, attemptedAt, failureCode));
-            throw e;
+        try (GarminActivityRegistry.Handle ignored =
+                     registry.enter(GarminActivityRegistry.Operation.INCREMENTAL_SYNC)) {
+            record(() -> attemptService.recordStarted(athleteId, attemptedAt));
+            try {
+                GarminIncrementalSyncResult result = incrementalSyncService.syncIncremental();
+                record(() -> attemptService.recordCompleted(athleteId, attemptedAt, result));
+                return GarminSyncResponse.of(result, statusService.getStatus().lastSuccessfulSyncAt());
+            } catch (RuntimeException e) {
+                String failureCode = GarminCollectionFailureCode.of(e);
+                record(() -> attemptService.recordFailure(athleteId, attemptedAt, failureCode));
+                throw e;
+            }
         } finally {
             lock.unlock();
         }

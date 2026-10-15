@@ -252,6 +252,10 @@ class GarminSyncAttemptRecordingTest {
      * Scenario 6: two syncs at once. The rejected one never reached Garmin, so it is not a collection
      * attempt and must not appear in the record - otherwise a busy scheduler would manufacture
      * failures that never happened.
+     * <p>
+     * Since Phase 8B the winning run announces itself as STARTED before calling the connector, so
+     * mid-flight there IS one row. That makes the assertion sharper rather than weaker: the rejected
+     * request must add no second row and must not turn the in-flight row into a failure.
      */
     @Test
     void aRejectedConcurrentRunIsNotRecordedAsAnAttempt() throws Exception {
@@ -270,7 +274,11 @@ class GarminSyncAttemptRecordingTest {
 
             assertThatThrownBy(() -> operationService.runSync())
                     .isInstanceOf(GarminSyncAlreadyRunningException.class);
-            assertThat(attemptRepository.findAll()).isEmpty();
+            assertThat(attemptRepository.findAll()).hasSize(1);
+            GarminSyncAttempt inFlight = attempt();
+            assertThat(inFlight.getOutcome()).isEqualTo(GarminSyncAttemptOutcome.STARTED);
+            assertThat(inFlight.getConsecutiveFailureCount()).isZero();
+            assertThat(inFlight.getFailureCode()).isNull();
 
             release.countDown();
             first.get(5, TimeUnit.SECONDS);

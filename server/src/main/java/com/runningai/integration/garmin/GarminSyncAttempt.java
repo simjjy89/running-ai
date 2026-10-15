@@ -72,6 +72,9 @@ public class GarminSyncAttempt {
     @Column(name = "consecutive_failure_count", nullable = false)
     private int consecutiveFailureCount;
 
+    @Column(name = "consecutive_partial_count", nullable = false)
+    private int consecutivePartialCount;
+
     @Column(name = "last_failure_at")
     private Instant lastFailureAt;
 
@@ -95,10 +98,30 @@ public class GarminSyncAttempt {
     }
 
     /**
+     * Records that a run has begun, before the connector is called. The counts are cleared because
+     * this attempt has produced none yet; the streak counters are left exactly as they were, since
+     * starting a run says nothing about whether the previous ones worked.
+     * <p>
+     * This row is overwritten by the run's real outcome. One surviving at the next startup is the
+     * only evidence that a sync was killed in flight - see {@link #recordInterrupted}.
+     */
+    void recordStarted(Instant attemptedAt) {
+        this.attemptedAt = attemptedAt;
+        this.outcome = GarminSyncAttemptOutcome.STARTED;
+        this.failureCode = null;
+        clearCounts();
+    }
+
+    /**
      * Records a completed run. {@code failed > 0} is a {@link GarminSyncAttemptOutcome#PARTIAL}
      * outcome, matching the sync's own rule that such a run does not advance the checkpoint.
      * Any completed run clears the consecutive-failure streak; the historical
      * {@code lastFailure*} fields are deliberately kept so "when did this last break?" stays answerable.
+     * <p>
+     * PARTIAL keeps its own streak (Phase 8B). It is genuinely not a failure - Garmin answered and
+     * the mappable items were stored - but because it holds the checkpoint back, repeating it means
+     * the same window and the same unmappable item every hour. Counting the two separately says
+     * both true things at once instead of making one column mean both.
      */
     void recordCompleted(Instant attemptedAt, GarminIncrementalSyncResult result) {
         this.attemptedAt = attemptedAt;
@@ -112,6 +135,20 @@ public class GarminSyncAttempt {
         this.pagesFetched = result.pagesFetched();
         this.checkpointAdvanced = result.checkpointAdvanced();
         this.consecutiveFailureCount = 0;
+        this.consecutivePartialCount = this.outcome == GarminSyncAttemptOutcome.PARTIAL
+                ? this.consecutivePartialCount + 1
+                : 0;
+    }
+
+    /**
+     * Records that the process died while this attempt was in flight. Neither streak moves: an
+     * interruption is a fault of this machine, not a refusal by Garmin, and letting it push the
+     * breaker towards blocking would turn every watchdog restart into a reason to stop collecting.
+     */
+    void recordInterrupted(String failureCode) {
+        this.outcome = GarminSyncAttemptOutcome.INTERRUPTED;
+        this.failureCode = failureCode;
+        clearCounts();
     }
 
     /** Records a run that threw. Counts are zeroed: the run produced no result to report. */
@@ -119,6 +156,13 @@ public class GarminSyncAttempt {
         this.attemptedAt = attemptedAt;
         this.outcome = GarminSyncAttemptOutcome.FAILED;
         this.failureCode = failureCode;
+        clearCounts();
+        this.consecutiveFailureCount++;
+        this.lastFailureAt = attemptedAt;
+        this.lastFailureCode = failureCode;
+    }
+
+    private void clearCounts() {
         this.fetched = 0;
         this.created = 0;
         this.updated = 0;
@@ -126,9 +170,6 @@ public class GarminSyncAttempt {
         this.failed = 0;
         this.pagesFetched = 0;
         this.checkpointAdvanced = false;
-        this.consecutiveFailureCount++;
-        this.lastFailureAt = attemptedAt;
-        this.lastFailureCode = failureCode;
     }
 
     public Long getId() {
@@ -181,6 +222,10 @@ public class GarminSyncAttempt {
 
     public int getConsecutiveFailureCount() {
         return consecutiveFailureCount;
+    }
+
+    public int getConsecutivePartialCount() {
+        return consecutivePartialCount;
     }
 
     public Instant getLastFailureAt() {

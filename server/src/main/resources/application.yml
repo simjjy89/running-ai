@@ -91,6 +91,31 @@ running-ai:
       page-size: 50
       overlap: 7d
       max-pages: 10
+      circuit-breaker:
+        # Phase 8B. Stops the SCHEDULER from repeating an automatic sync that is provably going
+        # nowhere - Phase 8A counted the failures, nothing read the count, so a rejected Garmin
+        # session produced 24 authentication failures a day indefinitely.
+        # It never blocks POST /api/v1/garmin/sync: a human asking for a sync is the intervention
+        # the breaker is waiting for, and a completed attempt is what clears an auth block.
+        # Skipping an automatic tick loses no data - the next sync re-reads the 7d overlap.
+        enabled: ${RUNNING_AI_GARMIN_CIRCUIT_BREAKER_ENABLED:true}
+        # 401/403 never heals by waiting, so this is low and the block has NO expiry: only a
+        # completed attempt (in practice a manual sync after renewing the connector session)
+        # lifts it.
+        auth-failure-threshold: 3
+        # 429 means slow down, so back off on the first one.
+        rate-limit-failure-threshold: 1
+        rate-limit-cooldown: 6h
+        # Connector restarts and flaky nights must NOT stop collection, hence the high count.
+        transient-failure-threshold: 8
+        transient-cooldown: 2h
+        # A PARTIAL run holds the checkpoint back, so repeating it re-reads the same window and
+        # re-hits the same unmappable item. Counted separately from failures (it is not one).
+        partial-threshold: 6
+        partial-cooldown: 12h
+        # Floor between two automatic attempts whatever the schedule says, so a misconfigured
+        # fixed-delay can only make ticks arrive and be skipped, never flood Garmin.
+        minimum-interval: 15m
     scheduler:
       # Automatic incremental sync (GarminSyncScheduler). OFF by default so that starting the
       # server (tests, CI, PCs without a Garmin token) never calls Garmin. Enable on the

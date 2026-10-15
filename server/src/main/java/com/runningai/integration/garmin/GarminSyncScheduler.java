@@ -16,6 +16,14 @@ import org.springframework.stereotype.Component;
  * inside a tick, so a rate limit or auth problem is never hammered; the next regular tick
  * simply tries again. Nothing thrown here can kill the scheduler thread, and only counts
  * and error codes are logged (never activity data or credentials).
+ * <p>
+ * Phase 8B puts {@link GarminSyncCircuitBreaker} in front of each tick. "The next regular tick
+ * simply tries again" was true but incomplete: with a one-hour delay, a Garmin session that stops
+ * being accepted produces 24 rejected authentications a day forever, because nothing was reading
+ * the failure ledger Phase 8A had been filling in. The breaker reads it. It can only stop an
+ * AUTOMATIC attempt - the manual endpoint is untouched and stays the way a human both forces a
+ * sync and clears an auth block - and a skipped tick costs nothing, because the next sync re-reads
+ * a 7-day overlap.
  */
 @Component
 @ConditionalOnProperty(prefix = "running-ai.garmin.scheduler", name = "enabled", havingValue = "true")
@@ -24,15 +32,24 @@ public class GarminSyncScheduler {
     private static final Logger log = LoggerFactory.getLogger(GarminSyncScheduler.class);
 
     private final GarminSyncOperationService operationService;
+    private final GarminSyncCircuitBreaker circuitBreaker;
 
-    public GarminSyncScheduler(GarminSyncOperationService operationService) {
+    public GarminSyncScheduler(GarminSyncOperationService operationService,
+                               GarminSyncCircuitBreaker circuitBreaker) {
         this.operationService = operationService;
+        this.circuitBreaker = circuitBreaker;
     }
 
     @Scheduled(fixedDelayString = "${running-ai.garmin.scheduler.fixed-delay:1h}",
             initialDelayString = "${running-ai.garmin.scheduler.initial-delay:1m}")
     public void runScheduledSync() {
         try {
+            GarminSyncGateDecision gate = circuitBreaker.evaluate();
+            if (!gate.allowed()) {
+                log.info("Garmin scheduled sync SKIPPED_{}: {}{}", gate.reason(), gate.detail(),
+                        gate.retryAfter() == null ? "" : " (not before " + gate.retryAfter() + ")");
+                return;
+            }
             GarminSyncResponse r = operationService.runSync();
             log.info("Garmin scheduled sync completed: fetched={} created={} updated={} skipped={} failed={} "
                             + "pages={} checkpointAdvanced={}",
