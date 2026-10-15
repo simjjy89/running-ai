@@ -22,12 +22,21 @@
     // the address ChatGPT uses, or the issuer/audience binding stops lining up.
     "PUBLIC_BASE_URL": "https://running-ai-mcp.simjjy89.workers.dev",
 
-    // Where the main PC's mcp-gateway is reachable from the public internet (the cloudflared
-    // Quick Tunnel address, ending in /mcp). This is the ONLY value that changes when the tunnel
-    // is restarted — ChatGPT never has to be re-registered.
-    // Until the tunnel is up this points at a reserved-by-RFC-2606 name that cannot resolve, so
-    // an unconfigured Worker answers 502 instead of reaching anything.
-    "ORIGIN_MCP_URL": "https://vault-courtesy-receivers-approximate.trycloudflare.com/mcp",
+    // Where the main PC's mcp-gateway is reachable from the public internet, ending in /mcp.
+    // This is the ONLY value that changes when the tunnel is restarted - ChatGPT never has to be
+    // re-registered.
+    //
+    // It is NOT tracked here. A cloudflared Quick Tunnel hostname is issued fresh on every
+    // restart, so any hostname committed to this file is false by the next restart and leaves Git
+    // disagreeing with production - which is exactly what happened between Phase 7D and 7F-3B-3.
+    // The committed value is a reserved-by-RFC-2606 name that cannot resolve, so a Worker deployed
+    // without the real one answers 502 instead of reaching anything, visibly rather than silently.
+    //
+    // Supply the live address at deploy time, and never by editing this line:
+    //     npx wrangler deploy --var ORIGIN_MCP_URL:"https://<current-tunnel>/mcp"
+    // The permanent fix is a named tunnel or the existing Tailscale Funnel hostname, which would
+    // make this a stable value worth committing. That is its own task.
+    "ORIGIN_MCP_URL": "https://origin.invalid/mcp",
 
     // The one GitHub account allowed to use this connector (numeric id is the authority).
     "ALLOWED_GITHUB_ID": "86603575",

@@ -39,6 +39,21 @@ const GITHUB_API_BASE = 'https://api.github.com';
 const USER_AGENT = 'RunningAI-MCP-Worker';
 
 /**
+ * What the CLIENT asked for, rendered for the log. This is the single fact that distinguishes
+ * "the client requested read-only" from "the client sent no scope parameter at all and the base
+ * scope was purely our own fallback": both produce the identical stored grant, and the authorize
+ * transaction is encrypted at rest, so neither KV nor the grant can tell them apart afterwards.
+ * Recognised scope names only - anything else is counted, never echoed into the log.
+ */
+function describeRequestedScopes(scope) {
+  const requested = Array.isArray(scope) ? scope : [];
+  if (requested.length === 0) return 'client sent NO scope parameter';
+  const known = requested.filter((s) => SCOPES_SUPPORTED.includes(s));
+  const unrecognised = requested.length - known.length;
+  return `client requested scope [${known.join(' ')}]` + (unrecognised ? ` + ${unrecognised} unrecognised` : '');
+}
+
+/**
  * The upstream base URLs are overridable ONLY so `test/oauth-e2e-test.js` can run the whole flow
  * against a stub GitHub on loopback. Leave both unset in production — the defaults are the real
  * GitHub. An override may only be https, or http on loopback: a plain-http override pointing at
@@ -130,6 +145,7 @@ const apiHandler = {
 async function startGithubSignIn(request, env, config) {
   const oauth = env.OAUTH_PROVIDER;
   const authRequest = await oauth.parseAuthRequest(request);
+  log('INFO', `authorize: ${describeRequestedScopes(authRequest.scope)}`);
   const { state, headers } = await oauth.beginUpstream(authRequest, { data: {} });
   const target = new URL(`${config.githubOauthBase}/login/oauth/authorize`);
   target.searchParams.set('client_id', config.githubClientId);
@@ -199,7 +215,7 @@ async function finishGithubSignIn(request, env, config) {
     props: { githubId: String(user.id), githubLogin: String(user.login) },
   });
   headers.set('Location', redirectTo);
-  log('INFO', 'sign-in approved for the permitted owner');
+  log('INFO', `sign-in approved for the permitted owner; granted scope [${granted.join(' ')}]`);
   return new Response(null, { status: 302, headers });
 }
 
