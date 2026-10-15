@@ -87,6 +87,7 @@ class WorkoutDraftApprovalService(
     private val approvals: WorkoutDraftApprovalRepository,
     private val store: WorkoutDraftStore,
     private val safetyGate: WorkoutSafetyGateService,
+    private val athletes: com.runningai.athlete.AthleteService,
 ) {
 
     private val log = LoggerFactory.getLogger(WorkoutDraftApprovalService::class.java)
@@ -155,6 +156,20 @@ class WorkoutDraftApprovalService(
             return null
         }
         val approval = approvals.findByDraftId(id) ?: return null
+        return ApprovedWorkoutDraft(store.toDomain(draft), approval.toDomain())
+    }
+
+    /**
+     * The approved draft for one date, or null when none is approved (Phase 8B). Read-only.
+     * <p>
+     * At most one draft per athlete and date is ever APPROVED, enforced by the unique constraint on
+     * `workout_draft_approval`, so this is a single answer rather than a choice between candidates.
+     */
+    @Transactional(readOnly = true)
+    fun findApprovedForDate(date: LocalDate): ApprovedWorkoutDraft? {
+        val approval = approvals.findByAthleteIdAndWorkoutDate(athletes.getDefaultAthlete().id, date)
+            ?: return null
+        val draft = drafts.findById(approval.draftId).orElse(null) ?: return null
         return ApprovedWorkoutDraft(store.toDomain(draft), approval.toDomain())
     }
 

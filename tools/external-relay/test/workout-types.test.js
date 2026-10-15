@@ -13,6 +13,7 @@ const {
   extractDistanceMetric,
   minutesMetric,
   labelForEvent,
+  labelForPlan,
   sanitizeLabel,
   TODAY_TEXT_MAX,
 } = require('../workout-types');
@@ -62,4 +63,37 @@ test('sanitizeLabel keeps only the pixel font character set and clamps to TODAY_
   assert.equal(sanitizeLabel('intrvl 6x800m'), 'INTRVL 6X800M');
   assert.equal(sanitizeLabel('a'.repeat(20)), 'A'.repeat(14));
   assert.equal(sanitizeLabel('한글 EASY 30M'), ' EASY 30M');
+});
+
+// Phase 8B: the RunningAI plan path. It never classifies free text - the
+// backend hands over a structured type - so the only questions are whether the
+// vocabularies line up and whether anything gets invented.
+test('labelForPlan maps every RunningAI coach workout type to a watch label', () => {
+  const types = ['EASY', 'RECOVERY', 'LONG', 'THRESHOLD', 'INTERVAL', 'TEMPO', 'REST', 'CROSS_TRAINING'];
+  for (const type of types) {
+    const label = labelForPlan({ workoutType: type, totalDurationMinutes: 30 });
+    assert.ok(label && label !== 'RUN', `${type} fell through to the RUN fallback`);
+    assert.ok(label.length <= TODAY_TEXT_MAX);
+  }
+});
+
+test('labelForPlan prefers a repeat count over the duration, and never invents a distance', () => {
+  assert.equal(labelForPlan({ workoutType: 'INTERVAL', repetitions: 6, totalDurationMinutes: 60 }), 'INTRVL 6X');
+  // No "6X800M": the draft prescribes intervals by duration and carries no distance at all.
+  assert.equal(labelForPlan({ workoutType: 'EASY', totalDurationMinutes: 45 }), 'EASY 45M');
+  assert.equal(labelForPlan({ workoutType: 'EASY', repetitions: 1, totalDurationMinutes: 45 }), 'EASY 45M');
+});
+
+test('labelForPlan emits a bare type when the plan carries no usable metric', () => {
+  assert.equal(labelForPlan({ workoutType: 'REST' }), 'REST');
+  assert.equal(labelForPlan({ workoutType: 'EASY', totalDurationMinutes: 0 }), 'EASY');
+});
+
+test('labelForPlan falls back to RUN for an unknown type rather than guessing', () => {
+  assert.equal(labelForPlan({ workoutType: 'SOMETHING_NEW', totalDurationMinutes: 30 }), 'RUN 30M');
+});
+
+test('labelForPlan returns null for a missing plan', () => {
+  assert.equal(labelForPlan(null), null);
+  assert.equal(labelForPlan('nope'), null);
 });

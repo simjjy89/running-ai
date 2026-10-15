@@ -92,4 +92,43 @@ function sanitizeLabel(label) {
   return kept;
 }
 
-module.exports = { classifyTypeFromName, extractIntervalMetric, extractDistanceMetric, minutesMetric, labelForEvent, sanitizeLabel, TODAY_TEXT_MAX };
+
+// ---- RunningAI structured plan -> the same TODAY-row label vocabulary.
+//
+// The Spring backend's GET /api/v1/today-workout answers with an approved
+// draft's STRUCTURE (workoutType, totalDurationMinutes, repetitions), never
+// with coach-written text, so this path never has to classify free text at
+// all - classifyTypeFromName exists for the Intervals.icu fallback, where the
+// only thing available is an event name. The two must agree on the vocabulary,
+// which is why both end at the labels above.
+//
+// RunningAI's coach vocabulary (see ClaudeCoachPromptBuilder's response
+// contract): EASY | RECOVERY | LONG | THRESHOLD | INTERVAL | TEMPO | REST |
+// CROSS_TRAINING.
+const PLAN_TYPE_LABELS = {
+  EASY: 'EASY',
+  RECOVERY: 'RECOV',
+  LONG: 'LONG',
+  THRESHOLD: 'THRESH',
+  INTERVAL: 'INTRVL',
+  TEMPO: 'TEMPO',
+  REST: 'REST',
+  CROSS_TRAINING: 'CROSS',
+};
+
+// Builds the TODAY-row label from an approved RunningAI plan. Like
+// labelForEvent, it invents nothing: a plan with no duration gets no metric,
+// and an unrecognised type falls back to RUN rather than to a guess.
+//
+// A repeated block is shown as its repeat count ("INTRVL 6X") because the
+// draft carries repetitions but no distance - RunningAI prescribes intervals
+// by duration. Writing "6X800M" here would be fabricating the 800.
+function labelForPlan(plan) {
+  if (!plan || typeof plan !== 'object') { return null; }
+  const type = PLAN_TYPE_LABELS[String(plan.workoutType || '').toUpperCase()] || 'RUN';
+  const reps = Number(plan.repetitions);
+  const metric = (reps > 1 ? `${reps}X` : null) || minutesMetric(Number(plan.totalDurationMinutes) * 60);
+  return sanitizeLabel(metric ? `${type} ${metric}` : type);
+}
+
+module.exports = { labelForPlan, PLAN_TYPE_LABELS, classifyTypeFromName, extractIntervalMetric, extractDistanceMetric, minutesMetric, labelForEvent, sanitizeLabel, TODAY_TEXT_MAX };

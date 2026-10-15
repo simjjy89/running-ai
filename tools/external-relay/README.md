@@ -21,11 +21,13 @@ same wire contract:
 - `GET /health` -> `{"status":"ok"}`, no auth.
 - `GET /today-workout` -> `{"date","status":"HAS_PLAN"|"REST"|"NO_PLAN","label"}`,
   Bearer-token gated.
-- Data source: Intervals.icu directly (`INTERVALS_ICU_API_KEY` env var) plus
-  the legacy `C:\running-ai\state\today_plan.json` explicit-REST override.
-  **Not** wired to the Spring backend (port 8080) - that was an explicit,
-  considered decision for this phase (keep the already-working watch
-  contract unchanged), not an oversight.
+- Data source at the time of the move: Intervals.icu directly
+  (`INTERVALS_ICU_API_KEY` env var) plus the legacy
+  `C:\running-ai\state\today_plan.json` explicit-REST override. **Not**
+  wired to the Spring backend - that was an explicit, considered decision
+  for that phase (keep the already-working watch contract unchanged), not
+  an oversight. Phase 8B changed it; see below. The wire contract above
+  did not change.
 
 **This location is not yet the live one.** As of this migration step, the
 production process (node + 3 ad hoc `cloudflared tunnel --url
@@ -37,6 +39,42 @@ process over to this location, and the external transport in front of it
 (Cloudflare Named Tunnel vs. an ipTIME WireGuard VPN path - under feasibility
 review as of 2026-10-06), are both separate, not-yet-decided steps. See
 `docs/work-orders/2026-10-06-phase-6i-1-external-access-e2e-stabilization-*.md`.
+
+## Data sources (Phase 8B)
+
+The wire contract is unchanged. What changed is where the answer comes from:
+
+1. **RunningAI's approved draft** - `GET /api/v1/today-workout` on the Spring
+   backend (`spring_base_url` in `config.json`, default
+   `http://127.0.0.1:18080`). First, because it is the only source that holds
+   the athlete's actual decision.
+2. **The legacy `C:\running-ai\state\today_plan.json`** explicit-REST
+   override. Read, never written; it is not this repo's file.
+3. **Intervals.icu** calendar events.
+
+The two older sources answer narrower questions, which is why neither could
+carry the watch on its own. Intervals.icu says what was *published*, so an
+approved-but-unpublished plan is invisible to it - and a REST day, which is
+never published by design, is indistinguishable there from a day nobody has
+planned yet. That gap is the reason for this change.
+
+They are kept as fallbacks rather than removed: the watch must keep working
+while the backend is down, mid-deploy, or simply not running on this machine.
+A RunningAI failure is logged and stepped over, never turned into an error the
+watch sees, and the backend is asked exactly once with no retry.
+
+Two answers from the backend are deliberately discarded rather than shown: one
+whose `date` is not the date asked for, and one the backend itself flags
+`stale`. Showing another day's plan as today's is worse than showing nothing.
+A `NO_PLAN` answer is not a decision - it means RunningAI has decided nothing
+yet - so the older sources still get their turn after it.
+
+Set `"spring_base_url": ""` to disable the RunningAI source entirely and
+restore the exact pre-8B behaviour.
+
+The relay only ever issues `GET` to the backend, over loopback. The endpoint
+answers with an approved draft's structure (type, duration, repetitions) and
+carries no coach-written text, so no free text crosses into the watch build.
 
 ## Run it
 

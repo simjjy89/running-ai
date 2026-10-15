@@ -27,7 +27,7 @@ const path = require('path');
 
 const ROOT = __dirname;
 const CONFIG = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8').replace(/^\uFEFF/, ''));
-const { labelForEvent } = require('./workout-types');
+const { labelForEvent, labelForPlan } = require('./workout-types');
 
 const PORT = Number(CONFIG.port || 17845);
 const HOST = '127.0.0.1'; // never bind anything but loopback; cloudflared fronts this
@@ -35,6 +35,14 @@ const CACHE_TTL_MS = Number(CONFIG.cache_ttl_seconds || 240) * 1000;
 const RATE_LIMIT_PER_MINUTE = Number(CONFIG.rate_limit_per_minute || 20);
 const LOG_FILE = path.join(ROOT, 'logs', 'relay.log');
 const TODAY_PLAN_FILE = 'C:\\running-ai\\state\\today_plan.json';
+
+// The RunningAI Spring backend: loopback only, read-only, GET only. Set
+// config.spring_base_url to "" to disable it and restore the pre-Phase-8B
+// behaviour exactly (Intervals.icu plus the legacy state file). See resolveToday().
+const SPRING_BASE_URL = CONFIG.spring_base_url === undefined
+  ? 'http://127.0.0.1:18080'
+  : String(CONFIG.spring_base_url);
+const SPRING_TIMEOUT_MS = Number(CONFIG.spring_timeout_ms || 3000);
 
 const tokenPath = path.join(ROOT, 'secrets', 'watch-token.json');
 if (!fs.existsSync(tokenPath)) {
@@ -118,6 +126,58 @@ function intervalsGet(urlPath) {
   });
 }
 
+// ---- RunningAI Spring backend, loopback and read-only. GET only; this relay
+// has no way to write anything to RunningAI and must not acquire one.
+//
+// Nothing secret crosses this hop: the endpoint answers with an approved
+// draft's structure (type, duration, repetitions) and no coach-written text,
+// so there is no credential, prompt or free text to leak onwards to the watch.
+function springGet(urlPath) {
+  return new Promise((resolve, reject) => {
+    let url;
+    try { url = new URL(urlPath, SPRING_BASE_URL); } catch (e) { return reject(new Error('bad spring base url')); }
+    const transport = url.protocol === 'https:' ? https : http;
+    const req = transport.request({
+      hostname: url.hostname,
+      port: url.port,
+      path: url.pathname + url.search,
+      method: 'GET',
+      timeout: SPRING_TIMEOUT_MS,
+    }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        if (res.statusCode !== 200) { return reject(new Error(`running-ai HTTP ${res.statusCode}`)); }
+        try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); }
+        catch (e) { reject(new Error('running-ai returned non-JSON')); }
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => req.destroy(new Error('running-ai request timed out')));
+    req.end();
+  });
+}
+
+// Today's approved RunningAI plan as {status, label}, or null when RunningAI
+// has nothing to say about the date - which is NOT the same as "no plan": a
+// NO_PLAN answer means RunningAI has decided nothing yet, so the Intervals.icu
+// view of the day is still worth asking for. Only HAS_PLAN and REST are
+// decisions, and only those are returned here.
+//
+// `stale` is checked rather than trusted: the backend reports which date it
+// answered for, and a mismatch means the watch would be shown another day's
+// plan as today's. The relay discards it instead.
+async function resolveFromRunningAi(dateStr) {
+  if (!SPRING_BASE_URL) { return null; }
+  const plan = await springGet(`/api/v1/today-workout?date=${encodeURIComponent(dateStr)}`);
+  if (!plan || typeof plan !== 'object' || String(plan.date) !== dateStr || plan.stale === true) { return null; }
+  if (plan.status === 'REST') { return { status: 'REST', label: null }; }
+  if (plan.status !== 'HAS_PLAN') { return null; }
+  const label = labelForPlan(plan);
+  if (!label) { return null; }
+  return { status: 'HAS_PLAN', label: label };
+}
+
 function readExplicitPlan(dateStr) {
   try {
     const raw = fs.readFileSync(TODAY_PLAN_FILE, 'utf8').replace(/^\uFEFF/, '');
@@ -129,9 +189,24 @@ function readExplicitPlan(dateStr) {
 
 // ---- The one piece of business logic: resolve today's plan to {status, label}.
 // status is one of HAS_PLAN / REST / NO_PLAN. Never invents a plan the sources
-// do not carry, and an explicit REST decision (from the existing daily
-// training pipeline's state file) always wins over an absence of events,
-// because "no event" is also what a not-yet-generated day looks like.
+// do not carry, and an explicit REST decision always wins over an absence of
+// events, because "no event" is also what a not-yet-generated day looks like.
+//
+// Source order (Phase 8B). RunningAI's approved draft comes FIRST because it is
+// the only source that holds the athlete's actual decision. The two older
+// sources each answer a narrower question:
+//
+//   - Intervals.icu says what was PUBLISHED, so an approved-but-unpublished
+//     plan is invisible to it, and a REST day - which is never published, by
+//     design - is indistinguishable from a day nobody has planned yet.
+//   - the legacy today_plan.json state file under C:\running-ai is written by
+//     the old PowerShell pipeline on the main PC. It is read, never written,
+//     and it is not this repo's to change.
+//
+// Both are kept as fallbacks rather than removed: the watch must keep working
+// when the backend is down, mid-deploy, or simply not running on this machine.
+// A RunningAI failure is therefore caught, logged and stepped over - the one
+// thing it must never do is turn into an error the watch sees.
 async function resolveToday(dateStr) {
   // Validation-only escape hatch: lets this session prove the HAS_PLAN rendering path on
   // the actual watch face without a working Intervals.icu key (see the validation report -
@@ -139,6 +214,17 @@ async function resolveToday(dateStr) {
   // this relay or the watch build). Never set in normal operation; start.ps1 does not set it.
   if (process.env.WATCHFACE_RELAY_MOCK) {
     return { status: 'HAS_PLAN', label: labelForEvent({ name: '인터벌 6x800m', moving_time: 3000 }) };
+  }
+  try {
+    const approved = await resolveFromRunningAi(dateStr);
+    if (approved) {
+      log('INFO', `TODAY_WORKOUT_SOURCE source=RUNNING_AI status=${approved.status}`);
+      return approved;
+    }
+  } catch (err) {
+    // Degrade to the older sources rather than failing: an unreachable backend
+    // must not blank the watch face.
+    log('WARN', `RUNNING_AI_UNAVAILABLE error=${err.message}; falling back to Intervals.icu`);
   }
   const explicit = readExplicitPlan(dateStr);
   if (explicit && String(explicit.decision).toUpperCase() === 'REST') {
