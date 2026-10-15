@@ -3,6 +3,9 @@ package com.runningai.coach
 import com.runningai.activity.Activity
 import com.runningai.activity.ActivityRepository
 import com.runningai.activity.ActivityType
+import com.runningai.activity.MetricAvailability
+import com.runningai.activity.MetricUnavailabilityNote
+import com.runningai.activity.UnavailableMetric
 import com.runningai.activity.detail.ActivityDetailStore
 import com.runningai.activity.detail.DetailPayloadType
 import com.runningai.activity.detail.SampleCompleteness
@@ -80,6 +83,10 @@ class TrainingContextV2Builder(
             recoveryDaysAvailable = recoveryDaysAvailable(athlete.id, date),
             oldestActivityDate = windowActivities.minOfOrNull { it.startedAt.atZone(zone).toLocalDate() },
             newestActivityDate = windowActivities.maxOfOrNull { it.startedAt.atZone(zone).toLocalDate() },
+            // Over the whole window, not only the activities quoted below: a coach reasoning about
+            // the last 90 days must know the history is partly imported even when every quoted
+            // session happens to be a Garmin one.
+            metricUnavailability = MetricAvailability.notesFor(windowActivities.map { it.externalSource }),
         )
 
         val recoveryContext = recoveryContextBuilder.build(date)
@@ -260,6 +267,7 @@ class TrainingContextV2Builder(
             sampleCompleteness = streamCompleteness(activity.id),
             analysisStatus = analysis?.status,
             analysisVersion = analysis?.analysisVersion,
+            unavailableMetrics = MetricAvailability.unavailableFor(activity.externalSource),
         )
         return RecentActivityEvidence(facts, runningAiEvidence, intervalsEvidence, dataQuality)
     }

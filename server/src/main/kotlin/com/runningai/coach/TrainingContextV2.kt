@@ -1,6 +1,9 @@
 package com.runningai.coach
 
 import com.runningai.activity.ActivityType
+import com.runningai.activity.MetricAvailability
+import com.runningai.activity.MetricUnavailabilityNote
+import com.runningai.activity.UnavailableMetric
 import com.runningai.activity.detail.SampleCompleteness
 import com.runningai.analysis.AnalysisStatus
 import java.time.Instant
@@ -108,6 +111,15 @@ data class DataCoverageV2(
     val recoveryDaysAvailable: Int,
     val oldestActivityDate: LocalDate?,
     val newestActivityDate: LocalDate?,
+    /**
+     * Metric families that some activities in the window structurally cannot have, with the reason
+     * (Phase 8B). Empty when every activity came from Garmin.
+     *
+     * Counts alone could not express this. An imported activity has no cadence because the importer
+     * refused to convert one-leg rpm into Garmin's spm, not because the athlete ran with a low one -
+     * and an omitted field reads to a coach as a bad value, which is the opposite of what is true.
+     */
+    val metricUnavailability: List<MetricUnavailabilityNote> = emptyList(),
 )
 
 /**
@@ -250,11 +262,19 @@ data class IntervalsActivityEvidence(
  * How much the derived evidence for this activity can be trusted. `sampleCompleteness` null means no
  * sample stream was ever collected for it; `analysisStatus`/`analysisVersion` null means no stored
  * analysis exists (never recomputed here — see [com.runningai.analysis.RunningActivityAnalysisService]).
+ *
+ * [unavailableMetrics] is a different statement from all of those: not "this was not collected
+ * well" but "this source never carried it at all".
  */
 data class ActivityDataQuality(
     val sampleCompleteness: SampleCompleteness?,
     val analysisStatus: AnalysisStatus?,
     val analysisVersion: String?,
+    /**
+     * Metric families this activity cannot have, given where it was imported from (Phase 8B). The
+     * reasons are stated once in [DataCoverageV2.metricUnavailability] rather than repeated here.
+     */
+    val unavailableMetrics: List<UnavailableMetric> = emptyList(),
 )
 
 /** One recent activity's evidence, by provenance: Garmin facts, RunningAI analysis, Intervals, quality. */

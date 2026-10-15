@@ -161,6 +161,16 @@ class ClaudeCoachPromptBuilder {
             - 'dataCoverage' reports how much evidence exists as plain counts, not a quality verdict.
               A wide history window with a small activity count is a small amount of evidence over
               a long window, not a dense training history — read the counts, do not assume density.
+            - 'dataCoverage.metricUnavailability' and an activity's 'dataQuality.unavailableMetrics'
+              name metrics that were NEVER RECORDED for those sessions, with the reason. This is the
+              opposite of a bad value and you must never read it as one. An activity imported from
+              Intervals.icu or a Strava archive has no cadence because RunningAI refused to convert
+              one-leg rpm into the spm its column holds — not because the athlete's cadence was low.
+              The same applies to running dynamics, lap structure, interval groups and heart-rate
+              zones where they are listed. Never infer a decline, a weakness or a change from an
+              absent metric, never compare an activity that has one against an activity that does
+              not, and never ask the athlete to improve something that was simply not measured. If
+              a missing metric would have changed your decision, say that you cannot tell.
 
             Reading 'sourceFreshness' (TRAINING CONTEXT V2; Phase 6H-9):
             - Do not call a piece of evidence recent solely because its value exists. Use
