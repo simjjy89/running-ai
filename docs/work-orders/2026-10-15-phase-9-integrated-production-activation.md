@@ -8,15 +8,15 @@ that decided whether the next stage was allowed to start.
 
 | Stage | What | Status |
 |---|---|---|
-| 1 | Deploy Phase 9 code, normalise both scheduled tasks | — |
-| 2 | One manual Garmin sync | — |
-| 3 | First 24 h observation | — |
-| 4 | Enable the Garmin scheduler | — |
-| 5 | Second 24 h observation | — |
-| 6 | Recovery backfill (`onlyMissing`) | — |
-| 7 | Final AI-coach / MCP verification | — |
-| 8 | FR265 on-watch checklist (owner) | — |
-| 9 | Git reconciliation | — |
+| 1 | Deploy Phase 9 code, normalise both scheduled tasks | **PASSED** 16:31-16:48 |
+| 2 | One manual Garmin sync | **PASSED** 16:49 |
+| 3 | First 24 h observation | **WAITING** until 2026-10-16 16:49 KST |
+| 4 | Enable the Garmin scheduler | not started (gated on 3) |
+| 5 | Second 24 h observation | not started (gated on 4) |
+| 6 | Recovery backfill (`onlyMissing`) | not started (gated on 5) |
+| 7 | Final AI-coach / MCP verification | not started (gated on 6) |
+| 8 | FR265 on-watch checklist (owner) | **prepared** — 4 of 6 checks ready, 2 blocked by section 8 |
+| 9 | Git reconciliation | **done for stages 1-2** (`main` = `origin/main` = `6a044cb`, FF, no force) |
 
 ---
 
@@ -273,3 +273,66 @@ attempt row, a decrease in `activity`, a duplicate `(external_source, external_i
 watchdog supervision (`NextRunTime` empty on either task), or a changed `tunnel.startedAtUtc`.
 
 Stages 4-8 have **not** started and nothing about them is prejudged here.
+
+---
+
+## Stage 8 preparation — the FR265 checklist, and a conflict in its scope
+
+Prepared now because it does not depend on the observation windows. **Nothing was published,
+approved or created to make these checks possible** — each one is either already true of production
+or already committed on Garmin's side.
+
+### What production actually offers the watch today
+
+`GET /api/v1/today-workout` answers **`NO_PLAN`** for both 2026-10-15 and 2026-10-16. The most
+recent approved-and-published draft in production is **#17, for 2026-10-05**
+(`remote_event_id 140511724`, `verified: t`). There is no approved plan for today.
+
+Worth noting as correct behaviour: the 2026-10-16 answer comes back with **`stale: true`**
+(`athleteToday: 2026-10-15`), which is precisely the flag the relay uses to discard an answer for
+the wrong date.
+
+### The conflict, stated rather than resolved quietly
+
+Section 9 asks the owner to confirm "RunningAI 오늘 훈련 표시 / 훈련 유형 및 시간 / 날짜 일치" on the
+watch. Section 8 forbids creating or approving a draft, or publishing to Intervals.icu, in
+production. **Those two cannot both hold**: a plan only reaches the watch face through an approval,
+so checks 1 and 2 are unreachable without the action section 8 prohibits. They are therefore listed
+as blocked, not quietly dropped, and need the owner's decision.
+
+### Still live on the Garmin calendar — check 6 needs no new publish
+
+`GET /scheduled-workouts?year=2026&month=10` (read-only; 17 calendar items) returned:
+
+```
+date=2026-10-16  itemType=workout  workoutId=1729422156  title='RunningAI workout'  sport=running
+```
+
+This is a genuinely committed Garmin calendar workout, delivered by Intervals.icu's own Garmin
+integration from the earlier publish. **Tomorrow is therefore the one day the strongest check is
+free**, with no write of any kind from this repo.
+
+(The response also re-confirms the 8B contract note: the connector takes `month` 1-based and Garmin
+answers with `month: 9` for October — the library does the 0-indexing.)
+
+### Checklist for the owner — FR265, once
+
+| # | Check | When | Expected | Status |
+|---|---|---|---|---|
+| 1 | TODAY row, approved non-REST draft | — | type + metric, e.g. `EASY 40M` | **BLOCKED** — needs an approval section 8 forbids |
+| 2 | TODAY row, approved REST day | — | `REST` | **BLOCKED** — same reason |
+| 3 | TODAY row with no approved draft | **now** | the face's no-plan rendering; must not look like an error | ready — production is genuinely `NO_PLAN` |
+| 4 | Date agreement | **now** | the row matches the watch's own date | ready |
+| 5 | Relay stopped briefly | **now** | the face degrades as it always did, never blanks | ready — the watchdog restores the relay within 5 min on its own |
+| 6 | Workout present in the watch's workout list after a Garmin sync | **2026-10-16** | "RunningAI workout", running | ready — `workoutId 1729422156` is already on the calendar |
+
+Keep the four levels of "delivered" apart; they are not the same claim:
+
+1. **Intervals publish** — measured (draft 17, `PUBLISHED_AND_VERIFIED`, event 140511724).
+2. **Garmin Calendar** — measured again today, in production: `workoutId 1729422156` for 2026-10-16.
+3. **Device sync** — **not observable from here, ever.** `deviceDelivery` is permanently `UNKNOWN`
+   and no Garmin write path exists in this repo (a connector test fails the build if one appears).
+4. **Seen on the watch** — only the owner can confirm. Check 6 is the only step that can.
+
+A `GARMIN_NOT_FOUND` from `delivery-status` on an older draft is **not a failure**: Garmin's
+calendar returns only committed workouts.
