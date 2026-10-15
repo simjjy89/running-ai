@@ -201,6 +201,15 @@ the **current production jar** (`f1451f5`, maxMigration 28) was started against 
 | V28 jar reads a **`STARTED`** attempt row | ❌ **HTTP 500**, same cause |
 | After `DELETE FROM garmin_sync_attempt WHERE outcome IN ('STARTED','INTERRUPTED')` | ✅ back to 200 immediately |
 
+> **CORRECTED 2026-10-15** — see `2026-10-15-phase-8b-release-stabilization.md` section 3, which
+> re-measured this on a restored production copy and found two things this table gets wrong:
+> (1) **`GET /api/v1/data-freshness` fails identically**, because V28's `DataFreshnessService` also
+> reads the attempt row — so a rollback that only checks `/garmin/sync/status` can still be broken;
+> (2) the pre-step below is **not** mandatory and **not** free. It is unnecessary whenever no sync
+> has run under V30 (production's `garmin_sync_attempt` currently holds **0 rows**), roll-forward
+> fixes the same condition with nothing removed, and the DELETE itself destroys the athlete's
+> whole attempt record rather than a log line. The replacement procedure is Step R below.
+
 **This makes one pre-step mandatory on rollback, and it is not optional.** `STARTED` is written
 before every sync — manual included — and `INTERRUPTED` survives until the next attempt. Worse
 than the status endpoint: in the V28 code `runSync()` builds its response from
@@ -328,24 +337,50 @@ Then rehearse the rollback **without executing it on production**: confirm
 
 ### Step R — rollback (only if a step fails)
 
-The database is **not** rolled back. V29 and V30 are forward-compatible with the V28 jar, with
-one mandatory pre-step:
+> **SUPERSEDED 2026-10-15** by `2026-10-15-phase-8b-release-stabilization.md` section 3.
+> The unconditional `DELETE FROM garmin_sync_attempt ...` that stood here is **withdrawn**: that
+> table holds one row per athlete, so the DELETE destroys the athlete's whole attempt record
+> (including the failure streak that is designed to survive a later success), and it is
+> unnecessary in the normal case. Use the order below.
+
+The database is **not** rolled back. V29 and V30 are forward-compatible with the V28 jar, except
+for two outcome values the old enum does not have.
 
 ```
--- 1. MANDATORY: the V28 jar has no INTERRUPTED/STARTED enum constant and answers 500 on
---    GET /api/v1/garmin/sync/status - and POST /api/v1/garmin/sync - while such a row exists.
---    The table is pure observability; "no row" is the state the V28 code already handles.
-DELETE FROM garmin_sync_attempt WHERE outcome IN ('STARTED','INTERRUPTED');
+-- R0. PRE-CHECK - always run this first. It decides everything that follows.
+SELECT count(*) FROM garmin_sync_attempt WHERE outcome IN ('STARTED','INTERRUPTED');
+```
+
+- **Returns 0 (the expected case)** - roll back with **no data operation at all**. Go to R2.
+  This count stays 0 as long as no Garmin sync has run under V30, which is why the post-deploy
+  observation window must not include a manual sync or `POST /api/v1/coach/data-refresh`.
+- **Returns > 0** - prefer **R1a (roll forward)**. Only use **R1b** if rollback is still required.
+
+```
+# R1a. ROLL FORWARD - preferred, loses nothing, needs no SQL.
+#      The 8B jar reads both values natively and the startup reconciler converts a leftover
+#      STARTED into INTERRUPTED with both streak counters intact.
 ```
 
 ```
-# 2. restore the previous jar
+# R1b. QUARANTINE - last resort. Requires a fresh pg_dump and explicit approval first,
+#      because it empties the athlete's live attempt record (the row is preserved, the live
+#      failure streak restarts from 0).
+psql -U running_ai -d running_ai -f scripts\ops\v30-rollback-quarantine.sql
+#      On a later roll-forward, put it back (never overwrites a newer row):
+psql -U running_ai -d running_ai -f scripts\ops\v30-rollback-restore.sql
+```
+
+```
+# R2. restore the previous jar
 powershell -File scripts\windows\stop-running-ai.ps1
 Copy-Item .runtime\released\<previous>.jar .runtime\running-ai-server.jar -Force
 powershell -File scripts\windows\start-running-ai.ps1
-# 3. verify
+# R3. verify - BOTH endpoints. A clean start and a 200 on /api/v1/health are NOT evidence:
+#      the V28 jar starts perfectly while these two return 500.
 curl http://127.0.0.1:18080/api/v1/health
 curl http://127.0.0.1:18080/api/v1/garmin/sync/status     # must be 200, not 500
+curl http://127.0.0.1:18080/api/v1/data-freshness         # must be 200, not 500
 ```
 
 `workout_draft_publish_attempt` is left in place: the old jar does not map it and Hibernate
