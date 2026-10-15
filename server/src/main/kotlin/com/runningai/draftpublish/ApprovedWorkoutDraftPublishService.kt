@@ -129,18 +129,17 @@ class ApprovedWorkoutDraftPublishService(
         }
         val attemptedAt = Instant.now()
         var externalWriteAttempted = false
-        val approved = try {
-            loadApproved(id)
-        } catch (e: RuntimeException) {
-            inFlight.remove(id)
-            throw e
-        }
-        // Phase 8B: from here on the attempt is recorded however it ends. The rejections above are
-        // deliberately not recorded - a disabled switch, a concurrent request and an unapproved
-        // draft never reached an approved draft, so none of them is an attempt to publish one. The
-        // Garmin collection ledger draws the same line for the same reason.
-        val approval: Long = approved.approval.id
+        // Set the moment there IS an approved draft, and the signal for whether this call is an
+        // attempt at all. The rejections before it are deliberately not recorded - a disabled
+        // switch, a concurrent request and an unapproved draft never reached an approved draft, so
+        // none of them is an attempt to publish one. The Garmin collection ledger draws the same
+        // line for the same reason. Carried in a variable rather than split across two try blocks
+        // so that one `finally` releases the single-flight entry on EVERY exit, Errors included:
+        // a leaked entry would block this draft until the JVM restarted.
+        var approval: Long? = null
         try {
+            val approved = loadApproved(id)
+            approval = approved.approval.id
             publications.find(id)?.let {
                 log.info("Workout draft publish: draftId={} already {}; returning the stored result", id, it.outcome)
                 attemptRecorder.recordSuccess(id, approval, attemptedAt, Instant.now(),
@@ -180,7 +179,8 @@ class ApprovedWorkoutDraftPublishService(
                 DraftPublishAttemptOutcome.PUBLISHED, result, externalWriteAttempted = true)
             return DraftPublishOutcome(approved, published, ready.workout.steps().size, alreadyPublished = false)
         } catch (e: RuntimeException) {
-            attemptRecorder.recordFailure(id, approval, attemptedAt, Instant.now(), e, externalWriteAttempted)
+            // Only once an approved draft was loaded: see the note on `approval` above.
+            approval?.let { attemptRecorder.recordFailure(id, it, attemptedAt, Instant.now(), e, externalWriteAttempted) }
             throw e
         } finally {
             inFlight.remove(id)
