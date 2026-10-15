@@ -71,6 +71,20 @@ class TrainingAnalysisReportApiTest {
         ),
     ).id
 
+    /**
+     * Gives [activityId] one lap. Whether laps exist is the only thing that decides whether
+     * LAP_STRUCTURE is reported as unavailable, and it is asked of the data rather than of
+     * `external_source`, because the Strava archive import writes laps into activities imported
+     * from Intervals.icu.
+     */
+    private fun withLap(activityId: Long): Long {
+        jdbc.update(
+            "insert into activity_lap (activity_id, lap_index, duration_seconds) values (?, 1, 600)",
+            activityId,
+        )
+        return activityId
+    }
+
     private fun report(periods: Int? = null) = mockMvc.perform(
         get("/api/v1/training-analysis-report").apply { if (periods != null) param("periods", periods.toString()) },
     )
@@ -242,10 +256,41 @@ class TrainingAnalysisReportApiTest {
     }
 
     @Test
-    fun `an all-Garmin history reports no structural gaps`() {
-        run(0, 10000.0, 3000)
+    fun `an all-Garmin history with its detail collected reports no structural gaps`() {
+        withLap(run(0, 10000.0, 3000))
 
         report().andExpect(jsonPath("$.limitations.metricUnavailability").isEmpty)
+    }
+
+    /**
+     * LAP_STRUCTURE is not a property of the source: a Garmin activity whose per-activity detail
+     * has not been collected has no laps either, and the coach reading a null lap metric must be
+     * told it was never recorded rather than left to read it as a measurement.
+     */
+    @Test
+    fun `an activity with no stored laps is reported as having no lap breakdown, whatever its source`() {
+        run(0, 10000.0, 3000)
+
+        report()
+            .andExpect(jsonPath("$.limitations.metricUnavailability[?(@.metric == 'LAP_STRUCTURE')]" +
+                ".affectedActivityCount").value(1))
+    }
+
+    /**
+     * The defect this pins: an Intervals-sourced activity that the Strava archive import gave laps
+     * to was still reported as having no per-lap breakdown, because the answer was keyed on
+     * `external_source`. On the real history that was every one of the 25 Intervals-sourced
+     * activities.
+     */
+    @Test
+    fun `an imported activity that does have laps is not reported as having none`() {
+        withLap(run(0, 10000.0, 3000, source = ExternalSource.INTERVALS_ICU))
+
+        report()
+            .andExpect(jsonPath("$.limitations.metricUnavailability[?(@.metric == 'LAP_STRUCTURE')]").isEmpty)
+            // What that import genuinely could not carry is still stated.
+            .andExpect(jsonPath("$.limitations.metricUnavailability[?(@.metric == 'CADENCE')]" +
+                ".affectedActivityCount").value(1))
     }
 
     /**

@@ -111,6 +111,16 @@ class ActivityDetailStore(
     @Transactional(readOnly = true)
     fun laps(activityId: Long): List<LapData> = laps.findByActivityIdOrderByLapIndex(activityId).map { it.toData() }
 
+    /**
+     * Of [activityIds], those that have at least one stored lap. The question
+     * [com.runningai.activity.MetricAvailability] asks, answered from the data because no
+     * `external_source` can answer it: the Strava archive import writes laps into activities
+     * imported from Intervals.icu.
+     */
+    @Transactional(readOnly = true)
+    fun activityIdsWithLaps(activityIds: Collection<Long>): Set<Long> =
+        if (activityIds.isEmpty()) emptySet() else laps.findActivityIdsWithLaps(activityIds).toSet()
+
     @Transactional(readOnly = true)
     fun zones(activityId: Long, type: ZoneType): List<ZoneData> =
         zones.findByActivityIdAndZoneTypeOrderByZoneNumber(activityId, type).map { it.toData() }

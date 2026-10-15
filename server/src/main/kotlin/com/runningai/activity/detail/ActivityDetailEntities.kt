@@ -216,6 +216,14 @@ class ActivityLapEntity(
 interface ActivityLapRepository : JpaRepository<ActivityLapEntity, Long> {
     fun findByActivityIdOrderByLapIndex(activityId: Long): List<ActivityLapEntity>
 
+    /**
+     * Which of [activityIds] have at least one lap, in one query and without loading a lap row.
+     * Callers that need to say "this session has no per-lap breakdown" need exactly this and
+     * nothing more, and asking it per activity would be a query per activity.
+     */
+    @Query("select distinct l.activityId from ActivityLapEntity l where l.activityId in :activityIds")
+    fun findActivityIdsWithLaps(@Param("activityIds") activityIds: Collection<Long>): List<Long>
+
     @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query("delete from ActivityLapEntity l where l.activityId = :activityId")
     fun deleteAllOfActivity(@Param("activityId") activityId: Long): Int

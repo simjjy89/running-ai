@@ -3,6 +3,7 @@ package com.runningai.analysis
 import com.runningai.activity.Activity
 import com.runningai.activity.ActivityRepository
 import com.runningai.activity.MetricAvailability
+import com.runningai.activity.detail.ActivityDetailStore
 import com.runningai.athlete.AthleteService
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
@@ -36,6 +37,7 @@ import kotlin.math.roundToInt
 class TrainingAnalysisReportService(
     private val activities: ActivityRepository,
     private val analysisStore: ActivityAnalysisStore,
+    private val detailStore: ActivityDetailStore,
     private val athletes: AthleteService,
     private val clock: Clock,
 ) {
@@ -114,7 +116,13 @@ class TrainingAnalysisReportService(
             limitations = ReportLimitations(
                 unanalysedActivityCount = analyses.values.count { it == null },
                 partialAnalysisCount = analyses.values.count { it != null && it.status != AnalysisStatus.COMPLETE },
-                metricUnavailability = MetricAvailability.notesFor(all.map { it.externalSource }),
+                metricUnavailability = MetricAvailability.notesFor(
+                    detailStore.activityIdsWithLaps(all.map { it.id }).let { withLaps ->
+                        all.map {
+                            MetricAvailability.ActivityMetricSource(it.externalSource, it.id in withLaps)
+                        }
+                    },
+                ),
                 notes = NOTES,
             ),
         )

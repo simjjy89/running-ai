@@ -65,7 +65,12 @@ class TrainingContextV2Builder(
 
         val longRunSeconds = trainingProperties.classification().longRunMinDuration().toSeconds()
         val rhythm = rhythm(date, zone, windowActivities, longRunSeconds)
-        val recentEvidence = windowActivities.take(properties.maxRecentActivities).map { evidenceOf(it, zone) }
+        // One query for the whole window rather than one per activity: both the coverage note and
+        // each activity's data quality need the same yes/no, and only the data can answer it (the
+        // Strava archive import writes laps into activities imported from Intervals.icu).
+        val withLaps = detailStore.activityIdsWithLaps(windowActivities.map { it.id })
+        val recentEvidence = windowActivities.take(properties.maxRecentActivities)
+            .map { evidenceOf(it, zone, hasLapStructure = it.id in withLaps) }
 
         val fitnessWindowStart = date.minusDays(FITNESS_WINDOW_DAYS - 1L)
         val fitnessDays = intervalsStore.fitnessDays(athlete.id, fitnessWindowStart, date)
@@ -86,7 +91,11 @@ class TrainingContextV2Builder(
             // Over the whole window, not only the activities quoted below: a coach reasoning about
             // the last 90 days must know the history is partly imported even when every quoted
             // session happens to be a Garmin one.
-            metricUnavailability = MetricAvailability.notesFor(windowActivities.map { it.externalSource }),
+            metricUnavailability = MetricAvailability.notesFor(
+                windowActivities.map {
+                    MetricAvailability.ActivityMetricSource(it.externalSource, it.id in withLaps)
+                },
+            ),
         )
 
         val recoveryContext = recoveryContextBuilder.build(date)
@@ -219,7 +228,7 @@ class TrainingContextV2Builder(
         )
     }
 
-    private fun evidenceOf(activity: Activity, zone: ZoneId): RecentActivityEvidence {
+    private fun evidenceOf(activity: Activity, zone: ZoneId, hasLapStructure: Boolean): RecentActivityEvidence {
         val detail = detailStore.detail(activity.id)
         val analysis = analysisStore.find(activity.id)
         val metrics = intervalsStore.findMetrics(activity.id)
@@ -267,7 +276,7 @@ class TrainingContextV2Builder(
             sampleCompleteness = streamCompleteness(activity.id),
             analysisStatus = analysis?.status,
             analysisVersion = analysis?.analysisVersion,
-            unavailableMetrics = MetricAvailability.unavailableFor(activity.externalSource),
+            unavailableMetrics = MetricAvailability.unavailableFor(activity.externalSource, hasLapStructure),
         )
         return RecentActivityEvidence(facts, runningAiEvidence, intervalsEvidence, dataQuality)
     }
