@@ -11,6 +11,7 @@ import com.runningai.integration.intervals.RenderedIntervalsWorkout
 import com.runningai.training.StructuredWorkout
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
+import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 
 /** Publishing approved drafts is switched off (`RUNNING_AI_DRAFT_PUBLISHING_ENABLED=false`). */
@@ -67,8 +68,9 @@ data class DraftPublishOutcome(
  *    calendar placeholder;
  *  - unpublishable drafts fail closed before the publisher is called;
  *  - idempotent: a stored successful publication is returned without calling the publisher again; a
- *    failed publish stores nothing (the draft stays APPROVED and can be published again, and the
- *    publisher's own marker lookup prevents a duplicate remote event);
+ *    failed publish stores no PUBLICATION (the draft stays APPROVED and can be published again, and
+ *    the publisher's own marker lookup prevents a duplicate remote event) - since Phase 8B it does
+ *    store an ATTEMPT, which records what went wrong without claiming a workout exists remotely;
  *  - single-flight per draft id in this JVM (single-instance deployment), with the unique publication
  *    row as the last line of defence; different drafts never block each other;
  *  - not `@Transactional`: reads and writes go through their own transactional stores, so no database
@@ -88,6 +90,8 @@ class ApprovedWorkoutDraftPublishService(
     private val renderer: IntervalsWorkoutRenderer,
     private val publisher: IntervalsWorkoutPublisher,
     private val safetyGate: WorkoutSafetyGateService,
+    private val attemptRecorder: DraftPublishAttemptRecorder,
+    private val attemptLedger: WorkoutDraftPublishAttemptStore,
 ) {
 
     private val log = LoggerFactory.getLogger(ApprovedWorkoutDraftPublishService::class.java)
@@ -109,6 +113,12 @@ class ApprovedWorkoutDraftPublishService(
         }
     }
 
+    /** The attempt history of one draft, newest first; read-only and never contacts Intervals. */
+    fun attempts(id: Long): List<WorkoutDraftPublishAttempt> {
+        drafts.get(id)        // 404 for an unknown draft, rather than an empty list that reads as "never tried"
+        return attemptLedger.history(id)
+    }
+
     fun publish(id: Long): DraftPublishOutcome {
         if (!properties.enabled) {
             throw DraftPublishingDisabledException()
@@ -117,10 +127,24 @@ class ApprovedWorkoutDraftPublishService(
             log.info("Workout draft publish rejected: draftId={} already running", id)
             throw DraftPublishAlreadyRunningException(id)
         }
+        val attemptedAt = Instant.now()
+        var externalWriteAttempted = false
+        val approved = try {
+            loadApproved(id)
+        } catch (e: RuntimeException) {
+            inFlight.remove(id)
+            throw e
+        }
+        // Phase 8B: from here on the attempt is recorded however it ends. The rejections above are
+        // deliberately not recorded - a disabled switch, a concurrent request and an unapproved
+        // draft never reached an approved draft, so none of them is an attempt to publish one. The
+        // Garmin collection ledger draws the same line for the same reason.
+        val approval: Long = approved.approval.id
         try {
-            val approved = loadApproved(id)
             publications.find(id)?.let {
                 log.info("Workout draft publish: draftId={} already {}; returning the stored result", id, it.outcome)
+                attemptRecorder.recordSuccess(id, approval, attemptedAt, Instant.now(),
+                    DraftPublishAttemptOutcome.ALREADY_PUBLISHED, null, externalWriteAttempted = false)
                 return DraftPublishOutcome(approved, it, structuredStepCount = null, alreadyPublished = true)
             }
 
@@ -128,6 +152,8 @@ class ApprovedWorkoutDraftPublishService(
                 val skipped = publications.recordRestDay(approved)
                 log.info("Workout draft publish: draftId={} date={} REST -> SKIPPED_REST_DAY (no external call)",
                     id, approved.draft.date)
+                attemptRecorder.recordSuccess(id, approval, attemptedAt, Instant.now(),
+                    DraftPublishAttemptOutcome.SKIPPED_REST_DAY, null, externalWriteAttempted = false)
                 return DraftPublishOutcome(approved, skipped, structuredStepCount = 0, alreadyPublished = false)
             }
 
@@ -142,12 +168,20 @@ class ApprovedWorkoutDraftPublishService(
                     throw UnpublishableDraftException(id, prepared.reasons)
                 }
             }
-            // Any failure here propagates and nothing is recorded: the draft stays APPROVED and can be retried.
+            // Any failure here propagates and no PUBLICATION is recorded: the draft stays APPROVED and
+            // can be published again. The attempt itself is recorded, which is a different thing - it
+            // says what happened without claiming a workout exists on Intervals.icu.
+            externalWriteAttempted = true
             val result = publisher.publish(approved.draft.date, ready.rendered)
             val published = publications.recordPublished(approved, result)
             log.info("Workout draft publish: draftId={} date={} operation={} verified={}",
                 id, approved.draft.date, result.operation(), result.verified())
+            attemptRecorder.recordSuccess(id, approval, attemptedAt, Instant.now(),
+                DraftPublishAttemptOutcome.PUBLISHED, result, externalWriteAttempted = true)
             return DraftPublishOutcome(approved, published, ready.workout.steps().size, alreadyPublished = false)
+        } catch (e: RuntimeException) {
+            attemptRecorder.recordFailure(id, approval, attemptedAt, Instant.now(), e, externalWriteAttempted)
+            throw e
         } finally {
             inFlight.remove(id)
         }

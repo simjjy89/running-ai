@@ -114,6 +114,7 @@ class DraftPublishIntervalsWireE2ETest {
     @Autowired private lateinit var drafts: WorkoutDraftRepository
     @Autowired private lateinit var approvals: WorkoutDraftApprovalRepository
     @Autowired private lateinit var publications: WorkoutDraftPublicationRepository
+    @Autowired private lateinit var publishAttempts: WorkoutDraftPublishAttemptRepository
     @Autowired private lateinit var injuryReports: InjuryReportRepository
     @Autowired private lateinit var athleteService: AthleteService
     @Autowired private lateinit var clock: Clock
@@ -129,6 +130,7 @@ class DraftPublishIntervalsWireE2ETest {
     @AfterEach
     fun tearDown() {
         server.reset()
+        publishAttempts.deleteAll()
         publications.deleteAll()
         approvals.deleteAll()
         drafts.deleteAll()

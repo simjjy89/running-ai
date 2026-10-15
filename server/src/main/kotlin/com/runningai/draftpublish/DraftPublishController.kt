@@ -38,6 +38,68 @@ class DraftPublishController(private val service: ApprovedWorkoutDraftPublishSer
     /** Publishes the approved draft (or records SKIPPED_REST_DAY for a rest day). Explicit request only. */
     @PostMapping("/{id}/publish")
     fun publish(@PathVariable id: Long): DraftPublishResponse = DraftPublishResponse.of(service.publish(id))
+
+    /**
+     * Every publish attempt on this draft, newest first (Phase 8B), including the ones that failed
+     * and left no publication. Read-only and database-only: it never contacts Intervals.icu, so it
+     * reports what RunningAI observed, not what Intervals holds now.
+     */
+    @GetMapping("/{id}/publish-attempts")
+    fun attempts(@PathVariable id: Long) = DraftPublishAttemptsResponse.of(id, service.attempts(id))
+}
+
+@JsonInclude(JsonInclude.Include.ALWAYS)
+data class DraftPublishAttemptsResponse(
+    val draftId: Long,
+    val attemptCount: Int,
+    val attempts: List<DraftPublishAttemptResponse>,
+) {
+    companion object {
+        fun of(draftId: Long, attempts: List<WorkoutDraftPublishAttempt>) = DraftPublishAttemptsResponse(
+            draftId = draftId,
+            attemptCount = attempts.size,
+            attempts = attempts.map(DraftPublishAttemptResponse::of),
+        )
+    }
+}
+
+/**
+ * One attempt. [remoteStateCertain] is the field to read after a failure: false means the write may
+ * or may not have reached Intervals.icu (a timeout or a dropped connection), which is a different
+ * situation from a clean refusal. Nothing here retries automatically - a publish of the same draft
+ * looks the date up by marker first and adopts whatever is really there.
+ */
+@JsonInclude(JsonInclude.Include.ALWAYS)
+data class DraftPublishAttemptResponse(
+    val attemptId: Long,
+    val approvalId: Long?,
+    val attemptedAt: Instant,
+    val completedAt: Instant,
+    val durationMs: Long,
+    val outcome: DraftPublishAttemptOutcome,
+    val failureCode: String?,
+    val httpStatus: Int?,
+    val intervalsOperation: IntervalsPublishOperation?,
+    val remoteEventId: String?,
+    val externalWriteAttempted: Boolean,
+    val remoteStateCertain: Boolean,
+) {
+    companion object {
+        fun of(a: WorkoutDraftPublishAttempt) = DraftPublishAttemptResponse(
+            attemptId = a.id,
+            approvalId = a.approvalId,
+            attemptedAt = a.attemptedAt,
+            completedAt = a.completedAt,
+            durationMs = a.durationMs,
+            outcome = a.outcome,
+            failureCode = a.failureCode,
+            httpStatus = a.httpStatus,
+            intervalsOperation = a.intervalsOperation,
+            remoteEventId = a.remoteEventId,
+            externalWriteAttempted = a.externalWriteAttempted,
+            remoteStateCertain = a.remoteStateCertain,
+        )
+    }
 }
 
 enum class DraftPublishExpectedOutcome { PUBLISH, SKIPPED_REST_DAY, UNPUBLISHABLE }

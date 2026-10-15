@@ -84,6 +84,7 @@ class DraftPublishApiTest {
     @Autowired private lateinit var drafts: WorkoutDraftRepository
     @Autowired private lateinit var approvals: WorkoutDraftApprovalRepository
     @Autowired private lateinit var publications: WorkoutDraftPublicationRepository
+    @Autowired private lateinit var publishAttempts: WorkoutDraftPublishAttemptRepository
     @Autowired private lateinit var service: ApprovedWorkoutDraftPublishService
     @Autowired private lateinit var jdbc: JdbcTemplate
     @Autowired private lateinit var injuryReportRepository: InjuryReportRepository
@@ -108,6 +109,7 @@ class DraftPublishApiTest {
     fun cleanUp() {
         // The legacy deterministic path and the raw client are never used by the draft path.
         verifyNoInteractions(legacyPublishService, targetService, legacyMapper, intervalsClient)
+        publishAttempts.deleteAll()
         publications.deleteAll()
         approvals.deleteAll()
         drafts.deleteAll()

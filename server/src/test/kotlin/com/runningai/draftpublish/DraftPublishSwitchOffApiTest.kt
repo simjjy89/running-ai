@@ -48,6 +48,7 @@ class DraftPublishSwitchOffApiTest {
     @Autowired private lateinit var drafts: WorkoutDraftRepository
     @Autowired private lateinit var approvals: WorkoutDraftApprovalRepository
     @Autowired private lateinit var publications: WorkoutDraftPublicationRepository
+    @Autowired private lateinit var publishAttempts: WorkoutDraftPublishAttemptRepository
     @Autowired private lateinit var properties: DraftPublishingProperties
     @Autowired private lateinit var legacyProperties: WorkoutPublishProperties
     @Autowired private lateinit var context: ApplicationContext
@@ -67,6 +68,7 @@ class DraftPublishSwitchOffApiTest {
     @AfterEach
     fun cleanUp() {
         verifyNoInteractions(publisher, intervalsClient, legacyPublishService)
+        publishAttempts.deleteAll()
         publications.deleteAll()
         approvals.deleteAll()
         drafts.deleteAll()
