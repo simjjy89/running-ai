@@ -220,7 +220,7 @@ def parts() -> FakePartFetcher:
 
 @pytest.fixture
 def http(parts: FakePartFetcher) -> TestClient:
-    return TestClient(create_app(_unused, _unused, _unused, parts), raise_server_exceptions=False)
+    return TestClient(create_app(_unused, _unused, _unused, parts, _unused), raise_server_exceptions=False)
 
 
 @pytest.mark.parametrize("part", sorted(EXPECTED_METHODS))

@@ -117,6 +117,30 @@ def synthetic_stress(day: str = RECOVERY_DATE) -> dict[str, Any]:
     }
 
 
+def synthetic_scheduled_workouts(day: str = "2026-10-20") -> dict[str, Any]:
+    """Shaped like python-garminconnect 0.3.16's calendar-service response (synthetic values).
+
+    STATIC_SOURCE_CONFIRMED against the installed library's ``get_next_scheduled_workout``, which
+    reads ``calendarItems[]`` and filters on ``itemType == "workout"``. NOT live-verified: the
+    connector passes the body through untouched and Spring does the interpreting, so a field that
+    turns out to differ is a Spring-side correction, not a connector one.
+    """
+    return {
+        "startDate": day[:8] + "01",
+        "calendarItems": [
+            {
+                "itemType": "workout",
+                "date": day,
+                "title": "RunningAI workout",
+                "workoutId": 123456789,
+                "id": 987654321,
+                "sportTypeKey": "running",
+            },
+            {"itemType": "activity", "date": day, "title": "Morning Run", "activityId": 188081596},
+        ],
+    }
+
+
 class FakeGarmin:
     """Stands in for garminconnect.Garmin in tests."""
 
@@ -142,6 +166,9 @@ class FakeGarmin:
             "get_all_day_stress": synthetic_stress(),
         }
         self.recovery_errors: dict[str, Exception] = {}
+        self.scheduled_workout_calls: list[tuple[Any, Any]] = []
+        self.scheduled_workouts_error: Exception | None = None
+        self.scheduled_workouts_result: Any = synthetic_scheduled_workouts()
 
     def login(self, tokenstore: str | None = None) -> tuple[None, None]:
         self.login_calls.append(tokenstore)
@@ -182,6 +209,12 @@ class FakeGarmin:
 
     def get_all_day_stress(self, cdate: str) -> Any:
         return self._recovery("get_all_day_stress", cdate)
+
+    def get_scheduled_workouts(self, year: Any, month: Any) -> Any:
+        self.scheduled_workout_calls.append((year, month))
+        if self.scheduled_workouts_error is not None:
+            raise self.scheduled_workouts_error
+        return self.scheduled_workouts_result
 
 
 @pytest.fixture

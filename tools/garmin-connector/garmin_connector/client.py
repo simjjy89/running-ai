@@ -154,6 +154,35 @@ class GarminGateway:
         the documented fields only; see :mod:`garmin_connector.recovery` for the contract."""
         return fetch_recovery(self._garmin, day)
 
+    def scheduled_workouts(self, year: int, month: int) -> Any:
+        """One calendar month of Garmin's SCHEDULED workouts, raw and unprocessed (Phase 8B).
+
+        Read-only, exactly one library call (one Garmin request). This is the only way to ask
+        Garmin "did the workout RunningAI published to Intervals.icu actually arrive?" - the push
+        itself is Intervals.icu's own Garmin integration and happens entirely outside this
+        repository. Nothing here writes: ``schedule_workout``, ``unschedule_workout``,
+        ``upload_*_workout`` and ``push_workout_to_device`` exist in python-garminconnect and are
+        deliberately not exposed, now or later.
+
+        Two limits of the source, which the caller must not paper over. The library notes that
+        Garmin's calendar-service only returns workouts already committed to the visible calendar,
+        so an absent workout is not proof that none exists. And the response shape is
+        STATIC_SOURCE_CONFIRMED against the installed library only - not live-verified - so it is
+        passed through untouched and interpreted in Spring.
+        """
+        if not isinstance(year, int) or isinstance(year, bool) or not 2000 <= year <= 2999:
+            raise ValueError("year must be between 2000 and 2999")
+        if not isinstance(month, int) or isinstance(month, bool) or not 1 <= month <= 12:
+            raise ValueError("month must be between 1 and 12")
+        try:
+            result = self._garmin.get_scheduled_workouts(year, month)
+        except Exception as exc:  # noqa: BLE001 - translated into the error contract
+            raise translate(exc) from exc
+        if result is not None and not isinstance(result, (dict, list)):
+            raise ConnectorError(GARMIN_UPSTREAM_ERROR, "Unexpected scheduled workout shape from Garmin Connect")
+        logger.info("Fetched Garmin scheduled workouts for %04d-%02d", year, month)
+        return result
+
 
 class CachedGatewayProvider:
     """Creates the gateway lazily and reuses it while the session stays valid.
@@ -202,6 +231,15 @@ class CachedGatewayProvider:
         gateway = self()
         try:
             return gateway.recovery(day)
+        except ConnectorError as err:
+            if err.code == "GARMIN_AUTH_REQUIRED":
+                self._gateway = None
+            raise
+
+    def scheduled_workouts(self, year: int, month: int) -> Any:
+        gateway = self()
+        try:
+            return gateway.scheduled_workouts(year, month)
         except ConnectorError as err:
             if err.code == "GARMIN_AUTH_REQUIRED":
                 self._gateway = None

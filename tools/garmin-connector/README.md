@@ -80,6 +80,35 @@ other interfaces is intentionally not supported. Swagger / ReDoc / OpenAPI are d
 | `GET /activities/{id}/hr-zones` | `get_activity_hr_in_timezones` body, raw |
 | `GET /activities/{id}/power-zones` | `get_activity_power_in_timezones` body, raw |
 | `GET /activities/{id}/samples[?maxChart=N]` | `get_activity_details` body, raw (`maxChart` 1–100000, default = library 2000) |
+| `GET /scheduled-workouts?year=YYYY&month=1..12` | One calendar month of Garmin's **scheduled** workouts, raw (Phase 8B) — see below |
+
+### Scheduled workouts, and why there is no write counterpart (Phase 8B)
+
+`GET /scheduled-workouts` answers one question: **did a workout RunningAI
+published actually reach Garmin?** RunningAI writes workouts to Intervals.icu;
+the hop from Intervals.icu to Garmin Connect is *Intervals.icu's own
+integration* and happens entirely outside this repository. Before this endpoint
+the only evidence that it worked was a person looking at a watch, once.
+
+`month` is **1-based** here. python-garminconnect is what converts it to
+Garmin's 0-indexed months, so this connector must not subtract one as well.
+
+The response is passed through untouched; Spring interprets it. Its shape is
+STATIC_SOURCE_CONFIRMED against python-garminconnect 0.3.16 (whose own
+`get_next_scheduled_workout` reads `calendarItems[]` and keeps entries with
+`itemType == "workout"`) and is **not live-verified**.
+
+**An empty result is not proof that no workout exists.** The library documents
+that Garmin's calendar service returns only workouts already committed to the
+visible calendar, and an Intervals.icu push may simply not have run yet. Spring
+reports the absence as an absence, never as a failure.
+
+python-garminconnect also offers `schedule_workout`, `unschedule_workout`,
+`upload_*_workout`, `update_workout`, `delete_workout` and
+`push_workout_to_device`. **None of them is reachable from this connector and
+none ever may be.** `tests/test_scheduled_workouts.py` parses this package's
+AST and fails the build if any appears, and separately asserts that every route
+the app exposes is a GET.
 
 ### Per-activity detail endpoints (Phase 6H-1A)
 

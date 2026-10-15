@@ -1,6 +1,8 @@
 """Localhost-only HTTP surface consumed by the Spring server.
 
-A handful of read-only endpoints, no login endpoint, no docs UI. The per-activity detail endpoints
+A handful of read-only endpoints, no login endpoint, no docs UI. Every endpoint here is a GET
+and there is no write counterpart to any of them - in particular ``/scheduled-workouts`` reads
+Garmin's workout calendar and has no companion that schedules, uploads or pushes one. The per-activity detail endpoints
 (`/activities/{id}/detail|splits|hr-zones|power-zones|samples`) also return Garmin's JSON untouched. ``/activities`` returns the Garmin
 activity-list items exactly as received (a JSON array), so all normalisation stays
 in the Spring ``GarminActivityMapper``.
@@ -29,6 +31,8 @@ LactateThresholdFetcher = Callable[[], dict[str, Any]]
 RecoveryFetcher = Callable[[str], dict[str, Any]]
 # (part, activity_id, max_chart) -> raw JSON of one activity detail part (Phase 6H-1A)
 ActivityPartFetcher = Callable[[str, int, int | None], Any]
+# (year, month) -> raw JSON of one month of Garmin's scheduled workouts (Phase 8B)
+ScheduledWorkoutsFetcher = Callable[[int, int], Any]
 
 
 def create_app(
@@ -36,6 +40,7 @@ def create_app(
     fetch_lactate_threshold: LactateThresholdFetcher,
     fetch_recovery: RecoveryFetcher,
     fetch_activity_part: ActivityPartFetcher,
+    fetch_scheduled_workouts: ScheduledWorkoutsFetcher,
 ) -> FastAPI:
     """Build the app around a ``fetch_activities(limit, start) -> list[dict]`` callable, a
     ``fetch_lactate_threshold() -> dict`` callable and a ``fetch_recovery(date) -> dict`` callable
@@ -123,6 +128,26 @@ def create_app(
         max_chart: int | None = Query(None, alias="maxChart", ge=1, le=MAX_CHART_SIZE),
     ) -> JSONResponse:
         return activity_part("samples", activity_id, max_chart)
+
+    @app.get("/scheduled-workouts")
+    def scheduled_workouts(
+        year: int = Query(..., ge=2000, le=2999),
+        month: int = Query(..., ge=1, le=12),
+    ) -> JSONResponse:
+        """One calendar month of Garmin's scheduled workouts, raw (Phase 8B). Read-only.
+
+        This answers "did the workout RunningAI published reach Garmin?" and nothing else. The
+        connector has no write counterpart and must never gain one: the Intervals.icu -> Garmin
+        push is Intervals.icu's own integration, outside this repository.
+        """
+        try:
+            result = fetch_scheduled_workouts(year, month)
+        except Exception as exc:  # noqa: BLE001 - everything becomes the error contract
+            err = translate(exc)
+            logger.warning("GET /scheduled-workouts failed: code=%s status=%d", err.code, err.http_status)
+            raise err from exc
+        logger.info("GET /scheduled-workouts year=%d month=%d -> ok", year, month)
+        return JSONResponse(content=result)
 
     @app.exception_handler(ConnectorError)
     def connector_error(_: Request, err: ConnectorError) -> JSONResponse:

@@ -173,6 +173,11 @@ class WorkoutDraftApprovalService(
         return ApprovedWorkoutDraft(store.toDomain(draft), approval.toDomain())
     }
 
+    /** The draft's current status, for a caller that needs to say WHY it is not approved. */
+    @Transactional(readOnly = true)
+    fun statusOf(id: Long): WorkoutDraftStatus =
+        drafts.findById(id).orElseThrow { WorkoutDraftNotFoundException(id) }.status
+
     private fun existing(draft: WorkoutDraftEntity): ApprovedWorkoutDraft {
         val id = requireNotNull(draft.id)
         val approval = approvals.findByDraftId(id)

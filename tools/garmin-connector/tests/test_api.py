@@ -73,13 +73,18 @@ def client(
     recovery_fetcher: FakeRecoveryFetcher,
 ) -> TestClient:
     return TestClient(
-        create_app(fetcher, lactate_threshold_fetcher, recovery_fetcher, _no_activity_parts),
+        create_app(fetcher, lactate_threshold_fetcher, recovery_fetcher, _no_activity_parts,
+                   _no_scheduled_workouts),
         raise_server_exceptions=False,
     )
 
 
 def _no_activity_parts(part: str, activity_id: int, max_chart: int | None = None):
     raise AssertionError("activity detail parts are covered in test_activity_parts.py")
+
+
+def _no_scheduled_workouts(year: int, month: int):
+    raise AssertionError("scheduled workouts are covered in test_scheduled_workouts.py")
 
 
 def test_health_is_up_regardless_of_garmin_login(client, fetcher):
