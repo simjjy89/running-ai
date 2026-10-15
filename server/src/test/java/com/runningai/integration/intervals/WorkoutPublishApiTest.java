@@ -26,7 +26,6 @@ import org.springframework.test.web.servlet.MockMvc;
 import java.time.LocalDate;
 import java.util.List;
 
-import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -113,9 +112,10 @@ class WorkoutPublishApiTest {
 
     @Test
     void getNeverPublishes() throws Exception {
-        // Not pinned to 405: the existing global catch-all currently answers unsupported methods with 500.
+        // Since Phase 8B the global handler answers an unsupported verb with 405; what this test
+        // guards is narrower and unchanged - a GET must never reach the publisher.
         mockMvc.perform(get("/api/v1/workout-publish"))
-                .andExpect(result -> assertThat(result.getResponse().getStatus() / 100).isNotEqualTo(2));
+                .andExpect(status().isMethodNotAllowed());
 
         verify(publisher, never()).publish(any(), any());
     }
