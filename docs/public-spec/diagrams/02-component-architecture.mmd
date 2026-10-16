@@ -1,0 +1,35 @@
+%% 컴포넌트 아키텍처와 포트 (03장, 04장)
+flowchart TB
+    subgraph PUB[" 공개 "]
+        CG["ChatGPT"]
+        W["Cloudflare Worker<br/>OAuth 중계"]
+        T["Cloudflare Tunnel<br/>Quick Tunnel — 호스트명 = 프로세스 수명"]
+    end
+
+    subgraph LOOP[" 127.0.0.1 전용 "]
+        GW["mcp-gateway :17910 운영 / :17911 테스트<br/>HOST 하드코딩 · deny-by-default 스코프"]
+        SP["RunningAI Spring :18080<br/>POST /mcp — 인증 없음, 공개 금지"]
+        CN["garmin-connector :8765<br/>전 라우트 GET · 자격증명 유일 보유"]
+        RL["external-relay :17845<br/>Bearer 게이트 · 캐시 240s · 20req/min"]
+        PG[("PostgreSQL 17 :5432<br/>loopback publish only")]
+        CL["claude CLI<br/>--tools '' --strict-mcp-config"]
+    end
+
+    WF["Garmin FR265 워치페이스"]
+    OPS["PowerShell 운영 CLI<br/>scripts/windows"]
+    WD["RunningAI.Watchdog<br/>감시 + 복구"]
+
+    CG --> W --> T
+    T --> GW --> SP
+    SP --> CN
+    SP --> PG
+    SP --> CL
+    RL --> SP
+    WF --> T --> RL
+    OPS --> SP
+    WD -.감시.-> GW
+    WD -.감시.-> SP
+    WD -.감시.-> CN
+    WD -.감시.-> RL
+    WD -.감시.-> PG
+    WD -."관측만 (재시작 금지)".-> T

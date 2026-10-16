@@ -1,0 +1,20 @@
+%% 부상 안전 게이트 (09장)
+flowchart TB
+    IN["워크아웃 생산 경로 6곳<br/>초안 생성 / 수정 / 승인 / 게시 미리보기 / 게시 / 레거시 게시<br/>(+ Phase 10 수정 적용)"] --> GET["InjuryStateService.current()<br/>ORDER BY recorded_at DESC, id DESC"]
+    GET --> POL["WorkoutSafetyPolicy.decide(latest, now) — 순수 함수"]
+    POL --> Q1{"보고가 있는가?"}
+    Q1 -->|없음| REST["REST only"]
+    Q1 -->|있음| Q2{"status == RESOLVED ?"}
+    Q2 -->|UNKNOWN / ACTIVE / 기타| REST
+    Q2 -->|RESOLVED| Q3{"recorded_at 이 staleness-hours(48h) 이내?"}
+    Q3 -->|아니오| REST
+    Q3 -->|예| ALLOW["훈련 허용"]
+
+    REST --> TXT["constraintText 제공 — 차단 중일 때만"]
+    ALLOW --> NULLTXT["constraintText = null"]
+    REST --> EX["비-REST 결과 요청 시<br/>WorkoutSafetyViolationException<br/>조용한 REST 치환 없음"]
+
+    ALLOW --> HIST["CoachTrainingContext.injuryHistory<br/>게이트 판정 + 상한 적용 원장<br/>latest / previousReports / omittedReportCount<br/>daysSinceLatestActiveReport (원장 전체 기준)"]
+    HIST --> PROMPT["프롬프트 규칙:<br/>RESOLVED 는 자가보고이자 데이터 허가이며<br/>의학적 완치 판정이 아니다"]
+
+    NOTE["시간 경과로 RESOLVED 를 추론하지 않는다<br/>append-only — 나중의 RESOLVED 가 이전 ACTIVE 를 지우지 않는다"]

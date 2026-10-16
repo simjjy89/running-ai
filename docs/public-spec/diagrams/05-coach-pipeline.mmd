@@ -1,0 +1,21 @@
+%% Claude CLI 코칭 파이프라인 (07장)
+flowchart TB
+    subgraph BUILD[" ① 컨텍스트 구성 — DB만, 외부 호출 0 "]
+        V{"running-ai.coach.context-version"}
+        V -->|V1| B1["TrainingContextBuilder"]
+        V -->|V2| B2["TrainingContextV2Builder<br/>dataCoverage / trainingLoad / trainingRhythm / recentActivities"]
+        B1 --> IH["InjuryHistoryContextBuilder (V1·V2 공통)"]
+        B2 --> IH
+    end
+    IH --> SER["CoachContextSerializer<br/>결정론적 canonical JSON + SHA-256"]
+    SER --> SZ{"max-snapshot-bytes 64 KiB"}
+    SZ -->|초과| ERR["TRAINING_CONTEXT_TOO_LARGE<br/>코치 호출 전 거부 · 조용한 절단 없음"]
+    SZ -->|통과| GATE["WorkoutSafetyGateService"]
+    GATE -->|차단| REST["REST only"]
+    GATE -->|허용| PB["ClaudeCoachPromptBuilder"]
+    PB --> CLI["ClaudeCliClient<br/>프로세스 1회 · stdin · 재시도 없음<br/>--tools '' --strict-mcp-config --setting-sources ''"]
+    CLI --> PR["ClaudeCoachResponseParser"]
+    PR --> VAL["WorkoutDraftValidator<br/>하드 안전만 — 수락 또는 거부, 재작성 없음"]
+    VAL -->|통과| DRAFT[("workout_draft V6/V8<br/>+ 컨텍스트 스냅샷 V20")]
+    VAL -->|위반| REJ["거부"]
+    CLI -->|실패| AIE["AI_COACH_reason<br/>대체 워크아웃 생성 없음"]

@@ -1,0 +1,40 @@
+%% ChatGPT → Worker → Tunnel → Gateway → Spring (06장)
+sequenceDiagram
+    autonumber
+    actor U as 러너
+    participant CG as ChatGPT
+    participant W as Cloudflare Worker
+    participant A as Auth0
+    participant T as Cloudflare Tunnel
+    participant GW as mcp-gateway :17910
+    participant SP as Spring POST /mcp
+
+    Note over CG,GW: ① 비인증 디스커버리 (MCP 인가 사양 + RFC 9728)
+    CG->>GW: tools/list (토큰 없음)
+    GW-->>CG: 401 + WWW-Authenticate resource_metadata
+    CG->>GW: GET 보호 리소스 메타데이터
+    GW-->>CG: resource / authorization_server / scopes_supported
+    Note right of GW: 자격증명 · 도구 목록 · 선수 데이터 모두 없음
+
+    Note over U,A: ② 인가 코드 흐름
+    CG->>W: 인가 시작
+    W->>A: 요청 (scope 필터링)
+    U->>A: 로그인 + 동의
+    A-->>W: 코드 → JWT
+    W-->>CG: access token
+
+    Note over CG,SP: ③ 매 호출
+    CG->>W: tools/call + Bearer
+    W->>T: 전달
+    T->>GW: 전달
+    GW->>GW: jose 검증 — 서명 / iss / aud / exp / sub
+    GW->>GW: 메서드 allowlist
+    GW->>GW: 도구 allowlist ∩ 토큰 스코프 (deny-by-default)
+    alt 전부 통과
+        GW->>SP: JSON-RPC 프록시
+        SP-->>GW: REST DTO
+        GW-->>CG: 결과
+    else 하나라도 실패
+        GW-->>CG: 401 / 403 / 503
+        Note right of GW: 백엔드 트래픽 0 — 거부가 먼저
+    end

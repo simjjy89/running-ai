@@ -1,0 +1,39 @@
+%% 3개 소스의 수집 흐름 (05장)
+flowchart TB
+    subgraph G[" Garmin — 센서 진실 "]
+        G1["커넥터 GET /activities"] --> G2[("activity_raw")]
+        G2 --> G3["순수 매퍼"] --> G4[("activity")]
+        G5["GET /detail /splits /hr-zones<br/>/power-zones /samples"] --> G6[("activity_raw_payload V11")]
+        G6 --> G7["순수 매퍼"]
+        G7 --> G8[("activity_detail / _lap / _zone / _sample V12")]
+        G7 --> G9[("activity_detail_collection V13/V14<br/>sample_completeness")]
+        GR["GET /recovery?date="] --> GR2[("garmin_recovery_daily V7")]
+        GR --> GR3[("garmin_recovery_collection V28")]
+    end
+
+    subgraph I[" Intervals.icu — 훈련부하 모델 "]
+        I1["IntervalsReadClient<br/>GET 전용, 쓰기 메서드 구조적 부재"] --> I2[("intervals_raw_payload V18")]
+        I2 --> I3["순수 매퍼"]
+        I3 --> I4[("activity_intervals_metrics 1:1")]
+        I3 --> I5[("intervals_fitness_daily<br/>ctl / atl / derived_form")]
+        I3 --> IM{"같은 날 활동과 매칭"}
+        IM -->|1건| IL[("activity_source_link V17")]
+        IM -->|2건+| IA["SKIPPED_AMBIGUOUS"]
+        IM -->|0건| IN["새 activity<br/>external_source=INTERVALS_ICU"]
+    end
+
+    subgraph S[" Strava — API 불가 과거의 유일 경로 "]
+        S1["로컬 아카이브 디렉터리"] --> S2["FIT SDK 디코드 전용"]
+        S2 --> S3{"apple_health_uuid<br/>= Intervals external_id (27/27)"}
+        S3 -->|일치| S4["기존 활동에 연결 + NULL만 보강"]
+        S3 -->|없음| S5{"±120s 시작시각 충돌?"}
+        S5 -->|있음| S6["SKIPPED_AMBIGUOUS"]
+        S5 -->|없음| S7["새 activity"]
+        S4 --> S8[("strava_activity_import V26<br/>SHA-256 = 멱등 키")]
+    end
+
+    G4 --> AN["RunningActivityAnalysisService"]
+    IN --> AN
+    S7 --> AN
+    S4 --> AN
+    AN --> AS[("activity_analysis V16/V22/V24")]

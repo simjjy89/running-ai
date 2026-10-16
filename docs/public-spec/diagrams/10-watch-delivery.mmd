@@ -1,0 +1,26 @@
+%% 워치페이스 전달 경로 (11장)
+sequenceDiagram
+    autonumber
+    participant W as FR265 워치페이스
+    participant T as Cloudflare Tunnel
+    participant R as external-relay :17845
+    participant SP as RunningAI :18080
+    participant IC as Intervals.icu
+    participant LEG as 레거시 today_plan.json
+
+    W->>T: GET /today-workout + Bearer
+    T->>R: 전달
+    R->>R: 토큰 검증 · 레이트리밋 20/min · 캐시 240s
+    R->>SP: GET /api/v1/today-workout?date=
+    alt 승인된 계획 존재
+        SP-->>R: date / status(HAS_PLAN|REST) / source(APPROVED_DRAFT)<br/>workoutType / totalDurationMinutes / repetitions<br/>approvedAt / published / stale
+        Note right of SP: title 은 계약에서 제외<br/>코치 자유 텍스트는 이 경계를 넘지 않는다
+        R->>R: 날짜 불일치 또는 stale → 폐기
+        R->>R: 타입 + 시간으로 라벨 직접 생성
+    else NO_PLAN
+        Note right of R: NO_PLAN 은 결정이 아니다 → 폴백
+        R->>IC: Intervals 이벤트 조회
+        R->>LEG: 레거시 상태 파일
+    end
+    R-->>W: {date, status, label}
+    Note over W,R: 와이어 계약은 한 글자도 바꾸지 않는다

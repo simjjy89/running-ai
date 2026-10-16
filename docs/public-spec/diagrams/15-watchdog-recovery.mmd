@@ -1,0 +1,26 @@
+%% 워치독 복구 계획 (15장)
+flowchart TB
+    T["워치독 틱"] --> P["전 구성요소 프로브"]
+
+    P --> C1{"핵심 체인 순회<br/>docker → postgres → connector → spring"}
+    C1 -->|UP| NEXT["다음 구성요소"]
+    C1 -->|"UNKNOWN + DEPENDENCY_DOCKER"| LATER["Docker 복구 후 판정"]
+    C1 -->|장기 락아웃| BLK["LOCKED_OUT<br/>단기 예산 확인조차 하지 않음"]
+    C1 -->|선행 미준비| DEP["DEPENDENCY_NOT_READY"]
+    C1 -->|복구 대상| BUD{"10분 창 3회 예산 남음?"}
+    BUD -->|예| RS["재시작"]
+    BUD -->|아니오| SKIP["이번 틱 건너뜀"]
+
+    P --> IND["독립 구성요소 별도 계획 패스<br/>external-relay · mcp-gateway<br/>예산 · 락아웃은 체인과 공유"]
+    IND --> GWID["게이트웨이 식별: PID 파일 없음<br/>① 런처 지정 포트의 리스닝 소켓<br/>② 커맨드라인 마커로 소유 증명<br/>복구 = Start-ScheduledTask<br/>런처/작업 없으면 거부 — 즉흥 생성 금지"]
+
+    P --> OBS["관측 전용 — tunnel<br/>재시작 금지 (호스트명이 바뀌어 Worker 무효화)<br/>유용한 출력은 tunnel.startedAtUtc"]
+    OBS --> DEG["DEGRADED 가능 · 재시작 이력/예산/락아웃 없음"]
+
+    RS --> W["watchdog-status.json 원자적 기록"]
+    IND --> W
+    DEG --> W
+    SKIP --> W
+    BLK --> W
+
+    W --> NOTE["24시간 창 6회 실패 → 락아웃<br/>해제는 clear-watchdog-lockout.ps1 (사람)"]

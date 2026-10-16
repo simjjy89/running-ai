@@ -1,0 +1,44 @@
+%% 승인 초안 게시 시퀀스 (08장)
+sequenceDiagram
+    autonumber
+    actor U as 러너
+    participant PS as ApprovedWorkoutDraftPublishService
+    participant SW as 스위치 / PublishingModeGuard
+    participant GATE as 부상 게이트
+    participant MAP as WorkoutDraftStructuredWorkoutMapper
+    participant REN as IntervalsWorkoutRenderer
+    participant PUB as IntervalsWorkoutPublisher
+    participant IC as Intervals.icu
+    participant LED as workout_draft_publish_attempt V29
+    participant OK as workout_draft_publication V10
+
+    U->>PS: GET /{id}/publish-preview (읽기 전용)
+    PS->>GATE: 게이트 확인
+    PS->>MAP: 전송 매핑 (반복 전개, 총량 재검산)
+    PS->>REN: 결정론적 렌더
+    REN-->>U: 미리보기 + 게시 가능성 판정
+
+    U->>PS: POST /{id}/publish
+    PS->>SW: RUNNING_AI_DRAFT_PUBLISHING_ENABLED?
+    PS->>PS: 초안별 단일 비행 lock
+    alt 이미 게시됨
+        PS-->>U: 저장된 결과 (외부 호출 0회)
+    end
+    PS->>GATE: 부상 게이트 — 네트워크 호출 전
+    alt REST 초안
+        PS->>OK: SKIPPED_REST_DAY (렌더러·게시자 0회)
+    else
+        PS->>LED: 시도 기록 (append-only)
+        PS->>PUB: publish(structuredWorkout, date)
+        PUB->>IC: GET 이벤트 목록 (external_id 마커)
+        alt 마커 없음
+            PUB->>IC: POST — CREATED
+        else 텍스트 다름
+            PUB->>IC: PUT — UPDATED (같은 event id)
+        else 텍스트 동일
+            PUB-->>PS: NO_CHANGE (쓰기 0회)
+        end
+        PUB->>IC: GET readback 검증
+        PS->>OK: PUBLISHED + event id + verified
+    end
+    Note over PUB,IC: 응답이 유실되어도 re-POST 하지 않는다<br/>re-list, never re-POST

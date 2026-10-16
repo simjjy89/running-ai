@@ -1,0 +1,27 @@
+%% 설치 흐름 — 현재(실선) + 제안(점선) (13장)
+flowchart TB
+    S1["① git clone"] --> S2["② .env.example → .env<br/>비밀번호 · API 키 기입"]
+    S2 --> S3["③ docker compose up -d<br/>PostgreSQL 17 · 127.0.0.1:5432"]
+    S3 --> S4["④ gradlew clean test<br/>H2 + Flyway 실제 적용 · DB/네트워크 불필요"]
+    S4 --> S5["⑤ gradlew bootRun<br/>Flyway 적용 + 기본 athlete 생성"]
+    S5 --> S6["⑥ GET /api/v1/health"]
+    S6 --> S7["⑦ Garmin 커넥터 기동 + 로그인"]
+    S7 --> S8["⑧ POST /api/v1/garmin/sync 수동 1회"]
+    S8 --> O1["⑨ 선택 — Intervals 키 → 게시"]
+    S8 --> O2["⑩ 선택 — MCP 게이트웨이 + OAuth → ChatGPT"]
+    S8 --> O3["⑪ 선택 — 릴레이 + 터널 → 워치페이스"]
+    S8 --> O4["⑫ 선택 — 워치독 예약작업 등록"]
+
+    S8 --> D2["D2 필수 — 부상 보고 1건<br/>보고가 없으면 게이트는 영원히 REST only"]
+
+    subgraph PROP[" 제안 — Phase 14 "]
+        P1["./setup 대화형"] -.-> P2{"티어 선택"}
+        P2 -.->|T1 체험| P3["compose profile: core + 합성 시드"]
+        P2 -.->|T2 개인| P4["core + connector + Intervals + Claude CLI"]
+        P2 -.->|T3 연동| P5["T2 + gateway/relay + Auth0 + 터널 체크리스트"]
+        P3 -.-> P6["preflight 검증"]
+        P4 -.-> P6
+        P5 -.-> P6
+        P6 -.->|실패| P7["빠진 항목 이름을 밝히고 거부<br/>추측해서 고치지 않는다"]
+        P6 -.->|통과| P8["health 200 + 다음 단계 안내"]
+    end

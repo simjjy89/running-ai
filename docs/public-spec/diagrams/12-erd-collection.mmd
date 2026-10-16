@@ -1,0 +1,55 @@
+%% 수집 · 분석 · 관측 데이터 모델 (12장)
+erDiagram
+    activity ||--o{ activity_raw_payload : "원본 파트별 V11"
+    activity ||--o| activity_detail : "V12"
+    activity ||--o{ activity_lap : "V12 + V15"
+    activity ||--o{ activity_zone : "V12 — Garmin 전용"
+    activity ||--o{ activity_sample : "V12"
+    activity ||--o{ activity_detail_collection : "V13 + V14"
+    activity ||--o| activity_intervals_metrics : "V18"
+    activity_analysis ||--o{ activity_analysis_interval_group : "V16"
+    activity_analysis_interval_group ||--o{ activity_analysis_interval : "V16"
+    athlete ||--o{ intervals_fitness_daily : "V18"
+    athlete ||--o{ garmin_recovery_daily : "V7"
+    athlete ||--o{ garmin_recovery_collection : "V28 — 순수 관측"
+    athlete ||--o| garmin_sync_state : "V4 — 성공만"
+    athlete ||--o| garmin_sync_attempt : "V27 + V30 — 순수 관측"
+    athlete ||--o{ intervals_activity_import : "V25"
+    athlete ||--o{ strava_activity_import : "V26"
+    athlete ||--o{ historical_backfill_run : "V19"
+    historical_backfill_run ||--o{ historical_backfill_activity : "체크포인트"
+
+    activity_lap {
+        integer lap_index "1-based"
+        varchar intensity_type "V15 — WARMUP/ACTIVE/RECOVERY/COOLDOWN"
+        integer workout_step_index "V15 — 그룹 판정 근거"
+        jsonb extra_metrics "미지 키 + _source 표시"
+    }
+    activity_detail_collection {
+        varchar part
+        varchar status "COMPLETE / PARTIAL / FAILED / EMPTY"
+        integer source_total_metrics_count "완전성의 권위"
+        varchar sample_completeness "FULL / DOWNSAMPLED / UNKNOWN"
+    }
+    activity_analysis {
+        varchar analysis_version "출력 계약"
+        integer analysis_engine_revision "V24 — 로직"
+        varchar analysis_input_digest "V24 — 입력 SHA-256, 타임스탬프 없음"
+        varchar analysis_status "데이터의 상태, 세션이 아님"
+    }
+    garmin_sync_attempt {
+        varchar status "STARTED / SUCCESS / PARTIAL / FAILED / INTERRUPTED"
+        integer consecutive_failure_count
+        integer consecutive_partial_count "V30"
+        timestamptz last_failure_at "성공 후에도 살아남음"
+    }
+    garmin_recovery_collection {
+        date day
+        varchar status "STORED / NO_DATA / FAILED"
+        varchar hrv_outcome "outcome — status 아님"
+    }
+    strava_activity_import {
+        varchar file_sha256 "멱등 키"
+        boolean laps_written
+        varchar outcome
+    }

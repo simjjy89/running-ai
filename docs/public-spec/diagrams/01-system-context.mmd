@@ -1,0 +1,43 @@
+%% RunningAI — 시스템 컨텍스트 (01장, 03장)
+flowchart LR
+    subgraph OUT[" 외부 서비스 "]
+        GC["Garmin Connect<br/>읽기 전용"]
+        IC["Intervals.icu<br/>읽기 + 쓰기"]
+        SA["Strava 내보내기 아카이브<br/>로컬 파일, 읽기"]
+    end
+
+    subgraph PC[" 사용자 PC — 자가 호스팅 "]
+        CONN["Garmin Connector<br/>Python · 127.0.0.1:8765"]
+        SPRING["RunningAI Server<br/>Spring Boot · 127.0.0.1:18080"]
+        PG[("PostgreSQL 17<br/>127.0.0.1:5432")]
+        CLAUDE["Claude Code CLI<br/>로컬 프로세스"]
+        GW["MCP Gateway<br/>Node · 127.0.0.1:17910"]
+        RELAY["External Relay<br/>Node · 127.0.0.1:17845"]
+    end
+
+    subgraph EDGE[" 공개 경계 "]
+        TUNNEL["Cloudflare Tunnel"]
+        WORKER["Cloudflare Worker<br/>OAuth 중계"]
+    end
+
+    USER(("러너"))
+    CHATGPT["ChatGPT"]
+    WATCH["Garmin FR265<br/>워치페이스"]
+
+    GC -->|GET only| CONN
+    CONN --> SPRING
+    IC <--> SPRING
+    SA --> SPRING
+    SPRING <--> PG
+    SPRING -->|stdin 프롬프트| CLAUDE
+    GW --> SPRING
+    RELAY --> SPRING
+    TUNNEL --> GW
+    TUNNEL --> RELAY
+    WORKER --> TUNNEL
+    CHATGPT --> WORKER
+    USER --> CHATGPT
+    USER -->|REST / PowerShell| SPRING
+    IC -.->|Intervals.icu 자체 연동| GC
+    GC -.->|시계 동기화| WATCH
+    WATCH -.->|오늘의 계획 조회| TUNNEL

@@ -1,0 +1,31 @@
+%% 제안 — Phase 13 모델 A: 프로세스별 완전 격리 (14장, 전부 DESIGN)
+flowchart LR
+    subgraph U1[" 사용자 A — OS 계정 A "]
+        A_PG[("DB running_ai_a<br/>:5432")]
+        A_SP["Spring :18080"]
+        A_CN["커넥터 :8765<br/>Garmin 계정 A"]
+        A_GW["게이트웨이 :17910<br/>ALLOWED_SUB = A"]
+        A_CL["Claude CLI — A의 세션"]
+        A_EN[".env — INTERVALS_API_KEY(A)"]
+    end
+    subgraph U2[" 사용자 B — OS 계정 B "]
+        B_PG[("DB running_ai_b<br/>:5433")]
+        B_SP["Spring :18081"]
+        B_CN["커넥터 :8766<br/>Garmin 계정 B"]
+        B_GW["게이트웨이 :17912<br/>ALLOWED_SUB = B"]
+        B_CL["Claude CLI — B의 세션"]
+        B_EN[".env — INTERVALS_API_KEY(B)"]
+    end
+    AUTH["Auth0 — 공유 테넌트<br/>사용자마다 다른 sub"]
+    AUTH --> A_GW
+    AUTH --> B_GW
+    A_SP --- A_PG
+    A_SP --- A_CN
+    A_SP --- A_CL
+    A_GW --> A_SP
+    B_SP --- B_PG
+    B_SP --- B_CN
+    B_SP --- B_CL
+    B_GW --> B_SP
+    A_GW -. "B의 토큰은 sub 불일치로 거부 — 교차 접근 구조적 불가" .-x B_SP
+    NOTE["데이터 모델 변경 불필요 — 모든 테이블이 이미 athlete_id 보유<br/>게이트웨이 코드 변경 불필요 — ALLOWED_SUB 단일 주체 제약이 곧 격리 수단"]

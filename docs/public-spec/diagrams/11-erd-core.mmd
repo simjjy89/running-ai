@@ -1,0 +1,67 @@
+%% 핵심 데이터 모델 — 선수 · 활동 · 워크아웃 생명주기 (12장)
+erDiagram
+    athlete ||--o{ activity : owns
+    athlete ||--o| athlete_intensity_profile : has
+    athlete ||--o{ athlete_intensity_profile_history : "변경 이력"
+    athlete ||--o{ injury_report : "자가보고 append-only"
+    athlete ||--o{ workout_draft : "초안"
+    activity ||--o| activity_raw : "원본 요약"
+    activity ||--o| activity_analysis : "RunningAI 파생"
+    activity ||--o{ activity_source_link : "외부 신원"
+    workout_draft ||--o| workout_draft_approval : "승인"
+    workout_draft ||--o| workout_draft_publication : "게시 성공"
+    workout_draft ||--o{ workout_draft_publish_attempt : "시도 원장"
+    workout_draft_publication ||--o{ published_workout_revision : "게시 후 수정"
+    published_workout_revision ||--o| published_workout_revision_application : "적용 성공"
+    published_workout_revision ||--o{ published_workout_revision_attempt : "적용 시도"
+
+    athlete {
+        bigint id PK
+        varchar name UK
+        varchar timezone
+    }
+    activity {
+        bigint id PK
+        bigint athlete_id FK
+        varchar external_source "GARMIN / INTERVALS_ICU / STRAVA"
+        varchar external_id
+        varchar activity_type
+        timestamptz started_at
+        integer duration_seconds
+        double distance_meters
+    }
+    injury_report {
+        bigint id PK
+        varchar status "ACTIVE / IMPROVING / RESOLVED / UNKNOWN"
+        timestamptz recorded_at "최신 = recorded_at DESC, id DESC"
+    }
+    workout_draft {
+        bigint id PK
+        varchar draft_group_id
+        integer version
+        date date
+        varchar status "DRAFT / APPROVED / SUPERSEDED / PUBLISHED"
+        jsonb context_snapshot "V20"
+        varchar context_sha256 "V20"
+    }
+    workout_draft_approval {
+        bigint athlete_id "UNIQUE athlete_id + workout_date"
+        date workout_date
+    }
+    workout_draft_publication {
+        bigint draft_id "UNIQUE"
+        varchar intervals_event_id
+        boolean verified
+        varchar operation "CREATED / UPDATED / NO_CHANGE / SKIPPED_REST_DAY"
+    }
+    workout_draft_publish_attempt {
+        boolean external_write_attempted
+        boolean remote_state_certain "타임아웃이면 false"
+        varchar failure_code "코드만"
+    }
+    published_workout_revision {
+        integer revision_number
+        varchar status "PROPOSED / APPROVED / APPLIED / SUPERSEDED"
+        bigint open_slot "UNIQUE + CHECK — 부분 인덱스 아님"
+        varchar base_text_sha256
+    }
